@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Core
 import Config
+import IPC
 import Platform
 
 /// Central coordinator for ScrollWM.
@@ -18,6 +19,9 @@ public final class WindowManager: @unchecked Sendable {
 
     /// Gesture capture for trackpad scrolling.
     private var gestureCapture: GestureCapture?
+
+    /// IPC socket server.
+    private var ipcServer: SocketServer?
 
     /// Current configuration.
     public private(set) var config: ScrollWMConfig
@@ -184,6 +188,16 @@ public final class WindowManager: @unchecked Sendable {
         watcher.start()
         self.configWatcher = watcher
 
+        // IPC socket server
+        let server = SocketServer()
+        server.onCommand = { [weak self] command in
+            guard let self = self else { return ScrollWMResponse(success: false, message: "Shutting down") }
+            return self.handleIPCCommand(command)
+        }
+        let ipcOk = server.start()
+        self.ipcServer = server
+        print("[WM] IPC server: \(ipcOk)"); fflush(stdout)
+
         // Periodic window health check — detect closed windows that AX observer missed.
         // kAXUIElementDestroyedNotification is unreliable for some apps.
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -218,28 +232,12 @@ public final class WindowManager: @unchecked Sendable {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self = self, !self.isPaused else { return }
 
-                // Re-discover any windows we missed
-                for (pid, app) in self.tracker.apps {
-                    let newWindows = discoverWindows(pid: pid)
-                    for window in newWindows {
-                        if self.tracker.windows[window.windowID] == nil {
-                            let props = window.getProperties()
-                            if !props.isMinimized && !props.isFullscreen {
-                                let classification = classifyWindow(props)
-                                if classification == .tile {
-                                    self.tracker.registerTrackedWindow(window)
-                                    app.observeWindow(window.element)
-                                    self.stripController.addWindow(window, app: app)
-                                }
-                            }
-                        }
-                    }
+                let adopted = self.adoptUnmanagedWindows()
+                if adopted {
+                    self.stripController.clearCommittedFrames()
+                    self.stripController.applyLayout()
                 }
-
-                // Clear committed frames and force relayout
-                self.stripController.clearCommittedFrames()
-                self.stripController.applyLayout()
-                print("[ScrollWM] Startup retry @\(delay)s: \(self.stripController.strip.columns.count) cols, applied")
+                print("[ScrollWM] Startup retry @\(delay)s: \(self.stripController.strip.columns.count) cols")
                 fflush(stdout)
             }
         }
@@ -259,6 +257,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Stop subsystems
         configWatcher?.stop()
+        ipcServer?.stop()
         stripController.frameLoop?.stop()
         gestureCapture?.stop()
         hotkeyManager.stop()
@@ -277,6 +276,8 @@ public final class WindowManager: @unchecked Sendable {
             restoreAllWindows()
         } else {
             print("[ScrollWM] Resumed")
+            // Re-discover any windows that aren't in the strip
+            adoptUnmanagedWindows()
             // Clear committed frames so the next applyLayout reapplies everything
             stripController.clearCommittedFrames()
             stripController.applyLayout()
@@ -503,6 +504,7 @@ public final class WindowManager: @unchecked Sendable {
 
     /// Discover on-screen windows not currently in the strip and add them.
     /// Returns true if any windows were adopted.
+    @discardableResult
     private func adoptUnmanagedWindows() -> Bool {
         let stripWindowIDs = Set(stripController.windowMap.values.map(\.windowID))
         var adopted = false
@@ -599,6 +601,66 @@ public final class WindowManager: @unchecked Sendable {
             let _ = window.setFrame(frame)
             x += colWidth
             if x >= wa.maxX { x = wa.minX }
+        }
+    }
+
+    // MARK: - IPC Command Handling
+
+    private func handleIPCCommand(_ command: ScrollWMCommand) -> ScrollWMResponse {
+        switch command {
+        case .focusLeft:
+            stripController.focusLeft()
+            return ScrollWMResponse(success: true)
+        case .focusRight:
+            stripController.focusRight()
+            return ScrollWMResponse(success: true)
+        case .moveColumnLeft:
+            stripController.moveColumnLeft()
+            return ScrollWMResponse(success: true)
+        case .moveColumnRight:
+            stripController.moveColumnRight()
+            return ScrollWMResponse(success: true)
+        case .cycleWidthPreset:
+            stripController.cycleWidthPreset()
+            return ScrollWMResponse(success: true)
+        case .toggleFullWidth:
+            stripController.toggleFullWidth()
+            return ScrollWMResponse(success: true)
+        case .toggleFloating:
+            // TODO: implement
+            return ScrollWMResponse(success: false, message: "Not implemented yet")
+        case .closeWindow:
+            // TODO: implement
+            return ScrollWMResponse(success: false, message: "Not implemented yet")
+        case .listWindows:
+            let windows = stripController.windowMap.map { (tileID, window) -> [String: Any] in
+                ["id": tileID.rawValue, "pid": window.pid, "title": window.getTitle() ?? ""]
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: windows),
+               let json = String(data: data, encoding: .utf8) {
+                return ScrollWMResponse(success: true, data: json)
+            }
+            return ScrollWMResponse(success: true, data: "[]")
+        case .getLayout:
+            let cols = stripController.strip.columns.enumerated().map { (i, col) -> [String: Any] in
+                [
+                    "index": i,
+                    "tiles": col.tiles.map(\.rawValue),
+                    "width": stripController.strip.columnData[i].cachedWidth,
+                    "active": i == stripController.strip.activeColumnIndex
+                ]
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: cols),
+               let json = String(data: data, encoding: .utf8) {
+                return ScrollWMResponse(success: true, data: json)
+            }
+            return ScrollWMResponse(success: true, data: "[]")
+        case .recover:
+            restoreAllWindows()
+            return ScrollWMResponse(success: true, message: "Windows restored")
+        case .quit:
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+            return ScrollWMResponse(success: true, message: "Quitting")
         }
     }
 }

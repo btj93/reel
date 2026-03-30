@@ -43,7 +43,7 @@ let package = Package(
         // WindowManager: orchestration
         .target(
             name: "WindowManager",
-            dependencies: ["Core", "Platform", "Config"],
+            dependencies: ["Core", "Platform", "Config", "IPC"],
             path: "Sources/WindowManager"
         ),
 
