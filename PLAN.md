@@ -15,6 +15,7 @@ Build a macOS window manager replicating **niri's signature feature**: windows o
 **Swift** — 80% of code is Apple API interop. First-class bridging for AXUIElement, CGEventTap, CADisplayLink. AeroSpace validates this at scale.
 
 **Build**: `swift-bundler` (no Xcode IDE needed)
+
 ```bash
 brew install stackotter/tap/swift-bundler
 swift bundler build --product ScrollWM
@@ -203,15 +204,19 @@ Global `animations.off` config option + respect macOS "Reduce motion" accessibil
 ## Off-Screen Window Handling
 
 ### Primary: Sliver (1px visible at screen edge)
+
 ~90% reliable for well-behaved Cocoa apps.
 
 ### Fallback: Corner Hiding
+
 For apps that fight sliver positioning. Move to `(-10000, -10000)`.
 
 ### Re-park handler
+
 On `NSApplicationDidChangeScreenParametersNotification` (monitor plug/unplug, resolution change): immediately cancel animations, re-enumerate displays, rebuild strip from current window positions.
 
 ### Mission Control consideration
+
 Sliver-parked windows look broken in Mission Control. **Mitigation**: On Mission Control enter (detected via AX observer on Dock.app), temporarily move slivers to corner-hiding. Restore on Mission Control exit.
 
 ---
@@ -219,20 +224,25 @@ Sliver-parked windows look broken in Mission Control. **Mitigation**: On Mission
 ## Crash Recovery (Critical — new section from reviews)
 
 ### State Persistence
+
 Write `~/.local/state/scrollwm/window-state.json` containing `[{cgWindowID, appBundleID, lastKnownFrame}]`.
 
 **Write triggers**: scroll settle, window add/remove, every 5 seconds (coalesced timer). NOT every frame.
 
 ### Signal Handlers
+
 `SIGTERM`, `SIGINT` → restore all windows to `lastKnownFrame`, then exit.
 
 ### On Launch
+
 Check for stale state file. If windows exist at sliver/corner positions matching state entries, restore to `lastKnownFrame`.
 
 ### CLI Recovery Command
+
 `scrollwm recover` — reads state file, moves all windows back on-screen. Works even if main app is dead.
 
 ### App Nap Prevention
+
 `ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: "Window management")` — prevents macOS from throttling ScrollWM when it has no visible windows.
 
 ---
@@ -240,20 +250,25 @@ Check for stale state file. If windows exist at sliver/corner positions matching
 ## System Integration (new section from reviews)
 
 ### Cmd+Tab Re-layout
+
 Observe `kAXApplicationActivatedNotification`. When an app is activated (e.g., via Cmd+Tab), find its window in the strip and scroll to make it visible.
 
 ### Fullscreen Lifecycle
+
 - Window enters macOS fullscreen → detect via `kAXFullScreenAttribute` change → remove from strip, save `viewOffsetToRestore`
 - Window exits fullscreen → re-add to strip at saved position, restore view offset
 - Config option to block native fullscreen and substitute full-width-column
 
 ### Stage Manager Detection
+
 On launch, check `defaults read com.apple.WindowManager GloballyEnabled`. Warn user if Stage Manager is active (it fights the WM).
 
 ### Secure Input Mode
+
 When a password field is focused, macOS disables all CGEventTaps. Hotkeys stop working. This is unfixable — document it. Poll `CGEventTapIsEnabled()` every 2 seconds, re-enable if disabled.
 
 ### CGEventTap Health Monitor
+
 If tap is disabled by macOS (slow callback, permission revoked), detect and re-enable. Show notification if re-enable fails 3 times.
 
 ---
@@ -362,18 +377,17 @@ default_column_width = { proportion = 0.67 }
 
 **Deliverable**: Focus changes animate with spring physics → rapid keypresses compound velocity → trackpad scroll with momentum + snap → rubber-band at edges → `animation_enabled = false` reverts to Phase 1 behavior.
 
-### Phase 3: Config, Workspaces, IPC, Multi-monitor
+### Phase 3: Config, IPC, Multi-monitor
 
 | # | Task |
 |---|---|
 | 1 | TOML config parsing (TOMLKit), validation, hot-reload via file watcher |
 | 2 | Window rules: regex `app_id`/`title` matching, `open_floating`, `default_column_width` |
-| 3 | Virtual workspaces (9+) with corner-hide switching |
-| 4 | Unix socket IPC server + `scrollwm msg` CLI |
-| 5 | Multi-monitor: independent strip per monitor, move-window-to-monitor |
-| 6 | Struts config (for SketchyBar etc.) |
-| 7 | `scrollwm recover` CLI command |
-| 8 | Pause/resume toggle in menu bar |
+| 3 | Unix socket IPC server + `scrollwm msg` CLI |
+| 4 | Multi-monitor: independent strip per monitor, move-window-to-monitor |
+| 5 | Struts config (for SketchyBar etc.) |
+| 6 | `scrollwm recover` CLI command |
+| 7 | Pause/resume toggle in menu bar |
 
 ### Phase 4: Nice-to-Haves
 
