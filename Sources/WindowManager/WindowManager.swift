@@ -36,8 +36,6 @@ public final class WindowManager: @unchecked Sendable {
     /// Current configuration.
     public private(set) var config: ScrollWMConfig
 
-    /// Config file watcher for hot-reload.
-    private var configWatcher: ConfigWatcher?
 
     /// State persistence for crash recovery.
     private let stateFilePath: String
@@ -201,17 +199,7 @@ public final class WindowManager: @unchecked Sendable {
             self?.persistState()
         }
 
-        // Config hot-reload watcher
-        let watcher = ConfigWatcher()
-        watcher.onConfigChanged = { [weak self] newConfig in
-            guard let self = self else { return }
-            self.applyConfig(newConfig)
-            self.stripController.strip.recalculateWidths()
-            self.stripController.clearCommittedFrames()
-            self.stripController.applyLayout()
-        }
-        watcher.start()
-        self.configWatcher = watcher
+        print("[WM] Config loaded from \(ScrollWMConfig.configPath)"); fflush(stdout)
 
         // IPC socket server
         let server = SocketServer()
@@ -281,7 +269,6 @@ public final class WindowManager: @unchecked Sendable {
         persistState()
 
         // Stop subsystems
-        configWatcher?.stop()
         ipcServer?.stop()
         stripController.frameLoop?.stop()
         gestureCapture?.stop()
@@ -307,6 +294,46 @@ public final class WindowManager: @unchecked Sendable {
             stripController.clearCommittedFrames()
             stripController.applyLayout()
         }
+    }
+
+    /// Reload config from disk and apply to all subsystems.
+    public func reloadConfig() {
+        let (newConfig, error) = ScrollWMConfig.load()
+        if let err = error {
+            print("[WM] Config reload error: \(err)")
+            fflush(stdout)
+            return
+        }
+
+        config = newConfig
+
+        // Apply to strip
+        stripController.strip.gap = config.gap
+        stripController.strip.defaultWidth = config.defaultWidth
+        stripController.strip.widthPresets = config.widthPresets
+        stripController.strip.focusMode = config.focusMode
+        stripController.animationEnabled = config.animationEnabled
+
+        // Apply to hotkeys
+        hotkeyManager.registerFromConfig(config.keybindings)
+
+        // Apply to tracker rules
+        tracker.rules = config.rules.map { rule in
+            WindowRule(
+                appID: rule.appID,
+                appIDRegex: rule.appIDRegex,
+                titleRegex: rule.titleRegex,
+                classification: rule.floating ? .float : .tile
+            )
+        }
+
+        // Relayout
+        stripController.strip.recalculateWidths()
+        stripController.clearCommittedFrames()
+        stripController.applyLayout()
+
+        print("[WM] Config reloaded successfully")
+        fflush(stdout)
     }
 
     // MARK: - Event Handling

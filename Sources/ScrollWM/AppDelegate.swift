@@ -82,6 +82,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: "p"
             )
             menu.addItem(pauseItem)
+            menu.addItem(NSMenuItem(title: "Reload Config", action: #selector(reloadConfig), keyEquivalent: "r"))
             menu.addItem(NSMenuItem.separator())
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         }
@@ -105,6 +106,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePause() {
         windowManager?.togglePause()
         setupMenuBar()
+    }
+
+    @objc private func reloadConfig() {
+        windowManager?.reloadConfig()
     }
 
     @objc private func quit() {
