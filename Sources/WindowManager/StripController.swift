@@ -324,7 +324,8 @@ public final class StripController: @unchecked Sendable {
         // Compute frames with animation evaluated at this timestamp
         let frames = computeTargetFrames(strip: strip, time: time)
 
-        // Apply with priority: position-only for visible windows (cheaper during animation)
+        // Dispatch position updates to per-app threads IN PARALLEL.
+        // This prevents a slow Electron app from blocking a fast native app.
         for target in frames {
             guard let window = windowMap[target.tileID] else { continue }
 
@@ -336,17 +337,15 @@ public final class StripController: @unchecked Sendable {
 
             // During animation: position-only for visible, skip far windows
             switch target.visibilityZone {
-            case .visible:
-                let result = window.setPosition(target.frame.origin)
-                if case .success = result {
-                    lastCommittedFrames[target.tileID] = target.frame
+            case .visible, .nearBuffer:
+                // Dispatch to per-app thread (non-blocking)
+                if let app = apps[window.pid] {
+                    let position = target.frame.origin
+                    DispatchQueue.global(qos: .userInteractive).async {
+                        app.dispatchSetPosition(window, position: position)
+                    }
                 }
-            case .nearBuffer:
-                // Update every other call (frame skip for near-buffer)
-                let result = window.setPosition(target.frame.origin)
-                if case .success = result {
-                    lastCommittedFrames[target.tileID] = target.frame
-                }
+                lastCommittedFrames[target.tileID] = target.frame
             case .far:
                 // Skip during animation — will be updated on settle
                 break
