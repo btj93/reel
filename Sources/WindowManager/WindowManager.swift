@@ -451,9 +451,13 @@ public final class WindowManager: @unchecked Sendable {
         case .toggleFullWidth:
             stripController.toggleFullWidth()
         case .toggleFloating:
-            break  // TODO: Implement float toggle
+            if let window = stripController.toggleFloating() {
+                // Window is now floating — it keeps its current position
+                print("[WM] Window \(window.tileID.rawValue) is now floating")
+                fflush(stdout)
+            }
         case .closeWindow:
-            break  // TODO: Implement close
+            stripController.closeActiveWindow()
         case .workspace:
             break  // TODO: Phase 3
         case .spawnTerminal:
@@ -627,11 +631,11 @@ public final class WindowManager: @unchecked Sendable {
             stripController.toggleFullWidth()
             return ScrollWMResponse(success: true)
         case .toggleFloating:
-            // TODO: implement
-            return ScrollWMResponse(success: false, message: "Not implemented yet")
+            let window = stripController.toggleFloating()
+            return ScrollWMResponse(success: true, message: window != nil ? "Toggled floating" : "No active window")
         case .closeWindow:
-            // TODO: implement
-            return ScrollWMResponse(success: false, message: "Not implemented yet")
+            stripController.closeActiveWindow()
+            return ScrollWMResponse(success: true)
         case .listWindows:
             let windows = stripController.windowMap.map { (tileID, window) -> [String: Any] in
                 ["id": tileID.rawValue, "pid": window.pid, "title": window.getTitle() ?? ""]

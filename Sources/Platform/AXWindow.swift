@@ -218,6 +218,18 @@ public final class AXWindow: @unchecked Sendable {
         return .failure(.from(err))
     }
 
+    /// Close the window by pressing its close button via AX.
+    public func close() -> AXResult<Void> {
+        var value: AnyObject?
+        let err = AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &value)
+        guard err == .success, let closeButton = value else {
+            return .failure(.from(err == .success ? .failure : err))
+        }
+        let pressErr = AXUIElementPerformAction(closeButton as! AXUIElement, kAXPressAction as CFString)
+        if pressErr == .success { return .success(()) }
+        return .failure(.from(pressErr))
+    }
+
     /// Give this window keyboard focus: activate the owning app, set it as the
     /// focused window, and raise it.
     public func focus() {

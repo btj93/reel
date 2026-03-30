@@ -164,6 +164,31 @@ public final class StripController: @unchecked Sendable {
         applyLayout()
     }
 
+    /// Close the focused window via its AX close button.
+    public func closeActiveWindow() {
+        guard let activeTile = strip.activeColumn?.activeTile,
+              let window = windowMap[activeTile] else { return }
+        let _ = window.close()
+        // The window destruction will be detected by health check or AX observer,
+        // which will remove it from the strip.
+    }
+
+    /// Toggle the focused window between tiled (on strip) and floating (free).
+    /// Returns the window that was toggled, or nil if no active window.
+    public func toggleFloating() -> AXWindow? {
+        guard let activeTile = strip.activeColumn?.activeTile,
+              let window = windowMap[activeTile] else { return nil }
+
+        // Remove from strip — it becomes floating
+        removeWindow(tileID: activeTile)
+        return window
+    }
+
+    /// Re-add a floating window back to the strip.
+    public func unfloatWindow(_ window: AXWindow, app: AXApp) {
+        addWindow(window, app: app)
+    }
+
     // MARK: - User Move/Resize Handling
 
     /// Called when a user drags a window. Snaps it back to its strip position.
