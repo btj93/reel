@@ -47,6 +47,10 @@ public struct ScrollWMConfig: Sendable {
 
     public var terminalApp: String = "/System/Applications/Utilities/Terminal.app"
 
+    // MARK: - Startup
+
+    public var startAtLogin: Bool = false
+
     // MARK: - Config Path
 
     public static let configDir = NSHomeDirectory() + "/.config/scrollwm"
@@ -201,6 +205,9 @@ extension ScrollWMConfig {
             if let v = readString(terminal["app"]) { config.terminalApp = v }
         }
 
+        // start_at_login (top-level)
+        if let v = readBool(table["start_at_login"]) { config.startAtLogin = v }
+
         return config
     }
 
@@ -218,6 +225,9 @@ extension ScrollWMConfig {
         let defaultConfig = """
         # ScrollWM Configuration
         # Edit this file and save — changes apply automatically.
+
+        # Start ScrollWM automatically when you log in (requires .app bundle)
+        # start_at_login = false
 
         [layout]
         gap = 16
