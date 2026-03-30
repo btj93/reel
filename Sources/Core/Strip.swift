@@ -192,7 +192,12 @@ public struct Strip: Sendable {
             workingAreaWidth: workingArea.width
         )
 
-        return createScrollAnimation(to: targetOffset, at: time)
+        guard let anim = createScrollAnimation(to: targetOffset, at: time) else {
+            // Target is same as current — undo the index change
+            activeColumnIndex = previous
+            return nil
+        }
+        return anim
     }
 
     /// Focus the column to the right.
@@ -230,13 +235,25 @@ public struct Strip: Sendable {
             workingAreaWidth: workingArea.width
         )
 
-        return createScrollAnimation(to: targetOffset, at: time)
+        guard let anim = createScrollAnimation(to: targetOffset, at: time) else {
+            activeColumnIndex = previous
+            return nil
+        }
+        return anim
     }
 
     /// Create a spring animation from the current view offset state to a target,
     /// preserving velocity if already animating (for rapid keypress compounding).
-    private mutating func createScrollAnimation(to targetOffset: Double, at time: Double) -> SpringAnimation {
+    /// Returns nil if already at the target (no animation needed).
+    private mutating func createScrollAnimation(to targetOffset: Double, at time: Double) -> SpringAnimation? {
         let currentPos = viewOffset.current(at: time)
+
+        // Skip if already at target (prevents spring-back at boundaries)
+        if abs(currentPos - targetOffset) < 1.0 {
+            viewOffset = .static(targetOffset)
+            return nil
+        }
+
         let currentVel: Double
 
         // Preserve velocity from in-flight animation (rapid keypresses compound)
