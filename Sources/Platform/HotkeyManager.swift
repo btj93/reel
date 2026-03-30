@@ -48,33 +48,95 @@ public final class HotkeyManager: @unchecked Sendable {
 
     // MARK: - Configuration
 
-    /// Register default hotkey bindings.
-    /// Uses Hyper key (Ctrl+Shift+Cmd+Opt) to avoid conflicts.
-    public func registerDefaults() {
-        let hyper: CGEventFlags = [.maskControl, .maskShift, .maskCommand, .maskAlternate]
+    /// Register hotkey bindings from a config dictionary.
+    /// Keys are action names, values are key strings like "hyper-h", "ctrl-shift-l".
+    public func registerFromConfig(_ keybindingMap: [String: String]) {
+        bindings = []
 
-        // Hyper = Ctrl+Shift+Cmd+Opt
-        // Navigation:  Hyper+H (focus left), Hyper+L (focus right)
-        // Reorder:     Hyper+J (move column left), Hyper+K (move column right)
-        // Width:       Hyper+R (cycle preset), Hyper+F (toggle full width)
-        // Other:       Hyper+Space (toggle float), Hyper+W (close), Hyper+T (terminal)
-        bindings = [
-            HotkeyBinding(modifiers: hyper, keyCode: 0x04, action: .focusLeft),        // H
-            HotkeyBinding(modifiers: hyper, keyCode: 0x25, action: .focusRight),       // L
-            HotkeyBinding(modifiers: hyper, keyCode: 0x26, action: .moveColumnLeft),   // J
-            HotkeyBinding(modifiers: hyper, keyCode: 0x28, action: .moveColumnRight),  // K
-            HotkeyBinding(modifiers: hyper, keyCode: 0x0F, action: .cycleWidthPreset), // R
-            HotkeyBinding(modifiers: hyper, keyCode: 0x03, action: .toggleFullWidth),  // F
-            HotkeyBinding(modifiers: hyper, keyCode: 0x31, action: .toggleFloating),   // Space
-            HotkeyBinding(modifiers: hyper, keyCode: 0x0D, action: .closeWindow),      // W
-            HotkeyBinding(modifiers: hyper, keyCode: 0x11, action: .spawnTerminal),    // T
+        let actionMap: [String: HotkeyAction] = [
+            "focus_left": .focusLeft,
+            "focus_right": .focusRight,
+            "move_left": .moveColumnLeft,
+            "move_right": .moveColumnRight,
+            "cycle_width": .cycleWidthPreset,
+            "toggle_full_width": .toggleFullWidth,
+            "toggle_floating": .toggleFloating,
+            "close_window": .closeWindow,
+            "spawn_terminal": .spawnTerminal,
         ]
 
-        // Workspace bindings (Hyper+1 through Hyper+9)
-        let numberKeyCodes: [CGKeyCode] = [0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19]
-        for (i, keyCode) in numberKeyCodes.enumerated() {
-            bindings.append(HotkeyBinding(modifiers: hyper, keyCode: keyCode, action: .workspace(i + 1)))
+        for (actionName, keyString) in keybindingMap {
+            guard let action = actionMap[actionName] else { continue }
+            guard let (modifiers, keyCode) = parseKeyString(keyString) else {
+                print("[Hotkey] Cannot parse '\(keyString)' for \(actionName)")
+                fflush(stdout)
+                continue
+            }
+            bindings.append(HotkeyBinding(modifiers: modifiers, keyCode: keyCode, action: action))
         }
+
+        print("[Hotkey] Registered \(bindings.count) bindings from config")
+        fflush(stdout)
+    }
+
+    /// Register hardcoded defaults (fallback if no config).
+    public func registerDefaults() {
+        registerFromConfig([
+            "focus_left": "hyper-h",
+            "focus_right": "hyper-l",
+            "move_left": "hyper-j",
+            "move_right": "hyper-k",
+            "cycle_width": "hyper-r",
+            "toggle_full_width": "hyper-f",
+            "toggle_floating": "hyper-space",
+            "close_window": "hyper-w",
+            "spawn_terminal": "hyper-t",
+        ])
+    }
+
+    /// Parse a key string like "hyper-h", "ctrl-shift-l", "cmd-space" into modifiers + keyCode.
+    private func parseKeyString(_ str: String) -> (CGEventFlags, CGKeyCode)? {
+        let parts = str.lowercased().split(separator: "-").map(String.init)
+        guard parts.count >= 2 else { return nil }
+
+        var modifiers: CGEventFlags = []
+        let keyName = parts.last!
+
+        for part in parts.dropLast() {
+            switch part {
+            case "hyper":
+                modifiers.insert(.maskControl)
+                modifiers.insert(.maskShift)
+                modifiers.insert(.maskCommand)
+                modifiers.insert(.maskAlternate)
+            case "ctrl", "control": modifiers.insert(.maskControl)
+            case "shift": modifiers.insert(.maskShift)
+            case "cmd", "command": modifiers.insert(.maskCommand)
+            case "alt", "opt", "option": modifiers.insert(.maskAlternate)
+            case "fn": modifiers.insert(.maskSecondaryFn)
+            default: break
+            }
+        }
+
+        guard let keyCode = keyNameToCode(keyName) else { return nil }
+        return (modifiers, keyCode)
+    }
+
+    /// Map key names to macOS virtual key codes.
+    private func keyNameToCode(_ name: String) -> CGKeyCode? {
+        let map: [String: CGKeyCode] = [
+            "a": 0x00, "s": 0x01, "d": 0x02, "f": 0x03, "h": 0x04, "g": 0x05,
+            "z": 0x06, "x": 0x07, "c": 0x08, "v": 0x09, "b": 0x0B, "q": 0x0C,
+            "w": 0x0D, "e": 0x0E, "r": 0x0F, "y": 0x10, "t": 0x11, "1": 0x12,
+            "2": 0x13, "3": 0x14, "4": 0x15, "6": 0x16, "5": 0x17, "9": 0x19,
+            "7": 0x1A, "8": 0x1C, "0": 0x1D, "o": 0x1F, "u": 0x20, "i": 0x22,
+            "p": 0x23, "l": 0x25, "j": 0x26, "k": 0x28, "n": 0x2D, "m": 0x2E,
+            "space": 0x31, "return": 0x24, "tab": 0x30, "escape": 0x35,
+            "delete": 0x33, "left": 0x7B, "right": 0x7C, "down": 0x7D, "up": 0x7E,
+            "=": 0x18, "-": 0x1B, "[": 0x21, "]": 0x1E, ";": 0x29, "'": 0x27,
+            ",": 0x2B, ".": 0x2F, "/": 0x2C, "`": 0x32, "\\": 0x2A,
+        ]
+        return map[name]
     }
 
     // MARK: - Lifecycle

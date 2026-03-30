@@ -164,7 +164,18 @@ public final class StripController: @unchecked Sendable {
         applyLayout()
     }
 
-    // MARK: - User Resize Handling
+    // MARK: - User Move/Resize Handling
+
+    /// Called when a user drags a window. Snaps it back to its strip position.
+    public func handleUserMove(windowID: CGWindowID) {
+        let tileID = TileID(windowID)
+        guard windowMap[tileID] != nil,
+              strip.columns.contains(where: { $0.tiles.contains(tileID) }) else { return }
+
+        // Clear the committed frame so applyLayout will reposition it
+        lastCommittedFrames.removeValue(forKey: tileID)
+        applyLayout()
+    }
 
     /// Called when a user manually resizes a window. Updates the column width to match,
     /// and enforces that the window cannot be wider/taller than the working area.

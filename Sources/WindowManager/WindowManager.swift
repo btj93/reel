@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Core
+import Config
 import Platform
 
 /// Central coordinator for ScrollWM.
@@ -18,25 +19,88 @@ public final class WindowManager: @unchecked Sendable {
     /// Gesture capture for trackpad scrolling.
     private var gestureCapture: GestureCapture?
 
+    /// Current configuration.
+    public private(set) var config: ScrollWMConfig
+
+    /// Config file watcher for hot-reload.
+    private var configWatcher: ConfigWatcher?
+
     /// State persistence for crash recovery.
     private let stateFilePath: String
     private var stateWriteTimer: Timer?
 
     public init() {
+        // Load config first
+        let (loadedConfig, configError) = ScrollWMConfig.load()
+        self.config = loadedConfig
+        if let err = configError {
+            print("[WM] Config warning: \(err)")
+            fflush(stdout)
+        }
+
         self.tracker = WindowTracker()
         self.displayManager = DisplayManager()
         self.hotkeyManager = HotkeyManager()
 
         // Initialize strip controller with primary display working area
         displayManager.refresh()
-        let workingArea = displayManager.mainDisplay?.workingArea(primaryScreenHeight: displayManager.primaryScreenHeight) ?? CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let struts = Struts(
+            left: CGFloat(config.struts.left),
+            right: CGFloat(config.struts.right),
+            top: CGFloat(config.struts.top),
+            bottom: CGFloat(config.struts.bottom)
+        )
+        let workingArea = displayManager.mainDisplay?.workingArea(struts: struts, primaryScreenHeight: displayManager.primaryScreenHeight) ?? CGRect(x: 0, y: 25, width: 1440, height: 875)
         self.stripController = StripController(workingArea: workingArea)
 
         // State file path
         let stateDir = NSHomeDirectory() + "/.local/state/scrollwm"
         self.stateFilePath = stateDir + "/window-state.json"
 
+        // Apply config to all subsystems
+        applyConfig(config)
         setupEventHandlers()
+    }
+
+    /// Apply config values to all subsystems.
+    public func applyConfig(_ config: ScrollWMConfig) {
+        self.config = config
+
+        // Strip layout
+        stripController.strip.gap = config.gap
+        stripController.strip.defaultWidth = config.defaultWidth
+        stripController.strip.widthPresets = config.widthPresets
+        stripController.strip.focusMode = config.focusMode
+        stripController.animationEnabled = config.animationEnabled
+
+        // Window rules
+        tracker.rules = config.rules.map { rule in
+            WindowRule(
+                appID: rule.appID,
+                appIDRegex: rule.appIDRegex,
+                titleRegex: rule.titleRegex,
+                classification: rule.floating ? .float : .tile
+            )
+        }
+
+        // Hotkeys
+        hotkeyManager.registerFromConfig(config.keybindings)
+
+        // Gesture modifier
+        if let gc = gestureCapture {
+            switch config.gestureModifier.lowercased() {
+            case "fn": gc.requiredModifier = .maskSecondaryFn
+            case "ctrl", "control": gc.requiredModifier = .maskControl
+            case "alt", "opt", "option": gc.requiredModifier = .maskAlternate
+            case "cmd", "command": gc.requiredModifier = .maskCommand
+            default: gc.requiredModifier = .maskSecondaryFn
+            }
+        }
+
+        // Terminal path is read directly from config when spawning
+
+        print("[WM] Config applied (gap=\(config.gap), focus=\(config.focusMode), animation=\(config.animationEnabled))")
+        fflush(stdout)
     }
 
     // MARK: - Lifecycle
@@ -71,7 +135,7 @@ public final class WindowManager: @unchecked Sendable {
         stripController.finishBatch()
         print("[WM] batch finished, strip has \(stripController.strip.columns.count) cols"); fflush(stdout)
 
-        hotkeyManager.registerDefaults()
+        hotkeyManager.registerFromConfig(config.keybindings)
         let hotkeyOk = hotkeyManager.start()
         print("[WM] hotkeys: \(hotkeyOk)"); fflush(stdout)
 
@@ -107,6 +171,18 @@ public final class WindowManager: @unchecked Sendable {
         stateWriteTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.persistState()
         }
+
+        // Config hot-reload watcher
+        let watcher = ConfigWatcher()
+        watcher.onConfigChanged = { [weak self] newConfig in
+            guard let self = self else { return }
+            self.applyConfig(newConfig)
+            self.stripController.strip.recalculateWidths()
+            self.stripController.clearCommittedFrames()
+            self.stripController.applyLayout()
+        }
+        watcher.start()
+        self.configWatcher = watcher
 
         // Periodic window health check — detect closed windows that AX observer missed.
         // kAXUIElementDestroyedNotification is unreliable for some apps.
@@ -182,6 +258,7 @@ public final class WindowManager: @unchecked Sendable {
         persistState()
 
         // Stop subsystems
+        configWatcher?.stop()
         stripController.frameLoop?.stop()
         gestureCapture?.stop()
         hotkeyManager.stop()
@@ -387,6 +464,7 @@ public final class WindowManager: @unchecked Sendable {
 
     /// Periodically verify all tracked windows still exist.
     /// Catches closed windows that kAXUIElementDestroyedNotification missed.
+    /// Also adopts on-screen windows that should be in the strip but aren't.
     private func checkWindowHealth() {
         guard !isPaused else { return }
 
@@ -394,15 +472,14 @@ public final class WindowManager: @unchecked Sendable {
         let onScreenWindows = getAllWindowInfo()
         let onScreenIDs = Set(onScreenWindows.map(\.windowID))
 
-        // Check every window in the strip
-        var removedAny = false
+        // Pass 1: Remove dead windows from the strip
+        var changed = false
         for (tileID, window) in stripController.windowMap {
             // Method 1: Check if the window is still in CGWindowList
             if !onScreenIDs.contains(window.windowID) {
-                // Window is gone — the AX observer missed its destruction
                 stripController.removeWindow(tileID: tileID)
                 tracker.untrackWindow(window.windowID)
-                removedAny = true
+                changed = true
                 continue
             }
 
@@ -411,20 +488,66 @@ public final class WindowManager: @unchecked Sendable {
             if case .failure(.elementInvalid) = posResult {
                 stripController.removeWindow(tileID: tileID)
                 tracker.untrackWindow(window.windowID)
-                removedAny = true
+                changed = true
             }
         }
 
-        if removedAny {
+        // Pass 2: Adopt unmanaged windows that should be in the strip
+        changed = adoptUnmanagedWindows() || changed
+
+        if changed {
             stripController.clearCommittedFrames()
             stripController.applyLayout()
         }
     }
 
+    /// Discover on-screen windows not currently in the strip and add them.
+    /// Returns true if any windows were adopted.
+    private func adoptUnmanagedWindows() -> Bool {
+        let stripWindowIDs = Set(stripController.windowMap.values.map(\.windowID))
+        var adopted = false
+
+        for (pid, app) in tracker.apps {
+            let newWindows = discoverWindows(pid: pid)
+            for window in newWindows {
+                // Skip windows already tracked and in the strip
+                guard !stripWindowIDs.contains(window.windowID) else { continue }
+                // Skip windows already tracked as floating/ignored
+                guard !tracker.floatingWindows.contains(window.windowID),
+                      !tracker.ignoredWindows.contains(window.windowID) else { continue }
+
+                let props = window.getProperties()
+                guard !props.isMinimized, !props.isFullscreen else { continue }
+
+                // Check rules, then default classification
+                let classification: WindowClassification
+                if let ruleResult = tracker.rules.first(where: { $0.matches(props) })?.classification {
+                    classification = ruleResult
+                } else {
+                    classification = classifyWindow(props)
+                }
+
+                guard classification == .tile else { continue }
+
+                // Adopt this window into the strip
+                if tracker.windows[window.windowID] == nil {
+                    tracker.registerTrackedWindow(window)
+                    app.observeWindow(window.element)
+                }
+                stripController.addWindow(window, app: app)
+                adopted = true
+                print("[HealthCheck] Adopted unmanaged window wid=\(window.windowID) pid=\(pid)")
+                fflush(stdout)
+            }
+        }
+
+        return adopted
+    }
+
     // MARK: - Terminal Spawning
 
     private func spawnTerminal() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+        NSWorkspace.shared.open(URL(fileURLWithPath: config.terminalApp))
     }
 
     // MARK: - Crash Recovery
