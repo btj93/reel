@@ -47,5 +47,11 @@ fi
 # Only replace the binary — preserves macOS permissions on the .app bundle
 cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
 
+# Ad-hoc code sign with a stable identifier.
+# macOS TCC tracks permissions by code signature hash — without signing,
+# every rebuild produces a different hash and macOS revokes permission.
+# Ad-hoc signing (-s -) with a fixed identifier keeps it stable.
+codesign -fs - --identifier "dev.scrollwm.ScrollWM" "${BUNDLE_DIR}"
+
 echo "Bundle updated at: ${BUNDLE_DIR}"
 echo "Run with: open ${BUNDLE_DIR}"
