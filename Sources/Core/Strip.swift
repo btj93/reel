@@ -176,28 +176,33 @@ public struct Strip: Sendable {
         viewOffset = .static(newOffset)
     }
 
-    /// Focus left with spring animation. Returns nil if already at leftmost.
+    /// Focus left with spring animation.
+    /// At the leftmost boundary, creates a rubber-band bounce (overshoot then spring back).
     public mutating func focusLeftAnimated(at time: Double) -> SpringAnimation? {
-        guard activeColumnIndex > 0 else { return nil }
-        let previous = activeColumnIndex
-        activeColumnIndex -= 1
+        if activeColumnIndex > 0 {
+            // Normal: move focus left
+            let previous = activeColumnIndex
+            activeColumnIndex -= 1
 
-        let targetOffset = computeNewViewOffset(
-            forColumn: activeColumnIndex,
-            previousColumn: previous,
-            focusMode: focusMode,
-            columns: columns,
-            columnData: columnData,
-            gap: gap,
-            workingAreaWidth: workingArea.width
-        )
+            let targetOffset = computeNewViewOffset(
+                forColumn: activeColumnIndex,
+                previousColumn: previous,
+                focusMode: focusMode,
+                columns: columns,
+                columnData: columnData,
+                gap: gap,
+                workingAreaWidth: workingArea.width
+            )
 
-        guard let anim = createScrollAnimation(to: targetOffset, at: time) else {
-            // Target is same as current — undo the index change
-            activeColumnIndex = previous
-            return nil
+            guard let anim = createScrollAnimation(to: targetOffset, at: time) else {
+                activeColumnIndex = previous
+                return nil
+            }
+            return anim
+        } else {
+            // At leftmost boundary: rubber-band bounce
+            return createRubberBandAnimation(direction: -1, at: time)
         }
-        return anim
     }
 
     /// Focus the column to the right.
@@ -219,26 +224,56 @@ public struct Strip: Sendable {
         viewOffset = .static(newOffset)
     }
 
-    /// Focus right with spring animation. Returns nil if already at rightmost.
+    /// Focus right with spring animation.
+    /// At the rightmost boundary, creates a rubber-band bounce (overshoot then spring back).
     public mutating func focusRightAnimated(at time: Double) -> SpringAnimation? {
-        guard activeColumnIndex < columns.count - 1 else { return nil }
-        let previous = activeColumnIndex
-        activeColumnIndex += 1
+        if activeColumnIndex < columns.count - 1 {
+            // Normal: move focus right
+            let previous = activeColumnIndex
+            activeColumnIndex += 1
 
-        let targetOffset = computeNewViewOffset(
-            forColumn: activeColumnIndex,
-            previousColumn: previous,
-            focusMode: focusMode,
-            columns: columns,
-            columnData: columnData,
-            gap: gap,
-            workingAreaWidth: workingArea.width
+            let targetOffset = computeNewViewOffset(
+                forColumn: activeColumnIndex,
+                previousColumn: previous,
+                focusMode: focusMode,
+                columns: columns,
+                columnData: columnData,
+                gap: gap,
+                workingAreaWidth: workingArea.width
+            )
+
+            guard let anim = createScrollAnimation(to: targetOffset, at: time) else {
+                activeColumnIndex = previous
+                return nil
+            }
+            return anim
+        } else {
+            // At rightmost boundary: rubber-band bounce
+            return createRubberBandAnimation(direction: 1, at: time)
+        }
+    }
+
+    /// Create a rubber-band bounce at the strip edge.
+    /// Overshoots by ~40px in the given direction, then springs back to current position.
+    /// direction: -1 for left edge, +1 for right edge.
+    private mutating func createRubberBandAnimation(direction: Double, at time: Double) -> SpringAnimation {
+        let currentPos = viewOffset.current(at: time)
+        let overshoot = 40.0 * direction  // how far to stretch past the edge
+
+        // Use underdamped spring (ratio < 1) for a visible bounce-back
+        let bounceParams = SpringParams(dampingRatio: 0.6, stiffness: 600, epsilon: 0.5)
+
+        // Animate: current → overshoot position, but target is current (so it bounces back)
+        // We achieve this by starting with an initial velocity that carries past the target
+        let anim = SpringAnimation(
+            from: currentPos,
+            to: currentPos,                     // return to same position
+            initialVelocity: overshoot * 15,    // kick velocity to overshoot
+            startTime: time,
+            params: bounceParams
         )
 
-        guard let anim = createScrollAnimation(to: targetOffset, at: time) else {
-            activeColumnIndex = previous
-            return nil
-        }
+        viewOffset = .animation(anim)
         return anim
     }
 
