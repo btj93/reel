@@ -9,14 +9,14 @@ BUNDLE_DIR=".build/bundled/${PRODUCT}.app"
 echo "Building ${PRODUCT}..."
 swift build
 
-echo "Creating app bundle..."
-rm -rf "${BUNDLE_DIR}"
-mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
-mkdir -p "${BUNDLE_DIR}/Contents/Resources"
+# Create bundle structure only if it doesn't exist yet.
+# DON'T rm -rf — that revokes macOS Accessibility permission.
+if [ ! -d "${BUNDLE_DIR}/Contents/MacOS" ]; then
+    echo "Creating app bundle..."
+    mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
+    mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 
-cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
-
-cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
+    cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -42,6 +42,10 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
 </dict>
 </plist>
 PLIST
+fi
 
-echo "Bundle created at: ${BUNDLE_DIR}"
+# Only replace the binary — preserves macOS permissions on the .app bundle
+cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
+
+echo "Bundle updated at: ${BUNDLE_DIR}"
 echo "Run with: open ${BUNDLE_DIR}"
