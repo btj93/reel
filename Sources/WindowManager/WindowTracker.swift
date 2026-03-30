@@ -27,6 +27,11 @@ public final class WindowTracker: @unchecked Sendable {
         windows[window.windowID] = window
     }
 
+    /// Remove a window from tracking (used by health check).
+    public func untrackWindow(_ windowID: CGWindowID) {
+        windows.removeValue(forKey: windowID)
+    }
+
     /// Window rules for per-app overrides.
     public var rules: [WindowRule] = []
 

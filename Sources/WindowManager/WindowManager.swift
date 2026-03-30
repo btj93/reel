@@ -108,6 +108,12 @@ public final class WindowManager: @unchecked Sendable {
             self?.persistState()
         }
 
+        // Periodic window health check — detect closed windows that AX observer missed.
+        // kAXUIElementDestroyedNotification is unreliable for some apps.
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.checkWindowHealth()
+        }
+
         // Register signal handlers for graceful shutdown via NSApp.terminate
         // This ensures proper cleanup (menu bar icon removal, window restoration)
         signal(SIGTERM) { _ in
@@ -370,6 +376,44 @@ public final class WindowManager: @unchecked Sendable {
             break  // TODO: Phase 3
         case .spawnTerminal:
             spawnTerminal()
+        }
+    }
+
+    // MARK: - Window Health Check
+
+    /// Periodically verify all tracked windows still exist.
+    /// Catches closed windows that kAXUIElementDestroyedNotification missed.
+    private func checkWindowHealth() {
+        guard !isPaused else { return }
+
+        // Get all currently on-screen window IDs from the window server
+        let onScreenWindows = getAllWindowInfo()
+        let onScreenIDs = Set(onScreenWindows.map(\.windowID))
+
+        // Check every window in the strip
+        var removedAny = false
+        for (tileID, window) in stripController.windowMap {
+            // Method 1: Check if the window is still in CGWindowList
+            if !onScreenIDs.contains(window.windowID) {
+                // Window is gone — the AX observer missed its destruction
+                stripController.removeWindow(tileID: tileID)
+                tracker.untrackWindow(window.windowID)
+                removedAny = true
+                continue
+            }
+
+            // Method 2: Try to read a property — if it fails with invalidElement, window is dead
+            let posResult = window.getPosition()
+            if case .failure(.elementInvalid) = posResult {
+                stripController.removeWindow(tileID: tileID)
+                tracker.untrackWindow(window.windowID)
+                removedAny = true
+            }
+        }
+
+        if removedAny {
+            stripController.clearCommittedFrames()
+            stripController.applyLayout()
         }
     }
 
