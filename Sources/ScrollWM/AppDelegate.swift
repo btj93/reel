@@ -1,6 +1,7 @@
 import AppKit
 import Core
 import Platform
+import ServiceManagement
 import WindowManager
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -98,7 +99,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let wm = WindowManager()
         wm.start()
         windowManager = wm
+        applyLoginItem(enabled: wm.config.startAtLogin)
         print("[ScrollWM] Ready")
+        fflush(stdout)
+    }
+
+    private func applyLoginItem(enabled: Bool) {
+        guard Bundle.main.bundleIdentifier != nil else {
+            if enabled {
+                print("[ScrollWM] start_at_login requires running as .app bundle — ignoring")
+                fflush(stdout)
+            }
+            return
+        }
+        let service = SMAppService.mainApp
+        do {
+            if enabled && service.status != .enabled {
+                try service.register()
+                print("[ScrollWM] Registered as login item")
+                fflush(stdout)
+            } else if !enabled && service.status == .enabled {
+                try service.unregister()
+                print("[ScrollWM] Unregistered login item")
+                fflush(stdout)
+            }
+        } catch {
+            print("[ScrollWM] Login item error: \(error)")
+            fflush(stdout)
+        }
     }
 
     @objc private func openAccessibilitySettings() {
@@ -114,6 +142,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func reloadConfig() {
         windowManager?.reloadConfig()
+        if let config = windowManager?.config {
+            applyLoginItem(enabled: config.startAtLogin)
+        }
     }
 
     @objc private func quit() {
