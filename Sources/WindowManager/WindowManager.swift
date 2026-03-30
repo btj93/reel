@@ -10,9 +10,19 @@ import Platform
 /// All state mutations happen on the main thread via the serial event queue.
 public final class WindowManager: @unchecked Sendable {
     public let tracker: WindowTracker
-    public let stripController: StripController
     public let hotkeyManager: HotkeyManager
     public let displayManager: DisplayManager
+
+    /// Per-display strip controllers. One strip per connected monitor.
+    public private(set) var stripControllers: [CGDirectDisplayID: StripController] = [:]
+
+    /// The currently active (focused) display.
+    public private(set) var activeDisplayID: CGDirectDisplayID = CGMainDisplayID()
+
+    /// Convenience: the strip controller for the active display.
+    public var stripController: StripController {
+        stripControllers[activeDisplayID] ?? stripControllers.values.first!
+    }
 
     /// Whether management is paused.
     public private(set) var isPaused: Bool = false
@@ -46,7 +56,7 @@ public final class WindowManager: @unchecked Sendable {
         self.displayManager = DisplayManager()
         self.hotkeyManager = HotkeyManager()
 
-        // Initialize strip controller with primary display working area
+        // Create a strip controller for each connected display
         displayManager.refresh()
         let struts = Struts(
             left: CGFloat(config.struts.left),
@@ -54,8 +64,16 @@ public final class WindowManager: @unchecked Sendable {
             top: CGFloat(config.struts.top),
             bottom: CGFloat(config.struts.bottom)
         )
-        let workingArea = displayManager.mainDisplay?.workingArea(struts: struts, primaryScreenHeight: displayManager.primaryScreenHeight) ?? CGRect(x: 0, y: 25, width: 1440, height: 875)
-        self.stripController = StripController(workingArea: workingArea)
+        for (displayID, info) in displayManager.displays {
+            let wa = info.workingArea(struts: struts, primaryScreenHeight: displayManager.primaryScreenHeight)
+            stripControllers[displayID] = StripController(workingArea: wa)
+        }
+        // Ensure at least one strip exists (fallback)
+        if stripControllers.isEmpty {
+            let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+            stripControllers[CGMainDisplayID()] = StripController(workingArea: wa)
+        }
+        activeDisplayID = displayManager.mainDisplay?.displayID ?? CGMainDisplayID()
 
         // State file path
         let stateDir = NSHomeDirectory() + "/.local/state/scrollwm"
@@ -126,32 +144,39 @@ public final class WindowManager: @unchecked Sendable {
         displayManager.startObserving()
         print("[WM] display done, working area: \(displayManager.mainDisplay?.visibleFrame ?? .zero)"); fflush(stdout)
 
-        // Record initial Space fingerprint
+        // Record initial Space fingerprint for all strips
         let initialWindows = getAllWindowInfo()
         let initialFingerprint = Set(initialWindows.filter { $0.layer == 0 && $0.isOnScreen }.map(\.windowID))
-        stripController.setSpaceFingerprint(initialFingerprint)
+        for (_, sc) in stripControllers {
+            sc.setSpaceFingerprint(initialFingerprint)
+        }
 
         // Start subsystems — batch window discovery to avoid N layout passes
-        stripController.beginBatch()
+        for (_, sc) in stripControllers { sc.beginBatch() }
         print("[WM] tracking windows..."); fflush(stdout)
         tracker.startObserving()
         print("[WM] tracked \(tracker.windows.count) windows, \(tracker.apps.count) apps"); fflush(stdout)
-        stripController.finishBatch()
+        for (_, sc) in stripControllers { sc.finishBatch() }
         print("[WM] batch finished, strip has \(stripController.strip.columns.count) cols"); fflush(stdout)
 
         hotkeyManager.registerFromConfig(config.keybindings)
         let hotkeyOk = hotkeyManager.start()
         print("[WM] hotkeys: \(hotkeyOk)"); fflush(stdout)
 
-        // Phase 2: Frame loop for smooth animation
+        // Phase 2: Frame loop for smooth animation — shared across all strips
         let frameLoop = FrameLoop()
         frameLoop.onTick = { [weak self] time in
-            self?.stripController.handleFrameTick(time: time)
+            guard let self = self else { return }
+            for (_, sc) in self.stripControllers {
+                sc.handleFrameTick(time: time)
+            }
         }
         frameLoop.start()
-        stripController.frameLoop = frameLoop
-        stripController.animationEnabled = true
-        print("[WM] animation: enabled (frame loop created)"); fflush(stdout)
+        for (_, sc) in stripControllers {
+            sc.frameLoop = frameLoop
+            sc.animationEnabled = config.animationEnabled
+        }
+        print("[WM] animation: enabled (\(stripControllers.count) displays)"); fflush(stdout)
 
         // Phase 2: Gesture capture for trackpad scrolling
         let gestureCapture = GestureCapture()
@@ -299,9 +324,21 @@ public final class WindowManager: @unchecked Sendable {
             self.handleHotkeyAction(action)
         }
 
-        // Display changes → recalculate layout
+        // Display changes → recalculate layout for all displays
         displayManager.onDisplayChange = { [weak self] displays in
             guard let self = self else { return }
+            let struts = Struts(
+                left: CGFloat(self.config.struts.left),
+                right: CGFloat(self.config.struts.right),
+                top: CGFloat(self.config.struts.top),
+                bottom: CGFloat(self.config.struts.bottom)
+            )
+            for (displayID, info) in displays {
+                if let sc = self.stripControllers[displayID] {
+                    sc.updateWorkingArea(info.workingArea(struts: struts, primaryScreenHeight: self.displayManager.primaryScreenHeight))
+                }
+            }
+            // Use first display as fallback
             if let main = displays.values.first(where: { $0.isMain }) ?? displays.values.first {
                 self.stripController.updateWorkingArea(main.workingArea(primaryScreenHeight: self.displayManager.primaryScreenHeight))
             }
@@ -323,11 +360,18 @@ public final class WindowManager: @unchecked Sendable {
         case .windowAdded(let window, let classification):
             guard classification == .tile else { return }
             if let app = tracker.apps[window.pid] {
-                stripController.addWindow(window, app: app)
+                let sc = stripControllerForWindow(window) ?? stripController
+                sc.addWindow(window, app: app)
             }
 
         case .windowRemoved(_, let tileID):
-            stripController.removeWindow(tileID: tileID)
+            // Remove from whichever strip has it
+            for (_, sc) in stripControllers {
+                if sc.windowMap[tileID] != nil {
+                    sc.removeWindow(tileID: tileID)
+                    break
+                }
+            }
 
         case .windowFocused(let windowID):
             // Only scroll to window if it's not already the active column
@@ -391,6 +435,10 @@ public final class WindowManager: @unchecked Sendable {
             let newWindowIDs = onScreenIDs.subtracting(managedIDs)
 
             if !newWindowIDs.isEmpty {
+                // Preserve restored focus — addWindow() auto-focuses each new column
+                let savedFocusIndex = stripController.strip.activeColumnIndex
+                let savedViewOffset = stripController.strip.viewOffset
+
                 for (pid, app) in tracker.apps {
                     let appWindows = discoverWindows(pid: pid)
                     for window in appWindows {
@@ -404,6 +452,11 @@ public final class WindowManager: @unchecked Sendable {
                         stripController.addWindow(window, app: app)
                     }
                 }
+
+                // Restore focus to the column the user had active before leaving
+                stripController.strip.activeColumnIndex = min(savedFocusIndex, stripController.strip.columns.count - 1)
+                stripController.strip.viewOffset = savedViewOffset
+
                 print("[ScrollWM] Space restored + \(newWindowIDs.count) new windows")
             } else {
                 print("[ScrollWM] Space restored: \(stripController.strip.columns.count) cols")
@@ -666,6 +719,23 @@ public final class WindowManager: @unchecked Sendable {
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return ScrollWMResponse(success: true, message: "Quitting")
         }
+    }
+
+    // MARK: - Multi-Monitor Helpers
+
+    /// Determine which strip controller a window belongs to based on its screen position.
+    private func stripControllerForWindow(_ window: AXWindow) -> StripController? {
+        guard case .success(let frame) = window.getFrame() else { return nil }
+        let windowCenter = CGPoint(x: frame.midX, y: frame.midY)
+
+        for (displayID, info) in displayManager.displays {
+            let cgY = displayManager.primaryScreenHeight - info.frame.maxY
+            let cgFrame = CGRect(x: info.frame.minX, y: cgY, width: info.frame.width, height: info.frame.height)
+            if cgFrame.contains(windowCenter) {
+                return stripControllers[displayID]
+            }
+        }
+        return nil
     }
 }
 
