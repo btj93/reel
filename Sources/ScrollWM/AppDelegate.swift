@@ -12,6 +12,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         print("[ScrollWM] applicationDidFinishLaunching")
         fflush(stdout)
 
+        // Hide from Dock (works without Info.plist LSUIElement, so we can run
+        // the bare debug binary without a .app bundle)
+        NSApp.setActivationPolicy(.accessory)
+
         // Prevent App Nap from throttling us
         ProcessInfo.processInfo.beginActivity(
             options: [.userInitiated, .idleDisplaySleepDisabled],
