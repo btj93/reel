@@ -9,6 +9,9 @@ let package = Package(
         .executable(name: "ScrollWM", targets: ["ScrollWM"]),
         .executable(name: "scrollwm-msg", targets: ["ScrollWMCLI"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0"),
+    ],
     targets: [
         // Main app
         .executableTarget(
@@ -40,14 +43,14 @@ let package = Package(
         // WindowManager: orchestration
         .target(
             name: "WindowManager",
-            dependencies: ["Core", "Platform"],
+            dependencies: ["Core", "Platform", "Config"],
             path: "Sources/WindowManager"
         ),
 
         // Config: TOML configuration
         .target(
             name: "Config",
-            dependencies: ["Core"],
+            dependencies: ["Core", "TOMLKit"],
             path: "Sources/Config"
         ),
 

@@ -234,7 +234,7 @@ public final class WindowManager: @unchecked Sendable {
         // Ignore move/resize/focus events that echo from our own layout calls
         if stripController.isInEchoSuppression {
             switch event {
-            case .windowResized, .windowFocused:
+            case .windowResized, .windowMoved, .windowFocused:
                 return
             default:
                 break
@@ -281,6 +281,10 @@ public final class WindowManager: @unchecked Sendable {
         case .windowResized(let windowID):
             // User resized a window — update the strip column width to match
             stripController.handleUserResize(windowID: windowID)
+
+        case .windowMoved(let windowID):
+            // User dragged a window — snap it back to its strip position
+            stripController.handleUserMove(windowID: windowID)
 
         case .spaceChanged:
             handleSpaceChange()

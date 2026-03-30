@@ -246,6 +246,11 @@ public final class WindowTracker: @unchecked Sendable {
                 onEvent?(.windowResized(windowID: wid))
             }
 
+        case kAXMovedNotification:
+            if let wid = event.windowID {
+                onEvent?(.windowMoved(windowID: wid))
+            }
+
         default:
             break
         }
@@ -271,6 +276,7 @@ public enum WindowEvent: Sendable {
     case windowMinimized(windowID: CGWindowID)
     case windowDeminimized(windowID: CGWindowID)
     case windowResized(windowID: CGWindowID)
+    case windowMoved(windowID: CGWindowID)
     case appActivated(pid: pid_t)
     case spaceChanged
 }
