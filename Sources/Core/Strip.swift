@@ -176,6 +176,25 @@ public struct Strip: Sendable {
         viewOffset = .static(newOffset)
     }
 
+    /// Focus left with spring animation. Returns nil if already at leftmost.
+    public mutating func focusLeftAnimated(at time: Double) -> SpringAnimation? {
+        guard activeColumnIndex > 0 else { return nil }
+        let previous = activeColumnIndex
+        activeColumnIndex -= 1
+
+        let targetOffset = computeNewViewOffset(
+            forColumn: activeColumnIndex,
+            previousColumn: previous,
+            focusMode: focusMode,
+            columns: columns,
+            columnData: columnData,
+            gap: gap,
+            workingAreaWidth: workingArea.width
+        )
+
+        return createScrollAnimation(to: targetOffset, at: time)
+    }
+
     /// Focus the column to the right.
     public mutating func focusRight(at time: Double) {
         guard activeColumnIndex < columns.count - 1 else { return }
@@ -193,6 +212,50 @@ public struct Strip: Sendable {
         )
 
         viewOffset = .static(newOffset)
+    }
+
+    /// Focus right with spring animation. Returns nil if already at rightmost.
+    public mutating func focusRightAnimated(at time: Double) -> SpringAnimation? {
+        guard activeColumnIndex < columns.count - 1 else { return nil }
+        let previous = activeColumnIndex
+        activeColumnIndex += 1
+
+        let targetOffset = computeNewViewOffset(
+            forColumn: activeColumnIndex,
+            previousColumn: previous,
+            focusMode: focusMode,
+            columns: columns,
+            columnData: columnData,
+            gap: gap,
+            workingAreaWidth: workingArea.width
+        )
+
+        return createScrollAnimation(to: targetOffset, at: time)
+    }
+
+    /// Create a spring animation from the current view offset state to a target,
+    /// preserving velocity if already animating (for rapid keypress compounding).
+    private mutating func createScrollAnimation(to targetOffset: Double, at time: Double) -> SpringAnimation {
+        let currentPos = viewOffset.current(at: time)
+        let currentVel: Double
+
+        // Preserve velocity from in-flight animation (rapid keypresses compound)
+        if case .animation(let existing) = viewOffset {
+            currentVel = existing.evaluate(at: time).velocity
+        } else {
+            currentVel = 0
+        }
+
+        let anim = SpringAnimation(
+            from: currentPos,
+            to: targetOffset,
+            initialVelocity: currentVel,
+            startTime: time,
+            params: .horizontalScroll
+        )
+
+        viewOffset = .animation(anim)
+        return anim
     }
 
     /// Move the active column left (swap with neighbor).
