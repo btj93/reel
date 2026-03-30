@@ -37,6 +37,9 @@ public final class StripController: @unchecked Sendable {
     /// Focus ring overlay.
     public let focusRing: FocusRing
 
+    /// Frame loop for animated scrolling (nil until Phase 2 is wired).
+    public var frameLoop: FrameLoop?
+
     public init(workingArea: CGRect) {
         self.strip = Strip(workingArea: workingArea)
         self.focusRing = FocusRing()
@@ -114,14 +117,28 @@ public final class StripController: @unchecked Sendable {
     // MARK: - Navigation
 
     public func focusLeft() {
-        strip.focusLeft(at: currentTime())
-        applyLayout()
+        let time = currentTime()
+        if animationEnabled {
+            if let _ = strip.focusLeftAnimated(at: time) {
+                frameLoop?.resume()
+            }
+        } else {
+            strip.focusLeft(at: time)
+            applyLayout()
+        }
         focusActiveWindow()
     }
 
     public func focusRight() {
-        strip.focusRight(at: currentTime())
-        applyLayout()
+        let time = currentTime()
+        if animationEnabled {
+            if let _ = strip.focusRightAnimated(at: time) {
+                frameLoop?.resume()
+            }
+        } else {
+            strip.focusRight(at: time)
+            applyLayout()
+        }
         focusActiveWindow()
     }
 
@@ -286,6 +303,144 @@ public final class StripController: @unchecked Sendable {
         guard let activeTile = strip.activeColumn?.activeTile,
               let window = windowMap[activeTile] else { return }
         window.focus()
+    }
+
+    // MARK: - Animation Frame Tick
+
+    /// Called by FrameLoop every vsync frame during animation.
+    public func handleFrameTick(time: Double) {
+        // Check if animation has settled
+        if strip.viewOffset.isSettled(at: time) {
+            let finalOffset = strip.viewOffset.current(at: time)
+            strip.viewOffset = .static(finalOffset)
+            frameLoop?.pause()
+
+            // One final layout with exact positions + full setFrame (not position-only)
+            clearCommittedFrames()
+            applyLayout()
+            return
+        }
+
+        // Compute frames with animation evaluated at this timestamp
+        let frames = computeTargetFrames(strip: strip, time: time)
+
+        // Apply with priority: position-only for visible windows (cheaper during animation)
+        for target in frames {
+            guard let window = windowMap[target.tileID] else { continue }
+
+            // Skip unchanged frames
+            if let lastFrame = lastCommittedFrames[target.tileID],
+               framesEqual(lastFrame, target.frame) {
+                continue
+            }
+
+            // During animation: position-only for visible, skip far windows
+            switch target.visibilityZone {
+            case .visible:
+                let result = window.setPosition(target.frame.origin)
+                if case .success = result {
+                    lastCommittedFrames[target.tileID] = target.frame
+                }
+            case .nearBuffer:
+                // Update every other call (frame skip for near-buffer)
+                let result = window.setPosition(target.frame.origin)
+                if case .success = result {
+                    lastCommittedFrames[target.tileID] = target.frame
+                }
+            case .far:
+                // Skip during animation — will be updated on settle
+                break
+            }
+        }
+
+        // Update focus ring position
+        updateFocusRing(frames: frames)
+    }
+
+    // MARK: - Gesture Handling
+
+    /// Begin a trackpad gesture scroll.
+    public func handleGestureBegin(time: Double) {
+        let current = strip.viewOffset.current(at: time)
+        strip.viewOffset = .gesture(GestureState(currentOffset: current, isTouchpad: true))
+        frameLoop?.resume()
+    }
+
+    /// Update during an active gesture.
+    public func handleGestureUpdate(deltaX: Double, time: Double) {
+        guard case .gesture(var state) = strip.viewOffset else { return }
+        state.currentOffset += deltaX
+        state.tracker.push(delta: deltaX, timestamp: time)
+        strip.viewOffset = .gesture(state)
+    }
+
+    /// End a gesture — start momentum animation or stop.
+    public func handleGestureEnd(time: Double) {
+        guard case .gesture(let state) = strip.viewOffset else { return }
+        let velocity = state.tracker.velocity()
+
+        if abs(velocity) > 50 {
+            // Momentum → snap to nearest column edge
+            let projected = state.tracker.projectedEndPosition(isTouchpad: state.isTouchpad)
+            let snapped = snapToNearestColumnEdge(offset: projected)
+            let anim = SpringAnimation(
+                from: state.currentOffset,
+                to: snapped,
+                initialVelocity: velocity,
+                startTime: time,
+                params: .horizontalScroll
+            )
+            strip.viewOffset = .animation(anim)
+            // Frame loop continues to tick
+        } else {
+            // No significant velocity — just stop
+            strip.viewOffset = .static(state.currentOffset)
+            frameLoop?.pause()
+            clearCommittedFrames()
+            applyLayout()
+        }
+    }
+
+    /// Cancel a gesture (e.g., another event interrupted it).
+    public func handleGestureCancel() {
+        let time = currentTime()
+        let current = strip.viewOffset.current(at: time)
+        strip.viewOffset = .static(current)
+        frameLoop?.pause()
+        clearCommittedFrames()
+        applyLayout()
+    }
+
+    /// Snap a scroll offset to the nearest column edge for the active column.
+    private func snapToNearestColumnEdge(offset: Double) -> Double {
+        // Snap to the centered offset for the nearest column
+        let time = currentTime()
+        let viewPos = strip.columnX(at: strip.activeColumnIndex) + offset
+
+        // Find which column center is closest to the viewport center
+        let viewCenter = viewPos + strip.workingArea.width / 2
+        var bestIndex = strip.activeColumnIndex
+        var bestDist = Double.infinity
+
+        for i in 0..<strip.columns.count {
+            let colCenter = strip.columnX(at: i) + strip.columnData[i].currentWidth / 2
+            let dist = abs(colCenter - viewCenter)
+            if dist < bestDist {
+                bestDist = dist
+                bestIndex = i
+            }
+        }
+
+        strip.activeColumnIndex = bestIndex
+        return computeNewViewOffset(
+            forColumn: bestIndex,
+            previousColumn: nil,
+            focusMode: strip.focusMode,
+            columns: strip.columns,
+            columnData: strip.columnData,
+            gap: strip.gap,
+            workingAreaWidth: strip.workingArea.width
+        )
     }
 
     /// Update the working area (e.g., after display change or Dock show/hide).
