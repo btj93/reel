@@ -329,9 +329,12 @@ public final class StripController: @unchecked Sendable {
         for target in frames {
             guard let window = windowMap[target.tileID] else { continue }
 
-            // Skip unchanged frames
+            // Skip if position hasn't changed enough to matter.
+            // During animation, use a larger threshold (2px) to reduce AX call volume.
+            // Each AX call costs 0.5-5ms, so skipping sub-pixel changes saves significant time.
             if let lastFrame = lastCommittedFrames[target.tileID],
-               framesEqual(lastFrame, target.frame) {
+               abs(lastFrame.minX - target.frame.minX) < 2.0 &&
+               abs(lastFrame.minY - target.frame.minY) < 2.0 {
                 continue
             }
 

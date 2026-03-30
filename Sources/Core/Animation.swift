@@ -81,13 +81,15 @@ public struct SpringParams: Sendable {
         self.damping = dampingRatio * criticalDamping
     }
 
-    /// Niri defaults for horizontal view movement.
-    public static let horizontalScroll = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.0001)
+    /// Horizontal scroll animation.
+    /// Epsilon raised from niri's 0.0001 to 0.5 because each AX call costs 0.5-5ms.
+    /// Sub-pixel precision wastes hundreds of frames nobody can see.
+    public static let horizontalScroll = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
 
-    /// Niri defaults for window movement.
-    public static let windowMovement = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.0001)
+    /// Window movement animation.
+    public static let windowMovement = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
 
-    /// Niri defaults for workspace switching.
+    /// Workspace switching.
     public static let workspaceSwitch = SpringParams(dampingRatio: 1.0, stiffness: 1000, epsilon: 0.0001)
 
     /// Solve the damped harmonic oscillator: m*x'' + b*x' + k*x = 0
