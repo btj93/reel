@@ -1,0 +1,11 @@
+[apps.ScrollWM]
+product = "ScrollWM"
+version = "0.1.0"
+
+[apps.ScrollWM.plist]
+# Hide from Dock (menu bar only app)
+LSUIElement = true
+CFBundleIdentifier = "dev.scrollwm.ScrollWM"
+CFBundleName = "ScrollWM"
+CFBundleDisplayName = "ScrollWM"
+NSHighResolutionCapable = true

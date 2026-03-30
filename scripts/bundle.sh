@@ -1,0 +1,47 @@
+#!/bin/bash
+# Manual app bundling script (backup for swift-bundler)
+set -euo pipefail
+
+PRODUCT="ScrollWM"
+BUILD_DIR=".build/debug"
+BUNDLE_DIR=".build/bundled/${PRODUCT}.app"
+
+echo "Building ${PRODUCT}..."
+swift build
+
+echo "Creating app bundle..."
+rm -rf "${BUNDLE_DIR}"
+mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
+mkdir -p "${BUNDLE_DIR}/Contents/Resources"
+
+cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
+
+cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.scrollwm.ScrollWM</string>
+    <key>CFBundleName</key>
+    <string>ScrollWM</string>
+    <key>CFBundleDisplayName</key>
+    <string>ScrollWM</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>ScrollWM</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+echo "Bundle created at: ${BUNDLE_DIR}"
+echo "Run with: open ${BUNDLE_DIR}"
