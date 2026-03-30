@@ -15,6 +15,9 @@ public final class WindowManager: @unchecked Sendable {
     /// Whether management is paused.
     public private(set) var isPaused: Bool = false
 
+    /// Gesture capture for trackpad scrolling.
+    private var gestureCapture: GestureCapture?
+
     /// State persistence for crash recovery.
     private let stateFilePath: String
     private var stateWriteTimer: Timer?
@@ -71,6 +74,34 @@ public final class WindowManager: @unchecked Sendable {
         hotkeyManager.registerDefaults()
         let hotkeyOk = hotkeyManager.start()
         print("[WM] hotkeys: \(hotkeyOk)"); fflush(stdout)
+
+        // Phase 2: Frame loop for smooth animation
+        let frameLoop = FrameLoop()
+        frameLoop.onTick = { [weak self] time in
+            self?.stripController.handleFrameTick(time: time)
+        }
+        frameLoop.start()
+        stripController.frameLoop = frameLoop
+        stripController.animationEnabled = true
+        print("[WM] animation: enabled (frame loop created)"); fflush(stdout)
+
+        // Phase 2: Gesture capture for trackpad scrolling
+        let gestureCapture = GestureCapture()
+        gestureCapture.onGestureBegin = { [weak self] time in
+            self?.stripController.handleGestureBegin(time: time)
+        }
+        gestureCapture.onGestureUpdate = { [weak self] deltaX, time in
+            self?.stripController.handleGestureUpdate(deltaX: deltaX, time: time)
+        }
+        gestureCapture.onGestureEnd = { [weak self] time in
+            self?.stripController.handleGestureEnd(time: time)
+        }
+        gestureCapture.onGestureCancel = { [weak self] in
+            self?.stripController.handleGestureCancel()
+        }
+        let gestureOk = gestureCapture.start()
+        self.gestureCapture = gestureCapture
+        print("[WM] gesture capture: \(gestureOk)"); fflush(stdout)
 
         // Start periodic state persistence (every 5 seconds)
         stateWriteTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
@@ -145,6 +176,8 @@ public final class WindowManager: @unchecked Sendable {
         persistState()
 
         // Stop subsystems
+        stripController.frameLoop?.stop()
+        gestureCapture?.stop()
         hotkeyManager.stop()
         tracker.stopObserving()
         displayManager.stopObserving()
