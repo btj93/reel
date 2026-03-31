@@ -546,17 +546,40 @@ public final class StripController: @unchecked Sendable {
         let velocity = state.tracker.velocity()
 
         if abs(velocity) > 50 {
-            // Momentum → snap to nearest column edge
             let projected = state.tracker.projectedEndPosition(isTouchpad: state.isTouchpad)
-            let snapped = snapToNearestColumnEdge(offset: projected)
-            let anim = SpringAnimation(
-                from: state.currentOffset,
-                to: snapped,
-                initialVelocity: velocity,
-                startTime: time,
-                params: .horizontalScroll
-            )
-            strip.viewOffset = .animation(anim)
+
+            // Determine active column by cursor position (before creating spring)
+            strip.activeColumnIndex = columnUnderCursor(gestureOffset: state.currentOffset)
+
+            if gestureSnap {
+                // Snap to nearest configured snap point for the target column
+                let (snapIdx, snapOffset) = nearestSnapPoint(
+                    projectedOffset: projected,
+                    snapPoints: strip.snapPoints,
+                    columnWidth: strip.columnData[strip.activeColumnIndex].currentWidth,
+                    workingAreaWidth: strip.workingArea.width
+                )
+                strip.snapIndices[strip.activeColumnIndex] = snapIdx
+
+                let anim = SpringAnimation(
+                    from: state.currentOffset,
+                    to: snapOffset,
+                    initialVelocity: velocity,
+                    startTime: time,
+                    params: .horizontalScroll
+                )
+                strip.viewOffset = .animation(anim)
+            } else {
+                // Free scroll — animate to projected position, no column alignment
+                let anim = SpringAnimation(
+                    from: state.currentOffset,
+                    to: projected,
+                    initialVelocity: velocity,
+                    startTime: time,
+                    params: .horizontalScroll
+                )
+                strip.viewOffset = .animation(anim)
+            }
             // Frame loop continues to tick
         } else {
             // No significant velocity — just stop
@@ -577,31 +600,29 @@ public final class StripController: @unchecked Sendable {
         applyLayout()
     }
 
-    /// Snap a scroll offset to the nearest column edge for the active column.
-    private func snapToNearestColumnEdge(offset: Double) -> Double {
-        let viewPos = strip.columnX(at: strip.activeColumnIndex) + offset
-        let viewCenter = viewPos + strip.workingArea.width / 2
-        var bestIndex = strip.activeColumnIndex
-        var bestDist = Double.infinity
+    /// Determine which column is under the cursor, using the current gesture offset.
+    /// Falls back to the current activeColumnIndex if the cursor is outside the working area.
+    private func columnUnderCursor(gestureOffset: Double) -> Int {
+        guard !strip.columns.isEmpty else { return strip.activeColumnIndex }
 
-        for i in 0..<strip.columns.count {
-            let colCenter = strip.columnX(at: i) + strip.columnData[i].currentWidth / 2
-            let dist = abs(colCenter - viewCenter)
-            if dist < bestDist {
-                bestDist = dist
-                bestIndex = i
-            }
+        let cursorScreenX = NSEvent.mouseLocation.x
+        let wa = strip.workingArea
+
+        // If cursor is outside the working area X range, keep current active column
+        guard cursorScreenX >= wa.minX && cursorScreenX <= wa.maxX else {
+            return strip.activeColumnIndex
         }
 
-        strip.activeColumnIndex = bestIndex
-        strip.snapIndices[bestIndex] = strip.defaultSnapIndex
+        // Convert screen X to strip-space X:
+        // From LayoutEngine: screenX = stripX - viewPos + wa.minX
+        // viewPos = columnX(activeColumnIndex) + viewOffset
+        // So: stripX = (screenX - wa.minX) + columnX(activeColumnIndex) + viewOffset
+        let cursorStripX = (cursorScreenX - wa.minX)
+            + strip.columnX(at: strip.activeColumnIndex)
+            + gestureOffset
 
-        let snapPoint = strip.snapPoints[strip.snapIndices[bestIndex]]
-        return computeSnapOffset(
-            snapPoint: snapPoint,
-            columnWidth: strip.columnData[bestIndex].currentWidth,
-            workingAreaWidth: strip.workingArea.width
-        )
+        let columnWidths = strip.columnData.map(\.currentWidth)
+        return columnIndexAtStripX(cursorStripX, columnWidths: columnWidths, gap: strip.gap)
     }
 
     /// Update the working area (e.g., after display change or Dock show/hide).
