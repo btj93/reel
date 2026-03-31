@@ -219,8 +219,8 @@ public struct Strip: Sendable {
     /// Create a spring animation from the current view offset state to a target,
     /// preserving velocity if already animating (for rapid keypress compounding).
     /// Returns nil if already at the target (no animation needed).
-    private mutating func createScrollAnimation(to targetOffset: Double, at time: Double) -> SpringAnimation? {
-        let currentPos = viewOffset.current(at: time)
+    private mutating func createScrollAnimation(to targetOffset: Double, at time: Double, from overrideFrom: Double? = nil) -> SpringAnimation? {
+        let currentPos = overrideFrom ?? viewOffset.current(at: time)
 
         // Skip if already at target (prevents spring-back at boundaries)
         if abs(currentPos - targetOffset) < 1.0 {
@@ -231,7 +231,7 @@ public struct Strip: Sendable {
         let currentVel: Double
 
         // Preserve velocity from in-flight animation (rapid keypresses compound)
-        if case .animation(let existing) = viewOffset {
+        if case .animation(let existing) = viewOffset, overrideFrom == nil {
             currentVel = existing.evaluate(at: time).velocity
         } else {
             currentVel = 0
@@ -284,7 +284,7 @@ public struct Strip: Sendable {
                 workingAreaWidth: workingArea.width
             )
             snapIndices[activeColumnIndex] = snapIdx
-            return createScrollAnimation(to: targetOffset, at: time)
+            return createScrollAnimation(to: targetOffset, at: time, from: adjustedOffset)
         } else {
             // At rightmost column + leftmost snap — rubber-band bounce
             return createRubberBandAnimation(direction: 1, at: time)
@@ -322,7 +322,7 @@ public struct Strip: Sendable {
                 workingAreaWidth: workingArea.width
             )
             snapIndices[activeColumnIndex] = snapIdx
-            return createScrollAnimation(to: targetOffset, at: time)
+            return createScrollAnimation(to: targetOffset, at: time, from: adjustedOffset)
         } else {
             // At leftmost column + rightmost snap — rubber-band bounce
             return createRubberBandAnimation(direction: -1, at: time)
