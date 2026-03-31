@@ -270,13 +270,16 @@ public struct Strip: Sendable {
             return createScrollAnimation(to: targetOffset, at: time)
         } else if activeColumnIndex < columns.count - 1 {
             // Exhausted snap points — move focus to next column
+            let currentOffset = viewOffset.current(at: time)
             activeColumnIndex += 1
             let newColWidth = columnData[activeColumnIndex].currentWidth
-            let targetOffset = computeSnapOffset(
-                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+            let (snapIdx, targetOffset) = nearestSnapPoint(
+                projectedOffset: currentOffset,
+                snapPoints: snapPoints,
                 columnWidth: newColWidth,
                 workingAreaWidth: workingArea.width
             )
+            snapIndices[activeColumnIndex] = snapIdx
             return createScrollAnimation(to: targetOffset, at: time)
         } else {
             // At rightmost column + leftmost snap — rubber-band bounce
@@ -302,13 +305,16 @@ public struct Strip: Sendable {
             return createScrollAnimation(to: targetOffset, at: time)
         } else if activeColumnIndex > 0 {
             // Exhausted snap points — move focus to previous column
+            let currentOffset = viewOffset.current(at: time)
             activeColumnIndex -= 1
             let newColWidth = columnData[activeColumnIndex].currentWidth
-            let targetOffset = computeSnapOffset(
-                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+            let (snapIdx, targetOffset) = nearestSnapPoint(
+                projectedOffset: currentOffset,
+                snapPoints: snapPoints,
                 columnWidth: newColWidth,
                 workingAreaWidth: workingArea.width
             )
+            snapIndices[activeColumnIndex] = snapIdx
             return createScrollAnimation(to: targetOffset, at: time)
         } else {
             // At leftmost column + rightmost snap — rubber-band bounce
@@ -320,11 +326,22 @@ public struct Strip: Sendable {
     public mutating func navigateRightInstant(at time: Double) {
         guard !columns.isEmpty else { return }
         let currentSnap = snapIndices[activeColumnIndex]
+        let currentOffset = viewOffset.current(at: time)
 
         if currentSnap > 0 {
             snapIndices[activeColumnIndex] -= 1
         } else if activeColumnIndex < columns.count - 1 {
             activeColumnIndex += 1
+            let newColWidth = columnData[activeColumnIndex].currentWidth
+            let (snapIdx, offset) = nearestSnapPoint(
+                projectedOffset: currentOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            snapIndices[activeColumnIndex] = snapIdx
+            viewOffset = .static(offset)
+            return
         } else {
             return
         }
@@ -342,11 +359,22 @@ public struct Strip: Sendable {
     public mutating func navigateLeftInstant(at time: Double) {
         guard !columns.isEmpty else { return }
         let currentSnap = snapIndices[activeColumnIndex]
+        let currentOffset = viewOffset.current(at: time)
 
         if currentSnap < snapPoints.count - 1 {
             snapIndices[activeColumnIndex] += 1
         } else if activeColumnIndex > 0 {
             activeColumnIndex -= 1
+            let newColWidth = columnData[activeColumnIndex].currentWidth
+            let (snapIdx, offset) = nearestSnapPoint(
+                projectedOffset: currentOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            snapIndices[activeColumnIndex] = snapIdx
+            viewOffset = .static(offset)
+            return
         } else {
             return
         }
