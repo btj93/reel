@@ -90,11 +90,17 @@ public final class WindowManager: @unchecked Sendable {
         self.config = config
 
         // Strip layout
-        stripController.strip.gap = config.gap
-        stripController.strip.defaultWidth = config.defaultWidth
-        stripController.strip.widthPresets = config.widthPresets
-        stripController.strip.focusMode = config.focusMode
-        stripController.animationEnabled = config.animationEnabled
+        for (_, sc) in stripControllers {
+            sc.strip.gap = config.gap
+            sc.strip.defaultWidth = config.defaultWidth
+            sc.strip.widthPresets = config.widthPresets
+            sc.strip.snapPoints = config.snapPoints
+            // Clamp snap indices to new range (prevents crash if snap points shrink)
+            for i in 0..<sc.strip.snapIndices.count {
+                sc.strip.snapIndices[i] = min(sc.strip.snapIndices[i], config.snapPoints.count - 1)
+            }
+            sc.animationEnabled = config.animationEnabled
+        }
 
         // Window rules
         tracker.rules = config.rules.map { rule in
@@ -122,7 +128,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Terminal path is read directly from config when spawning
 
-        print("[WM] Config applied (gap=\(config.gap), focus=\(config.focusMode), animation=\(config.animationEnabled))")
+        print("[WM] Config applied (gap=\(config.gap), snap=\(config.snapPoints), animation=\(config.animationEnabled))")
         fflush(stdout)
     }
 
@@ -377,11 +383,16 @@ public final class WindowManager: @unchecked Sendable {
         config = newConfig
 
         // Apply to strip
-        stripController.strip.gap = config.gap
-        stripController.strip.defaultWidth = config.defaultWidth
-        stripController.strip.widthPresets = config.widthPresets
-        stripController.strip.focusMode = config.focusMode
-        stripController.animationEnabled = config.animationEnabled
+        for (_, sc) in stripControllers {
+            sc.strip.gap = config.gap
+            sc.strip.defaultWidth = config.defaultWidth
+            sc.strip.widthPresets = config.widthPresets
+            sc.strip.snapPoints = config.snapPoints
+            for i in 0..<sc.strip.snapIndices.count {
+                sc.strip.snapIndices[i] = min(sc.strip.snapIndices[i], config.snapPoints.count - 1)
+            }
+            sc.animationEnabled = config.animationEnabled
+        }
 
         // Apply to hotkeys
         hotkeyManager.registerFromConfig(config.keybindings)

@@ -17,8 +17,11 @@ public struct Strip: Sendable {
     /// Scroll position state machine.
     public var viewOffset: ViewOffset
 
-    /// How the viewport scrolls on focus change.
-    public var focusMode: CenterFocusedColumn
+    /// Configured snap points, sorted spatially (default: [.middle]).
+    public var snapPoints: [SnapPoint]
+
+    /// Per-column snap index into `snapPoints`. Parallel to `columns`.
+    public var snapIndices: [Int]
 
     /// Gap between columns in logical points.
     public var gap: Double
@@ -37,7 +40,8 @@ public struct Strip: Sendable {
         columnData: [ColumnData] = [],
         activeColumnIndex: Int = 0,
         viewOffset: ViewOffset = .static(0),
-        focusMode: CenterFocusedColumn = .always,
+        snapPoints: [SnapPoint] = [.middle],
+        snapIndices: [Int] = [],
         gap: Double = 16,
         workingArea: CGRect = .zero,
         widthPresets: [ColumnWidth] = [.proportion(0.33), .proportion(0.5), .proportion(0.67)],
@@ -47,7 +51,8 @@ public struct Strip: Sendable {
         self.columnData = columnData
         self.activeColumnIndex = activeColumnIndex
         self.viewOffset = viewOffset
-        self.focusMode = focusMode
+        self.snapPoints = snapPoints
+        self.snapIndices = snapIndices
         self.gap = gap
         self.workingArea = workingArea
         self.widthPresets = widthPresets
@@ -55,6 +60,12 @@ public struct Strip: Sendable {
     }
 
     // MARK: - Computed Properties
+
+    /// The default snap index for new columns — `.middle` or closest to center.
+    public var defaultSnapIndex: Int {
+        if let idx = snapPoints.firstIndex(of: .middle) { return idx }
+        return (snapPoints.count - 1) / 2
+    }
 
     /// Total width of the strip (all columns + gaps).
     public var totalWidth: Double {
@@ -101,16 +112,14 @@ public struct Strip: Sendable {
 
         columns.insert(column, at: insertIndex)
         columnData.insert(ColumnData(cachedWidth: resolvedWidth), at: insertIndex)
+        snapIndices.insert(defaultSnapIndex, at: insertIndex)
 
         activeColumnIndex = insertIndex
 
-        let newOffset = computeNewViewOffset(
-            forColumn: activeColumnIndex,
-            previousColumn: max(0, insertIndex - 1),
-            focusMode: focusMode,
-            columns: columns,
-            columnData: columnData,
-            gap: gap,
+        let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
+        let newOffset = computeSnapOffset(
+            snapPoint: snapPoint,
+            columnWidth: columnData[activeColumnIndex].currentWidth,
             workingAreaWidth: workingArea.width
         )
         viewOffset = .static(newOffset)
@@ -124,6 +133,7 @@ public struct Strip: Sendable {
 
         columns.remove(at: index)
         columnData.remove(at: index)
+        snapIndices.remove(at: index)
 
         guard !columns.isEmpty else {
             activeColumnIndex = 0
@@ -147,13 +157,10 @@ public struct Strip: Sendable {
         }
 
         // Recompute view offset
-        let newOffset = computeNewViewOffset(
-            forColumn: activeColumnIndex,
-            previousColumn: nil,
-            focusMode: focusMode,
-            columns: columns,
-            columnData: columnData,
-            gap: gap,
+        let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
+        let newOffset = computeSnapOffset(
+            snapPoint: snapPoint,
+            columnWidth: columnData[activeColumnIndex].currentWidth,
             workingAreaWidth: workingArea.width
         )
         viewOffset = .static(newOffset)
@@ -163,13 +170,11 @@ public struct Strip: Sendable {
 
     /// Recenter the viewport on the active column (e.g., after a resize changes column widths).
     public mutating func recenterActiveColumn(at time: Double) {
-        let targetOffset = computeNewViewOffset(
-            forColumn: activeColumnIndex,
-            previousColumn: activeColumnIndex,
-            focusMode: focusMode,
-            columns: columns,
-            columnData: columnData,
-            gap: gap,
+        guard !columns.isEmpty else { return }
+        let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
+        let targetOffset = computeSnapOffset(
+            snapPoint: snapPoint,
+            columnWidth: columnData[activeColumnIndex].currentWidth,
             workingAreaWidth: workingArea.width
         )
         viewOffset = .static(targetOffset)
@@ -177,115 +182,14 @@ public struct Strip: Sendable {
 
     /// Recenter the viewport on the active column with spring animation.
     public mutating func recenterActiveColumnAnimated(at time: Double) -> SpringAnimation? {
-        let targetOffset = computeNewViewOffset(
-            forColumn: activeColumnIndex,
-            previousColumn: activeColumnIndex,
-            focusMode: focusMode,
-            columns: columns,
-            columnData: columnData,
-            gap: gap,
+        guard !columns.isEmpty else { return nil }
+        let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
+        let targetOffset = computeSnapOffset(
+            snapPoint: snapPoint,
+            columnWidth: columnData[activeColumnIndex].currentWidth,
             workingAreaWidth: workingArea.width
         )
         return createScrollAnimation(to: targetOffset, at: time)
-    }
-
-    // MARK: - Focus Navigation
-
-    /// Focus the column to the left.
-    public mutating func focusLeft(at time: Double) {
-        guard activeColumnIndex > 0 else { return }
-        let previous = activeColumnIndex
-        activeColumnIndex -= 1
-
-        let newOffset = computeNewViewOffset(
-            forColumn: activeColumnIndex,
-            previousColumn: previous,
-            focusMode: focusMode,
-            columns: columns,
-            columnData: columnData,
-            gap: gap,
-            workingAreaWidth: workingArea.width
-        )
-
-        // In instant mode, just set static. In animated mode, caller creates animation.
-        viewOffset = .static(newOffset)
-    }
-
-    /// Focus left with spring animation.
-    /// At the leftmost boundary, creates a rubber-band bounce (overshoot then spring back).
-    public mutating func focusLeftAnimated(at time: Double) -> SpringAnimation? {
-        if activeColumnIndex > 0 {
-            // Normal: move focus left
-            let previous = activeColumnIndex
-            activeColumnIndex -= 1
-
-            let targetOffset = computeNewViewOffset(
-                forColumn: activeColumnIndex,
-                previousColumn: previous,
-                focusMode: focusMode,
-                columns: columns,
-                columnData: columnData,
-                gap: gap,
-                workingAreaWidth: workingArea.width
-            )
-
-            guard let anim = createScrollAnimation(to: targetOffset, at: time) else {
-                activeColumnIndex = previous
-                return nil
-            }
-            return anim
-        } else {
-            // At leftmost boundary: rubber-band bounce
-            return createRubberBandAnimation(direction: -1, at: time)
-        }
-    }
-
-    /// Focus the column to the right.
-    public mutating func focusRight(at time: Double) {
-        guard activeColumnIndex < columns.count - 1 else { return }
-        let previous = activeColumnIndex
-        activeColumnIndex += 1
-
-        let newOffset = computeNewViewOffset(
-            forColumn: activeColumnIndex,
-            previousColumn: previous,
-            focusMode: focusMode,
-            columns: columns,
-            columnData: columnData,
-            gap: gap,
-            workingAreaWidth: workingArea.width
-        )
-
-        viewOffset = .static(newOffset)
-    }
-
-    /// Focus right with spring animation.
-    /// At the rightmost boundary, creates a rubber-band bounce (overshoot then spring back).
-    public mutating func focusRightAnimated(at time: Double) -> SpringAnimation? {
-        if activeColumnIndex < columns.count - 1 {
-            // Normal: move focus right
-            let previous = activeColumnIndex
-            activeColumnIndex += 1
-
-            let targetOffset = computeNewViewOffset(
-                forColumn: activeColumnIndex,
-                previousColumn: previous,
-                focusMode: focusMode,
-                columns: columns,
-                columnData: columnData,
-                gap: gap,
-                workingAreaWidth: workingArea.width
-            )
-
-            guard let anim = createScrollAnimation(to: targetOffset, at: time) else {
-                activeColumnIndex = previous
-                return nil
-            }
-            return anim
-        } else {
-            // At rightmost boundary: rubber-band bounce
-            return createRubberBandAnimation(direction: 1, at: time)
-        }
     }
 
     /// Create a rubber-band bounce at the strip edge.
@@ -345,12 +249,124 @@ public struct Strip: Sendable {
         return anim
     }
 
+    // MARK: - Snap Navigation
+
+    /// Navigate right: advance snap point on current column, or move focus right if exhausted.
+    /// Returns a SpringAnimation if animated, nil if no movement needed.
+    @discardableResult
+    public mutating func navigateRight(at time: Double) -> SpringAnimation? {
+        guard !columns.isEmpty else { return nil }
+        let currentSnap = snapIndices[activeColumnIndex]
+
+        if currentSnap < snapPoints.count - 1 {
+            // Advance snap point on current column
+            snapIndices[activeColumnIndex] += 1
+            let colWidth = columnData[activeColumnIndex].currentWidth
+            let targetOffset = computeSnapOffset(
+                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+                columnWidth: colWidth,
+                workingAreaWidth: workingArea.width
+            )
+            return createScrollAnimation(to: targetOffset, at: time)
+        } else if activeColumnIndex < columns.count - 1 {
+            // Exhausted snap points — move focus to next column
+            activeColumnIndex += 1
+            let newColWidth = columnData[activeColumnIndex].currentWidth
+            let targetOffset = computeSnapOffset(
+                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            return createScrollAnimation(to: targetOffset, at: time)
+        } else {
+            // At rightmost column + rightmost snap — rubber-band bounce
+            return createRubberBandAnimation(direction: 1, at: time)
+        }
+    }
+
+    /// Navigate left: decrement snap point on current column, or move focus left if exhausted.
+    @discardableResult
+    public mutating func navigateLeft(at time: Double) -> SpringAnimation? {
+        guard !columns.isEmpty else { return nil }
+        let currentSnap = snapIndices[activeColumnIndex]
+
+        if currentSnap > 0 {
+            // Decrement snap point on current column
+            snapIndices[activeColumnIndex] -= 1
+            let colWidth = columnData[activeColumnIndex].currentWidth
+            let targetOffset = computeSnapOffset(
+                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+                columnWidth: colWidth,
+                workingAreaWidth: workingArea.width
+            )
+            return createScrollAnimation(to: targetOffset, at: time)
+        } else if activeColumnIndex > 0 {
+            // Exhausted snap points — move focus to previous column
+            activeColumnIndex -= 1
+            let newColWidth = columnData[activeColumnIndex].currentWidth
+            let targetOffset = computeSnapOffset(
+                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            return createScrollAnimation(to: targetOffset, at: time)
+        } else {
+            // At leftmost column + leftmost snap — rubber-band bounce
+            return createRubberBandAnimation(direction: -1, at: time)
+        }
+    }
+
+    /// Navigate right without animation (instant mode).
+    public mutating func navigateRightInstant(at time: Double) {
+        guard !columns.isEmpty else { return }
+        let currentSnap = snapIndices[activeColumnIndex]
+
+        if currentSnap < snapPoints.count - 1 {
+            snapIndices[activeColumnIndex] += 1
+        } else if activeColumnIndex < columns.count - 1 {
+            activeColumnIndex += 1
+        } else {
+            return
+        }
+
+        let colWidth = columnData[activeColumnIndex].currentWidth
+        let targetOffset = computeSnapOffset(
+            snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+            columnWidth: colWidth,
+            workingAreaWidth: workingArea.width
+        )
+        viewOffset = .static(targetOffset)
+    }
+
+    /// Navigate left without animation (instant mode).
+    public mutating func navigateLeftInstant(at time: Double) {
+        guard !columns.isEmpty else { return }
+        let currentSnap = snapIndices[activeColumnIndex]
+
+        if currentSnap > 0 {
+            snapIndices[activeColumnIndex] -= 1
+        } else if activeColumnIndex > 0 {
+            activeColumnIndex -= 1
+        } else {
+            return
+        }
+
+        let colWidth = columnData[activeColumnIndex].currentWidth
+        let targetOffset = computeSnapOffset(
+            snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+            columnWidth: colWidth,
+            workingAreaWidth: workingArea.width
+        )
+        viewOffset = .static(targetOffset)
+    }
+
     /// Move the active column left (swap with neighbor).
     public mutating func moveColumnLeft(at time: Double) {
         guard activeColumnIndex > 0 else { return }
         let i = activeColumnIndex
         columns.swapAt(i, i - 1)
         columnData.swapAt(i, i - 1)
+        snapIndices.swapAt(i, i - 1)
         activeColumnIndex -= 1
     }
 
@@ -360,6 +376,7 @@ public struct Strip: Sendable {
         let i = activeColumnIndex
         columns.swapAt(i, i + 1)
         columnData.swapAt(i, i + 1)
+        snapIndices.swapAt(i, i + 1)
         activeColumnIndex += 1
     }
 

@@ -31,7 +31,7 @@ func section(_ name: String) {
 
 // MARK: - Helper
 
-func makeStrip(columnCount: Int, width: Double = 0.5, gap: Double = 16, screenWidth: Double = 1440, screenHeight: Double = 900) -> Strip {
+func makeStrip(columnCount: Int, width: Double = 0.5, gap: Double = 16, screenWidth: Double = 1440, screenHeight: Double = 900, snapPoints: [SnapPoint] = [.middle]) -> Strip {
     let wa = CGRect(x: 0, y: 25, width: screenWidth, height: screenHeight - 25)
     var columns: [Column] = []
     var columnData: [ColumnData] = []
@@ -39,7 +39,9 @@ func makeStrip(columnCount: Int, width: Double = 0.5, gap: Double = 16, screenWi
         columns.append(Column(tiles: [TileID(UInt32(i + 1))], width: .proportion(width)))
         columnData.append(ColumnData(cachedWidth: wa.width * width))
     }
-    return Strip(columns: columns, columnData: columnData, activeColumnIndex: 0, viewOffset: .static(0), focusMode: .always, gap: gap, workingArea: wa)
+    let defaultIdx = snapPoints.firstIndex(of: .middle) ?? (snapPoints.count - 1) / 2
+    let snapIndices = Array(repeating: defaultIdx, count: columnCount)
+    return Strip(columns: columns, columnData: columnData, activeColumnIndex: 0, viewOffset: .static(0), snapPoints: snapPoints, snapIndices: snapIndices, gap: gap, workingArea: wa)
 }
 
 func makeLayoutStrip(widths: [Double], activeIndex: Int = 0, viewOffset: Double = 0) -> Strip {
@@ -50,7 +52,8 @@ func makeLayoutStrip(widths: [Double], activeIndex: Int = 0, viewOffset: Double 
         columns.append(Column(tiles: [TileID(UInt32(i + 1))], width: .fixed(w)))
         columnData.append(ColumnData(cachedWidth: w))
     }
-    return Strip(columns: columns, columnData: columnData, activeColumnIndex: activeIndex, viewOffset: .static(viewOffset), gap: 16, workingArea: wa)
+    let snapIndices = Array(repeating: 0, count: widths.count)
+    return Strip(columns: columns, columnData: columnData, activeColumnIndex: activeIndex, viewOffset: .static(viewOffset), snapIndices: snapIndices, gap: 16, workingArea: wa)
 }
 
 // ============================================================
@@ -83,29 +86,6 @@ do {
     assertClose(strip.columnX(at: 0), 0, tolerance: 0.01, "col 0")
     assertClose(strip.columnX(at: 1), colWidth + 16, tolerance: 0.01, "col 1")
     assertClose(strip.columnX(at: 2), 2 * (colWidth + 16), tolerance: 0.01, "col 2")
-}
-
-section("Focus right")
-do {
-    var strip = makeStrip(columnCount: 3)
-    strip.focusRight(at: 0)
-    assertEq(strip.activeColumnIndex, 1, "should be 1")
-    strip.focusRight(at: 0)
-    assertEq(strip.activeColumnIndex, 2, "should be 2")
-    strip.focusRight(at: 0)
-    assertEq(strip.activeColumnIndex, 2, "should stay at 2 (boundary)")
-}
-
-section("Focus left")
-do {
-    var strip = makeStrip(columnCount: 3)
-    strip.activeColumnIndex = 2
-    strip.focusLeft(at: 0)
-    assertEq(strip.activeColumnIndex, 1)
-    strip.focusLeft(at: 0)
-    assertEq(strip.activeColumnIndex, 0)
-    strip.focusLeft(at: 0)
-    assertEq(strip.activeColumnIndex, 0, "should stay at 0 (boundary)")
 }
 
 section("Insert column")
@@ -219,7 +199,7 @@ section("Vertical stacking")
 do {
     let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
     let column = Column(tiles: [TileID(1), TileID(2)], width: .fixed(720))
-    let strip = Strip(columns: [column], columnData: [ColumnData(cachedWidth: 720)], activeColumnIndex: 0, viewOffset: .static(0), gap: 16, workingArea: wa)
+    let strip = Strip(columns: [column], columnData: [ColumnData(cachedWidth: 720)], activeColumnIndex: 0, viewOffset: .static(0), snapIndices: [0], gap: 16, workingArea: wa)
     let frames = computeTargetFrames(strip: strip, time: 0)
     assertEq(frames.count, 2)
     let expectedHeight = (875 - 16) / 2.0
@@ -405,6 +385,198 @@ do {
     strip.insertColumn(newCol, at: 0, atIndex: 10)
     assertEq(strip.columns.count, 3, "should have 3 columns")
     assertEq(strip.columns[2].tiles.first, TileID(99), "clamped to end")
+}
+
+// MARK: - Snap Point Tests
+print()
+print("Snap Point Tests")
+
+section("SnapPoint ordering")
+do {
+    check(SnapPoint.left < SnapPoint.middle, "left < middle")
+    check(SnapPoint.middle < SnapPoint.right, "middle < right")
+    let unsorted: [SnapPoint] = [.right, .left, .middle]
+    let sorted = unsorted.sorted()
+    assertEq(sorted, [.left, .middle, .right], "spatial sort")
+}
+
+section("computeSnapOffset — middle matches old centering")
+do {
+    let offset = computeSnapOffset(snapPoint: .middle, columnWidth: 720, workingAreaWidth: 1440)
+    assertClose(offset, -360, tolerance: 0.01, "middle centers column")
+}
+
+section("computeSnapOffset — left")
+do {
+    let offset = computeSnapOffset(snapPoint: .left, columnWidth: 720, workingAreaWidth: 1440)
+    assertClose(offset, 0, tolerance: 0.01, "left aligns to left edge")
+}
+
+section("computeSnapOffset — right")
+do {
+    let offset = computeSnapOffset(snapPoint: .right, columnWidth: 720, workingAreaWidth: 1440)
+    assertClose(offset, -720, tolerance: 0.01, "right aligns to right edge")
+}
+
+section("computeSnapOffset — full-width column collapses to 0")
+do {
+    for snap in [SnapPoint.left, .middle, .right] {
+        let offset = computeSnapOffset(snapPoint: snap, columnWidth: 1440, workingAreaWidth: 1440)
+        assertClose(offset, 0, tolerance: 0.01, "\(snap) full-width")
+    }
+}
+
+section("computeSnapOffset — column wider than screen clamps to 0")
+do {
+    let offset = computeSnapOffset(snapPoint: .right, columnWidth: 2000, workingAreaWidth: 1440)
+    assertClose(offset, 0, tolerance: 0.01, "wider than screen clamps")
+}
+
+section("Strip — default snap index is middle")
+do {
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    var strip = Strip(snapPoints: [.left, .middle, .right], gap: 16, workingArea: wa)
+    let col = Column(tiles: [TileID(1)], width: .proportion(0.5))
+    strip.insertColumn(col, at: 0)
+    assertEq(strip.snapIndices.count, 1, "one snap index")
+    assertEq(strip.snapIndices[0], 1, "default is middle (index 1)")
+}
+
+section("Strip — default snap index without middle")
+do {
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    var strip = Strip(snapPoints: [.left, .right], gap: 16, workingArea: wa)
+    let col = Column(tiles: [TileID(1)], width: .proportion(0.5))
+    strip.insertColumn(col, at: 0)
+    assertEq(strip.snapIndices[0], 0, "default is (count-1)/2 = 0 for [left, right]")
+}
+
+section("Strip — removeColumn removes snap index")
+do {
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    var strip = Strip(snapPoints: [.left, .middle, .right], gap: 16, workingArea: wa)
+    for i in 0..<3 {
+        strip.insertColumn(Column(tiles: [TileID(UInt32(i + 1))], width: .proportion(0.5)), at: 0)
+    }
+    assertEq(strip.snapIndices.count, 3)
+    strip.removeColumn(at: 1, at: 0)
+    assertEq(strip.snapIndices.count, 2, "snap index removed with column")
+}
+
+section("Strip — moveColumnRight swaps snap indices")
+do {
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    var strip = Strip(snapPoints: [.left, .middle, .right], gap: 16, workingArea: wa)
+    for i in 0..<3 {
+        strip.insertColumn(Column(tiles: [TileID(UInt32(i + 1))], width: .proportion(0.5)), at: 0)
+    }
+    strip.snapIndices[0] = 2
+    strip.activeColumnIndex = 0
+    strip.moveColumnRight(at: 0)
+    assertEq(strip.snapIndices[1], 2, "snap index followed the column")
+    assertEq(strip.snapIndices[0], 1, "neighbor's snap index is default")
+}
+
+// MARK: - Snap Navigation Tests
+print()
+print("Snap Navigation Tests")
+
+section("navigateRight — cycles snap points before changing focus")
+do {
+    var strip = makeStrip(columnCount: 3, snapPoints: [.left, .middle, .right])
+    strip.activeColumnIndex = 1
+    strip.snapIndices[1] = 0  // start at left
+
+    let _ = strip.navigateRight(at: 0)
+    assertEq(strip.activeColumnIndex, 1, "still on column 1")
+    assertEq(strip.snapIndices[1], 1, "snap advanced to middle")
+
+    let _ = strip.navigateRight(at: 0)
+    assertEq(strip.activeColumnIndex, 1, "still on column 1")
+    assertEq(strip.snapIndices[1], 2, "snap advanced to right")
+
+    let _ = strip.navigateRight(at: 0)
+    assertEq(strip.activeColumnIndex, 2, "moved to column 2")
+}
+
+section("navigateLeft — cycles snap points before changing focus")
+do {
+    var strip = makeStrip(columnCount: 3, snapPoints: [.left, .middle, .right])
+    strip.activeColumnIndex = 1
+    strip.snapIndices[1] = 2  // start at right
+
+    let _ = strip.navigateLeft(at: 0)
+    assertEq(strip.activeColumnIndex, 1, "still on column 1")
+    assertEq(strip.snapIndices[1], 1, "snap decremented to middle")
+
+    let _ = strip.navigateLeft(at: 0)
+    assertEq(strip.activeColumnIndex, 1, "still on column 1")
+    assertEq(strip.snapIndices[1], 0, "snap decremented to left")
+
+    let _ = strip.navigateLeft(at: 0)
+    assertEq(strip.activeColumnIndex, 0, "moved to column 0")
+}
+
+section("navigateRight — focus change doesn't advance new column's snap")
+do {
+    var strip = makeStrip(columnCount: 2, snapPoints: [.left, .middle, .right])
+    strip.snapIndices[0] = 2  // col 0 at rightmost
+    strip.snapIndices[1] = 1  // col 1 at middle
+
+    let _ = strip.navigateRight(at: 0)
+    assertEq(strip.activeColumnIndex, 1, "moved to column 1")
+    assertEq(strip.snapIndices[1], 1, "col 1 snap unchanged (still middle)")
+}
+
+section("snap=[middle] — immediate focus change (backward compat)")
+do {
+    var strip = makeStrip(columnCount: 3, snapPoints: [.middle])
+
+    let _ = strip.navigateRight(at: 0)
+    assertEq(strip.activeColumnIndex, 1, "immediate focus change")
+
+    let _ = strip.navigateRight(at: 0)
+    assertEq(strip.activeColumnIndex, 2, "immediate focus change")
+}
+
+section("snap=[left] — single snap, immediate focus change, left-aligned")
+do {
+    var strip = makeStrip(columnCount: 2, snapPoints: [.left])
+    let _ = strip.navigateRightInstant(at: 0)
+    assertEq(strip.activeColumnIndex, 1, "immediate focus change")
+    let offset = strip.viewOffset.current(at: 0)
+    assertClose(offset, 0, tolerance: 0.01, "left-aligned")
+}
+
+section("navigateRight — rubber-band at boundary")
+do {
+    var strip = makeStrip(columnCount: 1, snapPoints: [.left, .middle, .right])
+    strip.snapIndices[0] = 2  // at rightmost
+    let anim = strip.navigateRight(at: 0)
+    check(anim != nil, "should produce rubber-band animation")
+    assertEq(strip.activeColumnIndex, 0, "still on column 0")
+    assertEq(strip.snapIndices[0], 2, "snap unchanged")
+}
+
+section("navigateLeft — rubber-band at boundary")
+do {
+    var strip = makeStrip(columnCount: 1, snapPoints: [.left, .middle, .right])
+    strip.snapIndices[0] = 0  // at leftmost
+    let anim = strip.navigateLeft(at: 0)
+    check(anim != nil, "should produce rubber-band animation")
+    assertEq(strip.activeColumnIndex, 0, "still on column 0")
+    assertEq(strip.snapIndices[0], 0, "snap unchanged")
+}
+
+section("snap=[left,right] — two snap points, default index is 0 (left)")
+do {
+    var strip = makeStrip(columnCount: 2, snapPoints: [.left, .right])
+    assertEq(strip.snapIndices[0], 0, "default snap index for [left, right]")
+    let _ = strip.navigateRightInstant(at: 0)
+    assertEq(strip.activeColumnIndex, 0, "first press advances snap, stays on col 0")
+    assertEq(strip.snapIndices[0], 1, "advanced to right")
+    let _ = strip.navigateRightInstant(at: 0)
+    assertEq(strip.activeColumnIndex, 1, "second press moves focus")
 }
 
 // ============================================================

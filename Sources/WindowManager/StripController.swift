@@ -201,6 +201,7 @@ public final class StripController: @unchecked Sendable {
     public func rebuildStrip() {
         strip.columns.removeAll()
         strip.columnData.removeAll()
+        strip.snapIndices.removeAll()
         strip.activeColumnIndex = 0
         strip.viewOffset = .static(0)
         windowMap.removeAll()
@@ -214,11 +215,11 @@ public final class StripController: @unchecked Sendable {
     public func focusLeft() {
         let time = currentTime()
         if animationEnabled {
-            if let _ = strip.focusLeftAnimated(at: time) {
+            if let _ = strip.navigateLeft(at: time) {
                 frameLoop?.resume()
             }
         } else {
-            strip.focusLeft(at: time)
+            strip.navigateLeftInstant(at: time)
             applyLayout()
         }
         focusActiveWindow()
@@ -227,11 +228,11 @@ public final class StripController: @unchecked Sendable {
     public func focusRight() {
         let time = currentTime()
         if animationEnabled {
-            if let _ = strip.focusRightAnimated(at: time) {
+            if let _ = strip.navigateRight(at: time) {
                 frameLoop?.resume()
             }
         } else {
-            strip.focusRight(at: time)
+            strip.navigateRightInstant(at: time)
             applyLayout()
         }
         focusActiveWindow()
@@ -385,16 +386,13 @@ public final class StripController: @unchecked Sendable {
     public func scrollToWindow(tileID: TileID) {
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
 
-        let previous = strip.activeColumnIndex
         strip.activeColumnIndex = colIndex
+        strip.snapIndices[colIndex] = strip.defaultSnapIndex
 
-        let newOffset = computeNewViewOffset(
-            forColumn: colIndex,
-            previousColumn: previous,
-            focusMode: strip.focusMode,
-            columns: strip.columns,
-            columnData: strip.columnData,
-            gap: strip.gap,
+        let snapPoint = strip.snapPoints[strip.snapIndices[colIndex]]
+        let newOffset = computeSnapOffset(
+            snapPoint: snapPoint,
+            columnWidth: strip.columnData[colIndex].currentWidth,
             workingAreaWidth: strip.workingArea.width
         )
         strip.viewOffset = .static(newOffset)
@@ -578,11 +576,7 @@ public final class StripController: @unchecked Sendable {
 
     /// Snap a scroll offset to the nearest column edge for the active column.
     private func snapToNearestColumnEdge(offset: Double) -> Double {
-        // Snap to the centered offset for the nearest column
-        let time = currentTime()
         let viewPos = strip.columnX(at: strip.activeColumnIndex) + offset
-
-        // Find which column center is closest to the viewport center
         let viewCenter = viewPos + strip.workingArea.width / 2
         var bestIndex = strip.activeColumnIndex
         var bestDist = Double.infinity
@@ -597,13 +591,12 @@ public final class StripController: @unchecked Sendable {
         }
 
         strip.activeColumnIndex = bestIndex
-        return computeNewViewOffset(
-            forColumn: bestIndex,
-            previousColumn: nil,
-            focusMode: strip.focusMode,
-            columns: strip.columns,
-            columnData: strip.columnData,
-            gap: strip.gap,
+        strip.snapIndices[bestIndex] = strip.defaultSnapIndex
+
+        let snapPoint = strip.snapPoints[strip.snapIndices[bestIndex]]
+        return computeSnapOffset(
+            snapPoint: snapPoint,
+            columnWidth: strip.columnData[bestIndex].currentWidth,
             workingAreaWidth: strip.workingArea.width
         )
     }
@@ -674,6 +667,7 @@ public final class StripController: @unchecked Sendable {
         savedSpaces[currentSpaceFingerprint] = SavedStripState(
             columns: strip.columns,
             columnData: strip.columnData,
+            snapIndices: strip.snapIndices,
             activeColumnIndex: strip.activeColumnIndex,
             viewOffset: strip.viewOffset,
             windowMap: windowMap,
@@ -707,6 +701,12 @@ public final class StripController: @unchecked Sendable {
             strip.columnData = saved.columnData
             strip.activeColumnIndex = saved.activeColumnIndex
             strip.viewOffset = saved.viewOffset
+            // Restore snap indices with migration fallback
+            if saved.snapIndices.count == saved.columns.count {
+                strip.snapIndices = saved.snapIndices
+            } else {
+                strip.snapIndices = Array(repeating: strip.defaultSnapIndex, count: saved.columns.count)
+            }
             windowMap = saved.windowMap
             apps = saved.apps
             lastCommittedFrames.removeAll()  // Force re-apply
@@ -718,6 +718,7 @@ public final class StripController: @unchecked Sendable {
         // New space — clear for fresh discovery
         strip.columns.removeAll()
         strip.columnData.removeAll()
+        strip.snapIndices.removeAll()
         strip.activeColumnIndex = 0
         strip.viewOffset = .static(0)
         windowMap.removeAll()
@@ -760,6 +761,7 @@ public final class StripController: @unchecked Sendable {
 struct SavedStripState {
     let columns: [Column]
     let columnData: [ColumnData]
+    let snapIndices: [Int]
     let activeColumnIndex: Int
     let viewOffset: ViewOffset
     let windowMap: [TileID: AXWindow]

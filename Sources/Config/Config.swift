@@ -10,7 +10,7 @@ public struct ScrollWMConfig: Sendable {
     public var gap: Double = 16
     public var defaultWidth: ColumnWidth = .proportion(0.5)
     public var widthPresets: [ColumnWidth] = [.proportion(0.33), .proportion(0.5), .proportion(0.67)]
-    public var focusMode: CenterFocusedColumn = .always
+    public var snapPoints: [SnapPoint] = [.middle]
     public var struts: StrutsConfig = StrutsConfig()
     public var animationEnabled: Bool = true
 
@@ -161,13 +161,45 @@ extension ScrollWMConfig {
             if let dw = layout["default_width"] as? TOMLTable {
                 config.defaultWidth = parseColumnWidth(dw)
             }
-            if let fm = readString(layout["focus_mode"]) {
+            // Parse snap array (new)
+            var snapExplicitlySet = false
+            if let snapArray = layout["snap"] as? TOMLArray {
+                var points: [SnapPoint] = []
+                for item in snapArray {
+                    if let str = readString(item) {
+                        switch str {
+                        case "left": points.append(.left)
+                        case "middle": points.append(.middle)
+                        case "right": points.append(.right)
+                        default: print("[Config] Unknown snap point: \(str)")
+                        }
+                    }
+                }
+                let deduped = Array(Set(points)).sorted()
+                if !deduped.isEmpty {
+                    config.snapPoints = deduped
+                    snapExplicitlySet = true
+                }
+            }
+
+            // Backward compat: focus_mode → snap (only if snap not explicitly set)
+            if snapExplicitlySet, readString(layout["focus_mode"]) != nil {
+                print("[Config] Warning: both snap and focus_mode are set; focus_mode is ignored")
+            }
+            if !snapExplicitlySet, let fm = readString(layout["focus_mode"]) {
                 switch fm {
-                case "never": config.focusMode = .never
-                case "always": config.focusMode = .always
-                case "on-overflow", "on_overflow", "onOverflow": config.focusMode = .onOverflow
+                case "never": config.snapPoints = [.left]
+                case "always": config.snapPoints = [.middle]
+                case "on-overflow", "on_overflow", "onOverflow": config.snapPoints = [.middle]
                 default: break
                 }
+                print("[Config] Warning: focus_mode is deprecated, use snap instead")
+            }
+
+            // Validation
+            if config.snapPoints.isEmpty {
+                print("[Config] Warning: snap is empty, defaulting to [middle]")
+                config.snapPoints = [.middle]
             }
             if let v = readBool(layout["animation_enabled"]) { config.animationEnabled = v }
 
@@ -261,7 +293,7 @@ extension ScrollWMConfig {
 
         [layout]
         gap = 16
-        focus_mode = "always"  # "never", "always", "on-overflow"
+        snap = ["middle"]  # any combination of: "left", "middle", "right"
         animation_enabled = true
 
         # default_width = { proportion = 0.5 }
