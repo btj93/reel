@@ -684,6 +684,8 @@ public final class StripController: @unchecked Sendable {
 
     /// Switch to a new Space. Saves current state, restores if we've been here before,
     /// or starts fresh if it's a new Space.
+    /// Uses fuzzy fingerprint matching: if >50% of window IDs overlap with a saved space,
+    /// it's considered the same space (handles windows created/destroyed while away).
     /// - Parameter onScreenWindowIDs: CGWindowIDs currently on screen
     /// - Returns: true if restored from saved state, false if needs fresh discovery
     public func switchSpace(onScreenWindowIDs: Set<UInt32>) -> Bool {
@@ -693,8 +695,13 @@ public final class StripController: @unchecked Sendable {
         // Update fingerprint
         currentSpaceFingerprint = onScreenWindowIDs
 
-        // Check if we have saved state for this space
-        if let saved = savedSpaces[onScreenWindowIDs] {
+        // Find best matching saved space (fuzzy: Jaccard similarity > 0.5)
+        if let (matchedKey, saved) = findBestSavedSpace(for: onScreenWindowIDs) {
+            // Update the saved key to the current fingerprint
+            if matchedKey != onScreenWindowIDs {
+                savedSpaces.removeValue(forKey: matchedKey)
+            }
+
             // Restore saved state
             strip.columns = saved.columns
             strip.columnData = saved.columnData
@@ -718,6 +725,29 @@ public final class StripController: @unchecked Sendable {
         lastCommittedFrames.removeAll()
         focusRing.hide()
         return false
+    }
+
+    /// Find the saved space with the best fingerprint overlap.
+    /// Returns nil if no saved space has >50% Jaccard similarity.
+    private func findBestSavedSpace(for fingerprint: Set<UInt32>) -> (Set<UInt32>, SavedStripState)? {
+        var bestKey: Set<UInt32>?
+        var bestScore: Double = 0
+
+        for key in savedSpaces.keys {
+            let intersection = key.intersection(fingerprint).count
+            let union = key.union(fingerprint).count
+            guard union > 0 else { continue }
+            let jaccard = Double(intersection) / Double(union)
+            if jaccard > bestScore {
+                bestScore = jaccard
+                bestKey = key
+            }
+        }
+
+        guard let key = bestKey, bestScore > 0.5, let state = savedSpaces[key] else {
+            return nil
+        }
+        return (key, state)
     }
 
     /// Set the current Space fingerprint (used on initial startup).

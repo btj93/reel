@@ -541,6 +541,9 @@ public final class WindowManager: @unchecked Sendable {
         let restored = stripController.switchSpace(onScreenWindowIDs: onScreenIDs)
 
         if restored {
+            // Remember which window was focused before we modify the strip
+            let savedFocusTile = stripController.strip.activeColumn?.activeTile
+
             // Remove windows that are no longer on screen (closed while away)
             let managedIDs = Set(stripController.windowMap.keys.map(\.rawValue))
             let goneIDs = managedIDs.subtracting(onScreenIDs)
@@ -552,10 +555,6 @@ public final class WindowManager: @unchecked Sendable {
             let newWindowIDs = onScreenIDs.subtracting(managedIDs)
 
             if !newWindowIDs.isEmpty {
-                // Preserve restored focus — addWindow() auto-focuses each new column
-                let savedFocusIndex = stripController.strip.activeColumnIndex
-                let savedViewOffset = stripController.strip.viewOffset
-
                 for (pid, app) in tracker.apps {
                     let appWindows = discoverWindows(pid: pid)
                     for window in appWindows {
@@ -572,14 +571,23 @@ public final class WindowManager: @unchecked Sendable {
                     }
                 }
 
-                // Restore focus to the column the user had active before leaving
-                stripController.strip.activeColumnIndex = min(savedFocusIndex, stripController.strip.columns.count - 1)
-                stripController.strip.viewOffset = savedViewOffset
-
                 print("[ScrollWM] Space restored + \(newWindowIDs.count) new windows")
             } else {
                 print("[ScrollWM] Space restored: \(stripController.strip.columns.count) cols")
             }
+
+            // Restore focus to the window the user had active before leaving.
+            // Use TileID (not numeric index) so column insertions/removals don't
+            // cause us to focus the wrong window.
+            if let focusTile = savedFocusTile,
+               stripController.windowMap[focusTile] != nil {
+                stripController.scrollToWindow(tileID: focusTile)
+            } else {
+                // Original window was closed while away — just re-apply layout
+                // with whatever activeColumnIndex removeColumn settled on
+                stripController.applyLayout()
+            }
+
             fflush(stdout)
             return
         }
