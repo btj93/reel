@@ -159,6 +159,36 @@ public struct Strip: Sendable {
         viewOffset = .static(newOffset)
     }
 
+    // MARK: - Recenter
+
+    /// Recenter the viewport on the active column (e.g., after a resize changes column widths).
+    public mutating func recenterActiveColumn(at time: Double) {
+        let targetOffset = computeNewViewOffset(
+            forColumn: activeColumnIndex,
+            previousColumn: activeColumnIndex,
+            focusMode: focusMode,
+            columns: columns,
+            columnData: columnData,
+            gap: gap,
+            workingAreaWidth: workingArea.width
+        )
+        viewOffset = .static(targetOffset)
+    }
+
+    /// Recenter the viewport on the active column with spring animation.
+    public mutating func recenterActiveColumnAnimated(at time: Double) -> SpringAnimation? {
+        let targetOffset = computeNewViewOffset(
+            forColumn: activeColumnIndex,
+            previousColumn: activeColumnIndex,
+            focusMode: focusMode,
+            columns: columns,
+            columnData: columnData,
+            gap: gap,
+            workingAreaWidth: workingArea.width
+        )
+        return createScrollAnimation(to: targetOffset, at: time)
+    }
+
     // MARK: - Focus Navigation
 
     /// Focus the column to the left.
