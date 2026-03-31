@@ -229,6 +229,7 @@ public final class WindowManager: @unchecked Sendable {
         for (_, sc) in stripControllers {
             sc.frameLoop = frameLoop
             sc.animationEnabled = config.animationEnabled
+            sc.gestureSnap = config.gestureSnap
         }
         print("[WM] animation: enabled (\(stripControllers.count) displays)"); fflush(stdout)
 
@@ -393,6 +394,7 @@ public final class WindowManager: @unchecked Sendable {
                 sc.strip.snapIndices[i] = min(sc.strip.snapIndices[i], config.snapPoints.count - 1)
             }
             sc.animationEnabled = config.animationEnabled
+            sc.gestureSnap = config.gestureSnap
         }
 
         // Apply to hotkeys
