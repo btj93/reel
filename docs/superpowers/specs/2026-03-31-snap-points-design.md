@@ -118,15 +118,15 @@ The existing centering math (`-(workingAreaWidth - columnWidth) / 2`) is the `.m
        animate to targetOffset
      else:
        // Strip boundary — rubber-band bounce
-       createRubberBandAnimation(direction: +1)
+       createRubberBandAnimation(direction: +1, at: time)
 ```
 
 ### `navigateLeft` (animated variant, Hyper+H direction)
 
 Mirror of `navigateRight`:
-- Decrement snap index if > 0
-- Else move focus left — snap to the new column's current snap index (no decrement)
-- Else rubber-band bounce at left boundary
+- Decrement snap index if > 0, animate to new snap position
+- Else (snap index already at 0) move focus left — snap to the new column's current snap index as-is (no decrement on arrival). The decrement happens on the next Hyper+H keypress.
+- Else (leftmost column + snap index 0) rubber-band bounce: `createRubberBandAnimation(direction: -1, at: time)`
 
 ### Non-animated variants
 
@@ -145,7 +145,7 @@ Same logic, `viewOffset = .static(offset)` instead of spring animation.
 
 - `focusLeft()` / `focusRight()` → call `strip.navigateLeft()` / `strip.navigateRight()`
 - `scrollToWindow(tileID:)` → set target column's snap index to default (middle)
-- `handleGestureEnd` / `snapToNearestColumnEdge` → gestures ignore snap points; after settle, set the **newly-focused column's** snap index to default (not the previously-active column). This reset is intentional — after a free-scroll gesture, the snap index is treated as fresh regardless of where the column was before the gesture.
+- `handleGestureEnd` / `snapToNearestColumnEdge` → gestures ignore snap points. Inside `snapToNearestColumnEdge`, after setting `strip.activeColumnIndex = bestIndex`, also set `strip.snapIndices[bestIndex] = defaultSnapIndex`. This reset is intentional — after a free-scroll gesture, the snap index is treated as fresh regardless of where the column was before the gesture. The reset goes in `snapToNearestColumnEdge` (not at animation-settle time in `handleFrameTick`) because by settle time there's no clean way to distinguish gesture-settle from navigation-settle.
 - `handleUserResize` debounced recenter → use current snap index (not always middle)
 - `rebuildStrip()` → clear `strip.snapIndices` alongside `strip.columns` and `strip.columnData`
 - `switchSpace()` → restore `snapIndices` from `SavedStripState`; if absent or wrong length (e.g., saved before this feature existed), initialize as `Array(repeating: defaultSnapIndex, count: columns.count)`
