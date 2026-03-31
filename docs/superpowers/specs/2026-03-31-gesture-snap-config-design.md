@@ -10,15 +10,15 @@ Finally, the active column after a gesture should be determined by which column 
 
 ## Config
 
-New boolean key under `[layout]`:
+New boolean key under `[gesture]`:
 
 ```toml
-[layout]
-gesture_snap = true  # default: true. Set to false to disable snapping after trackpad gestures.
+[gesture]
+snap = true  # default: true. Set to false to disable snapping after trackpad gestures.
 ```
 
 - Stored as `ScrollWMConfig.gestureSnap: Bool = true`
-- Parsed in `Config.swift` alongside existing layout keys
+- Parsed in `Config.swift` from the `[gesture]` table (alongside `modifier`)
 - Propagated via `WindowManager.applyConfig()` to each `StripController`
 - `StripController` stores it as a property
 
@@ -28,8 +28,8 @@ gesture_snap = true  # default: true. Set to false to disable snapping after tra
 
 **`handleGestureEnd` with velocity > 50 px/s:**
 1. Project momentum endpoint via `SwipeTracker.projectedEndPosition()`
-2. Animate a spring from current offset to projected offset (no column alignment)
-3. Determine active column by cursor position (see Focus section below)
+2. Determine active column by cursor position (see Focus section below) — must happen before creating the spring so the focus ring tracks the correct column during animation
+3. Animate a spring from current offset to projected offset (no column alignment)
 4. Do NOT call `snapToNearestColumnEdge`
 
 **`handleGestureEnd` with velocity <= 50 px/s:**
@@ -54,7 +54,7 @@ This replaces the current `snapToNearestColumnEdge` logic which always resets to
 At gesture end, determine which column is under the cursor:
 
 1. Read cursor position via `NSEvent.mouseLocation` (screen coordinates, bottom-left origin)
-2. Convert screen X to strip-space X. The active column's screen position is `workingArea.minX + viewOffset`, and its strip position is `columnX(activeColumnIndex)`. So: `cursorStripX = (cursorScreenX - workingArea.minX) - viewOffset + columnX(activeColumnIndex)`
+2. Convert screen X to strip-space X. From `LayoutEngine.swift`: `screenX = stripX - viewPos + wa.minX`, where `viewPos = columnX(activeColumnIndex) + viewOffset`. Inverting: `cursorStripX = (cursorScreenX - workingArea.minX) + columnX(activeColumnIndex) + viewOffset`
 3. Find which column contains `cursorStripX` (account for gaps — if cursor is in a gap, pick the nearest column)
 4. Set `strip.activeColumnIndex` to that column
 
@@ -66,11 +66,11 @@ No `focusActiveWindow()` call is made — consistent with current gesture behavi
 
 | File | Change |
 |------|--------|
-| `Sources/Config/Config.swift` | Add `gestureSnap` property, parse `gesture_snap` from TOML |
+| `Sources/Config/Config.swift` | Add `gestureSnap` property, parse `snap` from `[gesture]` table |
 | `Sources/WindowManager/StripController.swift` | Add `gestureSnap` property. Refactor `handleGestureEnd` to branch on it. Replace `snapToNearestColumnEdge` with new logic: cursor-based active column + nearest snap point selection. Add `columnUnderCursor()` helper. |
 | `Sources/WindowManager/WindowManager.swift` | Propagate `gestureSnap` to StripControllers in `applyConfig()` |
-| `config.default.toml` | Add `gesture_snap = true` with comment |
-| `Tests/CoreTests/main.swift` | Test nearest-snap-point selection logic |
+| `config.default.toml` | Add `snap = true` under `[gesture]` with comment |
+| `Tests/CoreTests/main.swift` | Test nearest-snap-point selection logic and coordinate conversion |
 
 ## Coordinate Conversion Notes
 
@@ -85,3 +85,4 @@ No `focusActiveWindow()` call is made — consistent with current gesture behavi
 - **Cursor outside the strip entirely:** Fall back to nearest column to viewport center (current behavior)
 - **Single column:** Always that column, regardless of cursor position
 - **Config reload:** `gestureSnap` updates take effect on next gesture (no mid-gesture change needed)
+- **Keyboard after free-scroll:** When `gesture_snap = false`, the first keyboard press after a free-scroll will jump to the default snap position of the cursor-selected column. This is intentional — keyboard navigation always snaps.
