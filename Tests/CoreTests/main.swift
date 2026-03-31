@@ -579,6 +579,59 @@ do {
     assertEq(strip.activeColumnIndex, 1, "second press moves focus")
 }
 
+// MARK: - Gesture Snap Helper Tests
+print()
+print("Gesture Snap Helper Tests")
+
+section("nearestSnapPoint — single snap point")
+do {
+    let (idx, offset) = nearestSnapPoint(
+        projectedOffset: -200,
+        snapPoints: [.middle],
+        columnWidth: 720,
+        workingAreaWidth: 1440
+    )
+    assertEq(idx, 0, "only one option")
+    assertClose(offset, -360, tolerance: 0.01, "middle offset")
+}
+
+section("nearestSnapPoint — picks closest of three")
+do {
+    // left=0, middle=-360, right=-720. Projected=-100 → closest is left (0).
+    let (idx, _) = nearestSnapPoint(
+        projectedOffset: -100,
+        snapPoints: [.left, .middle, .right],
+        columnWidth: 720,
+        workingAreaWidth: 1440
+    )
+    assertEq(idx, 0, "closest to left")
+}
+
+section("nearestSnapPoint — picks right when projected far negative")
+do {
+    // left=0, middle=-360, right=-720. Projected=-600 → closest is right (-720).
+    let (idx, _) = nearestSnapPoint(
+        projectedOffset: -600,
+        snapPoints: [.left, .middle, .right],
+        columnWidth: 720,
+        workingAreaWidth: 1440
+    )
+    assertEq(idx, 2, "closest to right")
+}
+
+section("nearestSnapPoint — picks middle when equidistant favors first")
+do {
+    // left=0, middle=-360, right=-720. Projected=-180 → equidistant between left(0) and middle(-360).
+    // Should pick first match (left at index 0) since we use < not <=.
+    let (idx, _) = nearestSnapPoint(
+        projectedOffset: -180,
+        snapPoints: [.left, .middle, .right],
+        columnWidth: 720,
+        workingAreaWidth: 1440
+    )
+    assertEq(idx, 0, "equidistant picks first (left)")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
