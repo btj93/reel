@@ -519,19 +519,15 @@ do {
     assertEq(strip.activeColumnIndex, 0, "moved to column 0")
 }
 
-section("navigateRight — focus change picks nearest snap for new column")
+section("navigateRight — focus change always centers new column")
 do {
-    // Col 0 width=720, col 1 width=720, gap=16, screen=1440
-    // Col 0 at left snap (offset=0). navigateRight exhausts snap → focus col 1.
-    // adjustedOffset = 0 + columnX(0) - columnX(1) = 0 + 0 - 736 = -736
-    // For col 1: left=0, middle=-360, right=-720. Nearest to -736 is right (-720).
     var strip = makeStrip(columnCount: 2, snapPoints: [.left, .middle, .right])
-    strip.snapIndices[0] = 0
+    strip.snapIndices[0] = 0  // col 0 at leftmost (exhausted for navigateRight)
     strip.viewOffset = .static(0)
 
     let _ = strip.navigateRight(at: 0)
     assertEq(strip.activeColumnIndex, 1, "moved to column 1")
-    assertEq(strip.snapIndices[1], 2, "col 1 snaps to nearest (right)")
+    assertEq(strip.snapIndices[1], 1, "col 1 snaps to default (middle)")
 }
 
 section("snap=[middle] — immediate focus change (backward compat)")
