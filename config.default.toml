@@ -41,6 +41,7 @@ close_window = "hyper-w"
 
 [gesture]
 modifier = "fn"  # Hold this key + trackpad scroll to pan the strip
+snap = true  # Set to false to let gestures move freely without snapping to columns
 
 # Window rules: match by app bundle ID or title regex
 # [[rules]]

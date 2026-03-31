@@ -37,6 +37,7 @@ public struct ScrollWMConfig: Sendable {
     // MARK: - Gesture
 
     public var gestureModifier: String = "fn"
+    public var gestureSnap: Bool = true
 
     // MARK: - Window Rules
 
@@ -229,6 +230,7 @@ extension ScrollWMConfig {
         // [gesture]
         if let gesture = table["gesture"] as? TOMLTable {
             if let v = readString(gesture["modifier"]) { config.gestureModifier = v }
+            if let v = readBool(gesture["snap"]) { config.gestureSnap = v }
         }
 
         // [[rules]]
