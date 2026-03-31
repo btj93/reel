@@ -483,17 +483,18 @@ print("Snap Navigation Tests")
 
 section("navigateRight — cycles snap points before changing focus")
 do {
+    // navigateRight decrements snap (window slides left on screen, revealing right)
     var strip = makeStrip(columnCount: 3, snapPoints: [.left, .middle, .right])
     strip.activeColumnIndex = 1
-    strip.snapIndices[1] = 0  // start at left
+    strip.snapIndices[1] = 2  // start at right
 
     let _ = strip.navigateRight(at: 0)
     assertEq(strip.activeColumnIndex, 1, "still on column 1")
-    assertEq(strip.snapIndices[1], 1, "snap advanced to middle")
+    assertEq(strip.snapIndices[1], 1, "snap decremented to middle")
 
     let _ = strip.navigateRight(at: 0)
     assertEq(strip.activeColumnIndex, 1, "still on column 1")
-    assertEq(strip.snapIndices[1], 2, "snap advanced to right")
+    assertEq(strip.snapIndices[1], 0, "snap decremented to left")
 
     let _ = strip.navigateRight(at: 0)
     assertEq(strip.activeColumnIndex, 2, "moved to column 2")
@@ -501,17 +502,18 @@ do {
 
 section("navigateLeft — cycles snap points before changing focus")
 do {
+    // navigateLeft increments snap (window slides right on screen, revealing left)
     var strip = makeStrip(columnCount: 3, snapPoints: [.left, .middle, .right])
     strip.activeColumnIndex = 1
-    strip.snapIndices[1] = 2  // start at right
+    strip.snapIndices[1] = 0  // start at left
 
     let _ = strip.navigateLeft(at: 0)
     assertEq(strip.activeColumnIndex, 1, "still on column 1")
-    assertEq(strip.snapIndices[1], 1, "snap decremented to middle")
+    assertEq(strip.snapIndices[1], 1, "snap incremented to middle")
 
     let _ = strip.navigateLeft(at: 0)
     assertEq(strip.activeColumnIndex, 1, "still on column 1")
-    assertEq(strip.snapIndices[1], 0, "snap decremented to left")
+    assertEq(strip.snapIndices[1], 2, "snap incremented to right")
 
     let _ = strip.navigateLeft(at: 0)
     assertEq(strip.activeColumnIndex, 0, "moved to column 0")
@@ -520,7 +522,7 @@ do {
 section("navigateRight — focus change doesn't advance new column's snap")
 do {
     var strip = makeStrip(columnCount: 2, snapPoints: [.left, .middle, .right])
-    strip.snapIndices[0] = 2  // col 0 at rightmost
+    strip.snapIndices[0] = 0  // col 0 at leftmost (exhausted for navigateRight)
     strip.snapIndices[1] = 1  // col 1 at middle
 
     let _ = strip.navigateRight(at: 0)
@@ -551,32 +553,30 @@ do {
 section("navigateRight — rubber-band at boundary")
 do {
     var strip = makeStrip(columnCount: 1, snapPoints: [.left, .middle, .right])
-    strip.snapIndices[0] = 2  // at rightmost
+    strip.snapIndices[0] = 0  // at leftmost (exhausted for navigateRight which decrements)
     let anim = strip.navigateRight(at: 0)
-    check(anim != nil, "should produce rubber-band animation")
-    assertEq(strip.activeColumnIndex, 0, "still on column 0")
-    assertEq(strip.snapIndices[0], 2, "snap unchanged")
-}
-
-section("navigateLeft — rubber-band at boundary")
-do {
-    var strip = makeStrip(columnCount: 1, snapPoints: [.left, .middle, .right])
-    strip.snapIndices[0] = 0  // at leftmost
-    let anim = strip.navigateLeft(at: 0)
     check(anim != nil, "should produce rubber-band animation")
     assertEq(strip.activeColumnIndex, 0, "still on column 0")
     assertEq(strip.snapIndices[0], 0, "snap unchanged")
 }
 
+section("navigateLeft — rubber-band at boundary")
+do {
+    var strip = makeStrip(columnCount: 1, snapPoints: [.left, .middle, .right])
+    strip.snapIndices[0] = 2  // at rightmost (exhausted for navigateLeft which increments)
+    let anim = strip.navigateLeft(at: 0)
+    check(anim != nil, "should produce rubber-band animation")
+    assertEq(strip.activeColumnIndex, 0, "still on column 0")
+    assertEq(strip.snapIndices[0], 2, "snap unchanged")
+}
+
 section("snap=[left,right] — two snap points, default index is 0 (left)")
 do {
+    // navigateRight decrements snap: 0 is already minimum, so moves focus
     var strip = makeStrip(columnCount: 2, snapPoints: [.left, .right])
     assertEq(strip.snapIndices[0], 0, "default snap index for [left, right]")
     let _ = strip.navigateRightInstant(at: 0)
-    assertEq(strip.activeColumnIndex, 0, "first press advances snap, stays on col 0")
-    assertEq(strip.snapIndices[0], 1, "advanced to right")
-    let _ = strip.navigateRightInstant(at: 0)
-    assertEq(strip.activeColumnIndex, 1, "second press moves focus")
+    assertEq(strip.activeColumnIndex, 1, "moves focus immediately (already at leftmost snap)")
 }
 
 // MARK: - Gesture Snap Helper Tests

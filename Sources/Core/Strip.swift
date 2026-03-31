@@ -258,9 +258,9 @@ public struct Strip: Sendable {
         guard !columns.isEmpty else { return nil }
         let currentSnap = snapIndices[activeColumnIndex]
 
-        if currentSnap < snapPoints.count - 1 {
-            // Advance snap point on current column
-            snapIndices[activeColumnIndex] += 1
+        if currentSnap > 0 {
+            // Decrement snap point (window slides left on screen, revealing right)
+            snapIndices[activeColumnIndex] -= 1
             let colWidth = columnData[activeColumnIndex].currentWidth
             let targetOffset = computeSnapOffset(
                 snapPoint: snapPoints[snapIndices[activeColumnIndex]],
@@ -279,20 +279,20 @@ public struct Strip: Sendable {
             )
             return createScrollAnimation(to: targetOffset, at: time)
         } else {
-            // At rightmost column + rightmost snap — rubber-band bounce
+            // At rightmost column + leftmost snap — rubber-band bounce
             return createRubberBandAnimation(direction: 1, at: time)
         }
     }
 
-    /// Navigate left: decrement snap point on current column, or move focus left if exhausted.
+    /// Navigate left: increment snap point on current column (window slides right), or move focus left if exhausted.
     @discardableResult
     public mutating func navigateLeft(at time: Double) -> SpringAnimation? {
         guard !columns.isEmpty else { return nil }
         let currentSnap = snapIndices[activeColumnIndex]
 
-        if currentSnap > 0 {
-            // Decrement snap point on current column
-            snapIndices[activeColumnIndex] -= 1
+        if currentSnap < snapPoints.count - 1 {
+            // Increment snap point (window slides right on screen, revealing left)
+            snapIndices[activeColumnIndex] += 1
             let colWidth = columnData[activeColumnIndex].currentWidth
             let targetOffset = computeSnapOffset(
                 snapPoint: snapPoints[snapIndices[activeColumnIndex]],
@@ -311,7 +311,7 @@ public struct Strip: Sendable {
             )
             return createScrollAnimation(to: targetOffset, at: time)
         } else {
-            // At leftmost column + leftmost snap — rubber-band bounce
+            // At leftmost column + rightmost snap — rubber-band bounce
             return createRubberBandAnimation(direction: -1, at: time)
         }
     }
@@ -321,8 +321,8 @@ public struct Strip: Sendable {
         guard !columns.isEmpty else { return }
         let currentSnap = snapIndices[activeColumnIndex]
 
-        if currentSnap < snapPoints.count - 1 {
-            snapIndices[activeColumnIndex] += 1
+        if currentSnap > 0 {
+            snapIndices[activeColumnIndex] -= 1
         } else if activeColumnIndex < columns.count - 1 {
             activeColumnIndex += 1
         } else {
@@ -343,8 +343,8 @@ public struct Strip: Sendable {
         guard !columns.isEmpty else { return }
         let currentSnap = snapIndices[activeColumnIndex]
 
-        if currentSnap > 0 {
-            snapIndices[activeColumnIndex] -= 1
+        if currentSnap < snapPoints.count - 1 {
+            snapIndices[activeColumnIndex] += 1
         } else if activeColumnIndex > 0 {
             activeColumnIndex -= 1
         } else {
