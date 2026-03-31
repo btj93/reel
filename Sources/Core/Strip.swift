@@ -270,15 +270,23 @@ public struct Strip: Sendable {
             return createScrollAnimation(to: targetOffset, at: time)
         } else if activeColumnIndex < columns.count - 1 {
             // Exhausted snap points — move focus to next column
+            // navigateRight → shift snap one step left (decrement) from current position
             let currentOffset = viewOffset.current(at: time)
             let oldColX = columnX(at: activeColumnIndex)
             activeColumnIndex += 1
             let newColX = columnX(at: activeColumnIndex)
             let adjustedOffset = currentOffset + oldColX - newColX
-            snapIndices[activeColumnIndex] = defaultSnapIndex
             let newColWidth = columnData[activeColumnIndex].currentWidth
+            let (nearIdx, _) = nearestSnapPoint(
+                projectedOffset: adjustedOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            let snapIdx = max(0, nearIdx - 1)
+            snapIndices[activeColumnIndex] = snapIdx
             let targetOffset = computeSnapOffset(
-                snapPoint: snapPoints[defaultSnapIndex],
+                snapPoint: snapPoints[snapIdx],
                 columnWidth: newColWidth,
                 workingAreaWidth: workingArea.width
             )
@@ -307,15 +315,23 @@ public struct Strip: Sendable {
             return createScrollAnimation(to: targetOffset, at: time)
         } else if activeColumnIndex > 0 {
             // Exhausted snap points — move focus to previous column
+            // navigateLeft → shift snap one step right (increment) from current position
             let currentOffset = viewOffset.current(at: time)
             let oldColX = columnX(at: activeColumnIndex)
             activeColumnIndex -= 1
             let newColX = columnX(at: activeColumnIndex)
             let adjustedOffset = currentOffset + oldColX - newColX
-            snapIndices[activeColumnIndex] = defaultSnapIndex
             let newColWidth = columnData[activeColumnIndex].currentWidth
+            let (nearIdx, _) = nearestSnapPoint(
+                projectedOffset: adjustedOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            let snapIdx = min(snapPoints.count - 1, nearIdx + 1)
+            snapIndices[activeColumnIndex] = snapIdx
             let targetOffset = computeSnapOffset(
-                snapPoint: snapPoints[defaultSnapIndex],
+                snapPoint: snapPoints[snapIdx],
                 columnWidth: newColWidth,
                 workingAreaWidth: workingArea.width
             )
@@ -334,11 +350,22 @@ public struct Strip: Sendable {
         if currentSnap > 0 {
             snapIndices[activeColumnIndex] -= 1
         } else if activeColumnIndex < columns.count - 1 {
+            let currentOffset = viewOffset.current(at: time)
+            let oldColX = columnX(at: activeColumnIndex)
             activeColumnIndex += 1
-            snapIndices[activeColumnIndex] = defaultSnapIndex
+            let newColX = columnX(at: activeColumnIndex)
+            let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth
+            let (nearIdx, _) = nearestSnapPoint(
+                projectedOffset: adjustedOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            let snapIdx = max(0, nearIdx - 1)
+            snapIndices[activeColumnIndex] = snapIdx
             let offset = computeSnapOffset(
-                snapPoint: snapPoints[defaultSnapIndex],
+                snapPoint: snapPoints[snapIdx],
                 columnWidth: newColWidth,
                 workingAreaWidth: workingArea.width
             )
@@ -365,11 +392,22 @@ public struct Strip: Sendable {
         if currentSnap < snapPoints.count - 1 {
             snapIndices[activeColumnIndex] += 1
         } else if activeColumnIndex > 0 {
+            let currentOffset = viewOffset.current(at: time)
+            let oldColX = columnX(at: activeColumnIndex)
             activeColumnIndex -= 1
-            snapIndices[activeColumnIndex] = defaultSnapIndex
+            let newColX = columnX(at: activeColumnIndex)
+            let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth
+            let (nearIdx, _) = nearestSnapPoint(
+                projectedOffset: adjustedOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            let snapIdx = min(snapPoints.count - 1, nearIdx + 1)
+            snapIndices[activeColumnIndex] = snapIdx
             let offset = computeSnapOffset(
-                snapPoint: snapPoints[defaultSnapIndex],
+                snapPoint: snapPoints[snapIdx],
                 columnWidth: newColWidth,
                 workingAreaWidth: workingArea.width
             )
