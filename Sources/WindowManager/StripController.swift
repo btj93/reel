@@ -22,6 +22,9 @@ public final class StripController: @unchecked Sendable {
     /// Whether animation is enabled (Phase 2 toggle).
     public var animationEnabled: Bool = false
 
+    /// Whether trackpad gestures snap to columns after flick.
+    public var gestureSnap: Bool = true
+
     /// Saved strip states per Space, keyed by a fingerprint of on-screen window IDs.
     private var savedSpaces: [Set<UInt32>: SavedStripState] = [:]
 

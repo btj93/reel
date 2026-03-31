@@ -100,6 +100,7 @@ public final class WindowManager: @unchecked Sendable {
                 sc.strip.snapIndices[i] = min(sc.strip.snapIndices[i], config.snapPoints.count - 1)
             }
             sc.animationEnabled = config.animationEnabled
+            sc.gestureSnap = config.gestureSnap
         }
 
         // Window rules
@@ -128,7 +129,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Terminal path is read directly from config when spawning
 
-        print("[WM] Config applied (gap=\(config.gap), snap=\(config.snapPoints), animation=\(config.animationEnabled))")
+        print("[WM] Config applied (gap=\(config.gap), snap=\(config.snapPoints), gestureSnap=\(config.gestureSnap), animation=\(config.animationEnabled))")
         fflush(stdout)
     }
 
