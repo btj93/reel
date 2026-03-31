@@ -632,6 +632,55 @@ do {
     assertEq(idx, 0, "equidistant picks first (left)")
 }
 
+// MARK: - columnIndexAtStripX Tests
+print()
+print("columnIndexAtStripX Tests")
+
+section("columnIndexAtStripX — hits first column")
+do {
+    // 3 columns of width 720, gap 16. Col 0: [0, 720), Col 1: [736, 1456), Col 2: [1472, 2192)
+    let columnWidths: [Double] = [720, 720, 720]
+    let idx = columnIndexAtStripX(100, columnWidths: columnWidths, gap: 16)
+    assertEq(idx, 0, "inside first column")
+}
+
+section("columnIndexAtStripX — hits second column")
+do {
+    let columnWidths: [Double] = [720, 720, 720]
+    let idx = columnIndexAtStripX(800, columnWidths: columnWidths, gap: 16)
+    assertEq(idx, 1, "inside second column")
+}
+
+section("columnIndexAtStripX — in gap picks nearest column")
+do {
+    // Gap between col 0 and col 1 is [720, 736). Midpoint = 728.
+    let columnWidths: [Double] = [720, 720, 720]
+    let idxLeft = columnIndexAtStripX(724, columnWidths: columnWidths, gap: 16)
+    assertEq(idxLeft, 0, "in gap, closer to left column")
+    let idxRight = columnIndexAtStripX(732, columnWidths: columnWidths, gap: 16)
+    assertEq(idxRight, 1, "in gap, closer to right column")
+}
+
+section("columnIndexAtStripX — before strip")
+do {
+    let columnWidths: [Double] = [720, 720]
+    let idx = columnIndexAtStripX(-100, columnWidths: columnWidths, gap: 16)
+    assertEq(idx, 0, "clamp to first")
+}
+
+section("columnIndexAtStripX — past end of strip")
+do {
+    let columnWidths: [Double] = [720, 720]
+    let idx = columnIndexAtStripX(5000, columnWidths: columnWidths, gap: 16)
+    assertEq(idx, 1, "clamp to last")
+}
+
+section("columnIndexAtStripX — single column")
+do {
+    let idx = columnIndexAtStripX(999, columnWidths: [720], gap: 16)
+    assertEq(idx, 0, "only column")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

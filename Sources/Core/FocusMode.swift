@@ -43,6 +43,34 @@ public func nearestSnapPoint(
     return (bestIndex, bestOffset)
 }
 
+/// Find the column index at a given strip-space X coordinate.
+/// If X falls in a gap, returns the nearest column. Clamps to valid range.
+public func columnIndexAtStripX(
+    _ stripX: Double,
+    columnWidths: [Double],
+    gap: Double
+) -> Int {
+    guard !columnWidths.isEmpty else { return 0 }
+
+    var x: Double = 0
+    for i in 0..<columnWidths.count {
+        let colEnd = x + columnWidths[i]
+        if stripX < colEnd {
+            return i  // inside this column
+        }
+        let gapEnd = colEnd + gap
+        if stripX < gapEnd {
+            // In the gap — pick the closer column
+            let distLeft = stripX - colEnd
+            let distRight = gapEnd - stripX
+            return distLeft < distRight ? i : min(i + 1, columnWidths.count - 1)
+        }
+        x = gapEnd
+    }
+    // Past the end
+    return columnWidths.count - 1
+}
+
 /// Compute the X position of a column in strip-space.
 public func computeColumnX(
     at index: Int,
