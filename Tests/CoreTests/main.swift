@@ -519,20 +519,25 @@ do {
     assertEq(strip.activeColumnIndex, 0, "moved to column 0")
 }
 
-section("navigateRight — focus change shifts snap one step left from current position")
+section("navigateRight — focus change snaps to next leftward milestone")
 do {
     // Col 0 width=720, col 1 width=720, gap=16, screen=1440
     // Col 0 at left snap (offset=0). navigateRight exhausts → focus col 1.
     // adjustedOffset = 0 + 0 - 736 = -736
-    // For col 1: left=0, middle=-360, right=-720. Nearest to -736 is right (idx=2).
-    // Shift one step left: idx = 2-1 = 1 (middle).
+    // For col 1: left=0, middle=-360, right=-720.
+    // Window is at -736, past right(-720). Going left, first unreached = right(-720).
+    // But window already passed right, so next leftward = middle? No:
+    // -736 < -720 (right), so right is to the LEFT of current pos. Check: -736 < -720? Yes.
+    // Iterate reversed: i=2 right=-720, -736 < -720? Yes → return right.
+    // Actually: currentOffset(-736) < snapOffset(-720)? Yes → unreached going left.
+    // So snap to right (idx=2).
     var strip = makeStrip(columnCount: 2, snapPoints: [.left, .middle, .right])
     strip.snapIndices[0] = 0
     strip.viewOffset = .static(0)
 
     let _ = strip.navigateRight(at: 0)
     assertEq(strip.activeColumnIndex, 1, "moved to column 1")
-    assertEq(strip.snapIndices[1], 1, "col 1 snaps to middle (one step left from nearest)")
+    assertEq(strip.snapIndices[1], 2, "col 1 snaps to right (next leftward milestone)")
 }
 
 section("snap=[middle] — immediate focus change (backward compat)")

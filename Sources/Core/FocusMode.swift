@@ -43,6 +43,48 @@ public func nearestSnapPoint(
     return (bestIndex, bestOffset)
 }
 
+/// Find the next snap milestone the window hasn't reached, moving rightward on screen.
+/// Used by navigateLeft: window slides right → snap to first unreached milestone going right.
+/// Snap offsets go: left=0, middle=-slack/2, right=-slack (more negative = further right).
+/// Returns (index, offset) of the target snap point.
+public func nextSnapMilestoneRight(
+    currentOffset: Double,
+    snapPoints: [SnapPoint],
+    columnWidth: Double,
+    workingAreaWidth: Double
+) -> (index: Int, offset: Double) {
+    // Iterate left→right (index 0→n). First snap whose offset < currentOffset is unreached.
+    for i in 0..<snapPoints.count {
+        let offset = computeSnapOffset(snapPoint: snapPoints[i], columnWidth: columnWidth, workingAreaWidth: workingAreaWidth)
+        if currentOffset > offset {
+            return (i, offset)
+        }
+    }
+    // All milestones reached — use the rightmost
+    let last = snapPoints.count - 1
+    return (last, computeSnapOffset(snapPoint: snapPoints[last], columnWidth: columnWidth, workingAreaWidth: workingAreaWidth))
+}
+
+/// Find the next snap milestone the window hasn't reached, moving leftward on screen.
+/// Used by navigateRight: window slides left → snap to first unreached milestone going left.
+/// Returns (index, offset) of the target snap point.
+public func nextSnapMilestoneLeft(
+    currentOffset: Double,
+    snapPoints: [SnapPoint],
+    columnWidth: Double,
+    workingAreaWidth: Double
+) -> (index: Int, offset: Double) {
+    // Iterate right→left (index n→0). First snap whose offset > currentOffset is unreached.
+    for i in (0..<snapPoints.count).reversed() {
+        let offset = computeSnapOffset(snapPoint: snapPoints[i], columnWidth: columnWidth, workingAreaWidth: workingAreaWidth)
+        if currentOffset < offset {
+            return (i, offset)
+        }
+    }
+    // All milestones reached — use the leftmost
+    return (0, computeSnapOffset(snapPoint: snapPoints[0], columnWidth: columnWidth, workingAreaWidth: workingAreaWidth))
+}
+
 /// Find the column index at a given strip-space X coordinate.
 /// If X falls in a gap, returns the nearest column. Clamps to valid range.
 public func columnIndexAtStripX(
