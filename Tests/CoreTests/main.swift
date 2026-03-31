@@ -681,6 +681,43 @@ do {
     assertEq(idx, 0, "only column")
 }
 
+section("Cursor-to-strip coordinate conversion")
+do {
+    // Setup: 3 columns, 720px each, gap 16, screen at x=0 width 1440
+    // Active column = 1 (at stripX = 736), viewOffset = -360 (centered)
+    // viewPos = 736 + (-360) = 376
+    // Screen shows strip from x=376 to x=1816
+    // Cursor at screen center (720) should map to stripX = 720 - 0 + 736 + (-360) = 1096
+    // That's inside column 1 [736, 1456) ✓
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let cursorScreenX: Double = 720
+    let activeColX: Double = 736  // columnX(at: 1) = 720 + 16
+    let viewOffset: Double = -360
+    let cursorStripX = (cursorScreenX - wa.minX) + activeColX + viewOffset
+    assertClose(cursorStripX, 1096, tolerance: 0.01, "cursor at screen center maps into column 1")
+
+    let idx = columnIndexAtStripX(cursorStripX, columnWidths: [720, 720, 720], gap: 16)
+    assertEq(idx, 1, "column under cursor is column 1")
+}
+
+section("Cursor-to-strip — secondary display offset")
+do {
+    // Screen at x=1440 (secondary display), width 1440
+    // Active column = 0 (stripX = 0), viewOffset = -360 (centered)
+    // Cursor at screen midpoint = 1440 + 720 = 2160
+    // cursorStripX = (2160 - 1440) + 0 + (-360) = 360
+    // That's inside column 0 [0, 720) ✓
+    let wa = CGRect(x: 1440, y: 25, width: 1440, height: 875)
+    let cursorScreenX: Double = 2160
+    let activeColX: Double = 0
+    let viewOffset: Double = -360
+    let cursorStripX = (cursorScreenX - wa.minX) + activeColX + viewOffset
+    assertClose(cursorStripX, 360, tolerance: 0.01, "secondary display cursor maps correctly")
+
+    let idx = columnIndexAtStripX(cursorStripX, columnWidths: [720, 720], gap: 16)
+    assertEq(idx, 0, "column under cursor is column 0")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
