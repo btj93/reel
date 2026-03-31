@@ -27,7 +27,7 @@ snap = ["middle"]  # default — equivalent to old focus_mode = "always"
 
 **Deprecation of `focus_mode`:** Parsed for backward compatibility and mapped to snap:
 - `"always"` → `["middle"]`
-- `"never"` → `["left"]`
+- `"never"` → `["left"]` — **Note:** this is a lossy mapping. The old `"never"` meant "scroll minimum to keep the column visible" (edge-fit), not "always left-align." Users who relied on edge-fit behavior should migrate to `snap = ["left", "middle"]` or similar.
 - `"on-overflow"` → `["middle"]`
 
 If both `snap` and `focus_mode` are present, `snap` wins with a log warning. If `snap` is empty or has no valid entries, falls back to `["middle"]` with a warning.
@@ -60,7 +60,7 @@ public var snapIndices: [Int]       // parallel to columns — current snap inde
 - Remove column → remove snap index at same position
 - Swap columns (moveLeft/Right) → swap snap indices too
 
-**Default snap index for new columns:** Index of `.middle` in `snapPoints`. If `.middle` isn't configured, use `snapPoints.count / 2`.
+**Default snap index for new columns:** Index of `.middle` in `snapPoints`. If `.middle` isn't configured, use `(snapPoints.count - 1) / 2` (integer division — picks the left-of-center entry for even-length arrays, e.g., `["left", "right"]` → index 0 → `.left`).
 
 ### Offset computation: `computeSnapOffset`
 
@@ -72,35 +72,41 @@ func computeSnapOffset(
     columnWidth: Double,
     workingAreaWidth: Double
 ) -> Double {
+    // Clamp so columns wider than working area don't produce positive offsets
+    let slack = max(0, workingAreaWidth - columnWidth)
     switch snapPoint {
-    case .left:   return 0                                    // col left edge = screen left edge
-    case .middle: return -(workingAreaWidth - columnWidth) / 2  // col center = screen center
-    case .right:  return -(workingAreaWidth - columnWidth)      // col right edge = screen right edge
+    case .left:   return 0              // col left edge = screen left edge
+    case .middle: return -slack / 2     // col center = screen center
+    case .right:  return -slack         // col right edge = screen right edge
     }
 }
 ```
 
-The existing centering math (`-(workingAreaWidth - columnWidth) / 2`) is the `.middle` case.
+The existing centering math (`-(workingAreaWidth - columnWidth) / 2`) is the `.middle` case. For full-width columns, `slack = 0` and all three snap points collapse to offset 0 — this is correct and expected (the column fills the screen regardless of snap position).
 
 ## Navigation Logic
 
 ### `navigateRight` (animated variant, Hyper+L direction)
 
 ```
-1. currentSnap = snapIndices[activeColumnIndex]
+1. colWidth = columnData[activeColumnIndex].currentWidth
+   currentSnap = snapIndices[activeColumnIndex]
 2. if currentSnap < snapPoints.count - 1:
      // Advance snap point on current column
      snapIndices[activeColumnIndex] += 1
-     targetOffset = computeSnapOffset(snapPoints[newIndex], colWidth, screenWidth)
+     targetOffset = computeSnapOffset(snapPoints[snapIndices[activeColumnIndex]],
+                                      colWidth, screenWidth)
      animate to targetOffset
 3. else:
      // Exhausted snap points — move focus to next column
      if activeColumnIndex < columns.count - 1:
        activeColumnIndex += 1
+       newColWidth = columnData[activeColumnIndex].currentWidth  // use NEW column's width
        // Advance new column's snap one step in travel direction (clamped)
        snapIndices[activeColumnIndex] = min(snapIndices[activeColumnIndex] + 1,
                                             snapPoints.count - 1)
-       targetOffset = computeSnapOffset(snapPoints[newSnapIndex], colWidth, screenWidth)
+       targetOffset = computeSnapOffset(snapPoints[snapIndices[activeColumnIndex]],
+                                        newColWidth, screenWidth)
        animate to targetOffset
      else:
        // Strip boundary — rubber-band bounce
@@ -120,9 +126,10 @@ Same logic, `viewOffset = .static(offset)` instead of spring animation.
 
 ### Behavior with `snap = ["middle"]` (backward compat)
 
-- `snapPoints.count == 1`, so step 2 never triggers (currentSnap is always at max)
-- Always falls through to step 3: move focus, new column's snap stays at 0 (middle)
-- Offset = `-(screenWidth - colWidth) / 2` — identical to old `focusMode = .always`
+- `snapPoints.count == 1`, so step 2 never triggers (currentSnap 0 is already at max index 0)
+- Always falls through to step 3: move focus to next column
+- New column's snap: `min(0 + 1, 0) = 0` — clamped back to 0 (the only valid index)
+- Offset = `computeSnapOffset(.middle, ...)` = `-(screenWidth - colWidth) / 2` — identical to old `focusMode = .always`
 
 ## Integration Points
 
@@ -132,11 +139,13 @@ Same logic, `viewOffset = .static(offset)` instead of spring animation.
 - `scrollToWindow(tileID:)` → set target column's snap index to default (middle)
 - `handleGestureEnd` / `snapToNearestColumnEdge` → gestures ignore snap points; after settle, set focused column's snap index to default
 - `handleUserResize` debounced recenter → use current snap index (not always middle)
+- `rebuildStrip()` → clear `strip.snapIndices` alongside `strip.columns` and `strip.columnData`
+- `switchSpace()` → restore `snapIndices` from `SavedStripState`; if absent or wrong length (e.g., saved before this feature existed), initialize as `Array(repeating: defaultSnapIndex, count: columns.count)`
 - `SavedStripState` → include `snapIndices` for Space save/restore
 
 ### WindowManager
 
-- `applyConfig` → set `strip.snapPoints` instead of `strip.focusMode`
+- `applyConfig` → iterate **all** `stripControllers` (not just the active one) and set `strip.snapPoints` on each. This also fixes an existing bug where `focusMode` was only applied to the active display.
 
 ### Callers of `computeNewViewOffset` (all replaced)
 
@@ -180,9 +189,12 @@ if let snapArray = layout["snap"] as? TOMLArray {
 // Backward compat: focus_mode → snap (only if snap not explicitly set)
 if snapNotExplicitlySet {
     switch focusModeValue {
-    case "always":     config.snapPoints = [.middle]
-    case "never":      config.snapPoints = [.left]
+    case "always":      config.snapPoints = [.middle]
+    case "never":       config.snapPoints = [.left]  // lossy — see deprecation note
     case "on-overflow": config.snapPoints = [.middle]
+    }
+    if snapNotExplicitlySet && focusModeValue != nil {
+        print("[Config] Warning: focus_mode is deprecated, use snap instead")
     }
 }
 
@@ -217,6 +229,10 @@ All tests in `Tests/CoreTests/main.swift` using `section()` / `check()` / `asser
 
 10. **Rubber-band at strip boundary** — leftmost column + leftmost snap, navigateLeft produces bounce.
 
+11. **moveColumnLeft/Right swaps snap indices** — column at snap index 2, swap with neighbor, verify snap index follows the column.
+
+12. **Full-width column: all snaps collapse to 0** — toggle full width, verify `computeSnapOffset` returns 0 for all three snap points.
+
 ## Files Modified
 
 | File | Change |
@@ -224,7 +240,15 @@ All tests in `Tests/CoreTests/main.swift` using `section()` / `check()` / `asser
 | `Sources/Core/SnapPoint.swift` | New file: `SnapPoint` enum |
 | `Sources/Core/FocusMode.swift` | Replace with `computeSnapOffset`. Remove `CenterFocusedColumn`, `computeNewViewOffset`, `computeCenteredOffset`, `computeFitOffset`. |
 | `Sources/Core/Strip.swift` | Replace `focusMode` with `snapPoints` + `snapIndices`. Replace `focusLeft/Right` with `navigateLeft/Right`. Update `insertColumn`, `removeColumn`, `moveColumnLeft/Right`, `recenterActiveColumn`. |
-| `Sources/Config/Config.swift` | Replace `focusMode` with `snapPoints`. Parse `snap` array. Backward-compat `focus_mode` mapping. |
+| `Sources/Config/Config.swift` | Replace `focusMode` with `snapPoints`. Parse `snap` array. Backward-compat `focus_mode` mapping. Update `createDefaultConfig()` to emit `snap = ["middle"]` instead of `focus_mode = "always"`. |
 | `Sources/WindowManager/StripController.swift` | Update `focusLeft/Right` to call `navigateLeft/Right`. Update `scrollToWindow`, `snapToNearestColumnEdge`, `handleUserResize`. Add `snapIndices` to `SavedStripState`. |
 | `Sources/WindowManager/WindowManager.swift` | `applyConfig`: set `snapPoints` instead of `focusMode`. |
 | `Tests/CoreTests/main.swift` | Add snap point test sections. |
+
+## IPC
+
+The `get-layout` IPC response currently serializes per-column data (`index`, `tiles`, `width`, `active`). Snap state is intentionally **not** added to IPC in this iteration — it's internal viewport state, not window metadata. Can be added later if tooling needs it.
+
+## Multi-Monitor
+
+Each display has its own `StripController` with its own `Strip`. The `snap` config is global and applied to all strips via `applyConfig` (which iterates all `stripControllers`). Per-display snap config is not supported in this iteration.
