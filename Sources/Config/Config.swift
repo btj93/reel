@@ -32,7 +32,6 @@ public struct ScrollWMConfig: Sendable {
         "toggle_full_width": "hyper-f",
         "toggle_floating": "hyper-space",
         "close_window": "hyper-w",
-        "spawn_terminal": "hyper-t",
     ]
 
     // MARK: - Gesture
@@ -42,10 +41,6 @@ public struct ScrollWMConfig: Sendable {
     // MARK: - Window Rules
 
     public var rules: [WindowRuleConfig] = []
-
-    // MARK: - Terminal
-
-    public var terminalApp: String = "/System/Applications/Utilities/Terminal.app"
 
     // MARK: - Position Memory
     public var positionMemory: Bool = true
@@ -106,24 +101,40 @@ public struct StrutsConfig: Sendable {
 
 extension ScrollWMConfig {
 
-    /// Load config from file, or return defaults if file doesn't exist or is invalid.
+    /// Load config: parse bundled defaults first, then overlay user config on top.
     public static func load() -> (config: ScrollWMConfig, error: String?) {
+        // Start from bundled defaults
+        var config = loadDefaults()
+
         let path = configPath
 
-        // Create default config if doesn't exist
+        // Create user config file if it doesn't exist
         if !FileManager.default.fileExists(atPath: path) {
             createDefaultConfig()
-            return (ScrollWMConfig(), nil)
+            return (config, nil)
         }
 
+        // Parse user config on top of defaults
         do {
             let content = try String(contentsOfFile: path, encoding: .utf8)
             let table = try TOMLTable(string: content)
-            let config = parse(table: table)
+            config = parse(table: table, base: config)
             return (config, nil)
         } catch {
-            return (ScrollWMConfig(), "Config error: \(error.localizedDescription)")
+            return (config, "Config error: \(error.localizedDescription)")
         }
+    }
+
+    /// Load defaults from bundled config.default.toml.
+    private static func loadDefaults() -> ScrollWMConfig {
+        guard let url = Bundle.module.url(forResource: "config.default", withExtension: "toml"),
+              let content = try? String(contentsOf: url, encoding: .utf8),
+              let table = try? TOMLTable(string: content) else {
+            print("[Config] Warning: could not load bundled config.default.toml, using hardcoded defaults")
+            fflush(stdout)
+            return ScrollWMConfig()
+        }
+        return parse(table: table, base: ScrollWMConfig())
     }
 
     // MARK: - Helpers for reading TOML values
@@ -151,9 +162,10 @@ extension ScrollWMConfig {
         return nil
     }
 
-    /// Parse a TOML table into a config.
-    private static func parse(table: TOMLTable) -> ScrollWMConfig {
-        var config = ScrollWMConfig()
+    /// Parse a TOML table into a config, starting from a base config.
+    /// Only keys present in the table override the base values.
+    private static func parse(table: TOMLTable, base: ScrollWMConfig = ScrollWMConfig()) -> ScrollWMConfig {
+        var config = base
 
         // [layout]
         if let layout = table["layout"] as? TOMLTable {
@@ -161,8 +173,7 @@ extension ScrollWMConfig {
             if let dw = layout["default_width"] as? TOMLTable {
                 config.defaultWidth = parseColumnWidth(dw)
             }
-            // Parse snap array (new)
-            var snapExplicitlySet = false
+            // Parse snap array
             if let snapArray = layout["snap"] as? TOMLArray {
                 var points: [SnapPoint] = []
                 for item in snapArray {
@@ -178,22 +189,7 @@ extension ScrollWMConfig {
                 let deduped = Array(Set(points)).sorted()
                 if !deduped.isEmpty {
                     config.snapPoints = deduped
-                    snapExplicitlySet = true
                 }
-            }
-
-            // Backward compat: focus_mode → snap (only if snap not explicitly set)
-            if snapExplicitlySet, readString(layout["focus_mode"]) != nil {
-                print("[Config] Warning: both snap and focus_mode are set; focus_mode is ignored")
-            }
-            if !snapExplicitlySet, let fm = readString(layout["focus_mode"]) {
-                switch fm {
-                case "never": config.snapPoints = [.left]
-                case "always": config.snapPoints = [.middle]
-                case "on-overflow", "on_overflow", "onOverflow": config.snapPoints = [.middle]
-                default: break
-                }
-                print("[Config] Warning: focus_mode is deprecated, use snap instead")
             }
 
             // Validation
@@ -262,11 +258,6 @@ extension ScrollWMConfig {
             }
         }
 
-        // [terminal]
-        if let terminal = table["terminal"] as? TOMLTable {
-            if let v = readString(terminal["app"]) { config.terminalApp = v }
-        }
-
         // start_at_login (top-level)
         if let v = readBool(table["start_at_login"]) { config.startAtLogin = v }
 
@@ -279,74 +270,17 @@ extension ScrollWMConfig {
         return .proportion(0.5)
     }
 
-    /// Create default config file.
+    /// Create default config file from bundled config.default.toml.
     public static func createDefaultConfig() {
         let dir = configDir
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
-        let defaultConfig = """
-        # ScrollWM Configuration
-        # Edit this file and save — changes apply automatically.
-
-        # Start ScrollWM automatically when you log in (requires .app bundle)
-        # start_at_login = false
-
-        [layout]
-        gap = 16
-        snap = ["middle"]  # any combination of: "left", "middle", "right"
-        animation_enabled = true
-
-        # default_width = { proportion = 0.5 }
-
-        # Position memory: remember window positions across close/reopen
-        # position_memory = true
-        # saved_position_limit = 50
-
-        # Insets for external status bars (e.g., SketchyBar)
-        # [layout.struts]
-        # left = 0
-        # right = 0
-        # top = 0
-        # bottom = 0
-
-        [animation]
-        scroll_stiffness = 800
-        scroll_damping_ratio = 1.0
-        bounce_distance = 40
-        bounce_damping_ratio = 0.6
-
-        [keybindings]
-        # Hyper = Ctrl+Shift+Cmd+Opt (all four modifiers)
-        focus_left = "hyper-h"
-        focus_right = "hyper-l"
-        move_left = "hyper-j"
-        move_right = "hyper-k"
-        cycle_width = "hyper-r"
-        toggle_full_width = "hyper-f"
-        toggle_floating = "hyper-space"
-        close_window = "hyper-w"
-        spawn_terminal = "hyper-t"
-
-        [gesture]
-        modifier = "fn"  # Hold this key + trackpad scroll to pan the strip
-
-        # Window rules: match by app bundle ID or title regex
-        # [[rules]]
-        # app_id = "us.zoom.xos"
-        # floating = true
-
-        # [[rules]]
-        # app_id_regex = "com\\\\.apple\\\\.systempreferences"
-        # floating = true
-
-        # Per-app matching strategy for position memory
-        # [[position_memory_rules]]
-        # app_id = "com.apple.finder"
-        # match_by = "order"  # "title" (default) or "order"
-
-        [terminal]
-        app = "/System/Applications/Utilities/Terminal.app"
-        """
+        guard let url = Bundle.module.url(forResource: "config.default", withExtension: "toml"),
+              let defaultConfig = try? String(contentsOf: url, encoding: .utf8) else {
+            print("[Config] Error: could not load bundled config.default.toml")
+            fflush(stdout)
+            return
+        }
 
         try? defaultConfig.write(toFile: configPath, atomically: true, encoding: .utf8)
         print("[Config] Created default config at \(configPath)")

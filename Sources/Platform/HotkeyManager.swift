@@ -13,7 +13,6 @@ public enum HotkeyAction: Sendable {
     case toggleFloating
     case closeWindow
     case workspace(Int)
-    case spawnTerminal
 }
 
 /// A registered hotkey binding.
@@ -62,7 +61,6 @@ public final class HotkeyManager: @unchecked Sendable {
             "toggle_full_width": .toggleFullWidth,
             "toggle_floating": .toggleFloating,
             "close_window": .closeWindow,
-            "spawn_terminal": .spawnTerminal,
         ]
 
         for (actionName, keyString) in keybindingMap {
@@ -90,7 +88,6 @@ public final class HotkeyManager: @unchecked Sendable {
             "toggle_full_width": "hyper-f",
             "toggle_floating": "hyper-space",
             "close_window": "hyper-w",
-            "spawn_terminal": "hyper-t",
         ])
     }
 

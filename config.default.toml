@@ -1,0 +1,58 @@
+# ScrollWM Configuration
+# Edit this file and save — changes apply automatically.
+
+# Start ScrollWM automatically when you log in (requires .app bundle)
+# start_at_login = false
+
+[layout]
+gap = 16
+snap = ["middle"]  # any combination of: "left", "middle", "right"
+animation_enabled = true
+
+# default_width = { proportion = 0.5 }
+
+# Position memory: remember window positions across close/reopen
+# position_memory = true
+# saved_position_limit = 50
+
+# Insets for external status bars (e.g., SketchyBar)
+# [layout.struts]
+# left = 0
+# right = 0
+# top = 0
+# bottom = 0
+
+[animation]
+scroll_stiffness = 800
+scroll_damping_ratio = 1.0
+bounce_distance = 40
+bounce_damping_ratio = 0.6
+
+[keybindings]
+# Hyper = Ctrl+Shift+Cmd+Opt (all four modifiers)
+focus_left = "hyper-h"
+focus_right = "hyper-l"
+move_left = "hyper-j"
+move_right = "hyper-k"
+cycle_width = "hyper-r"
+toggle_full_width = "hyper-f"
+toggle_floating = "hyper-space"
+close_window = "hyper-w"
+
+[gesture]
+modifier = "fn"  # Hold this key + trackpad scroll to pan the strip
+
+# Window rules: match by app bundle ID or title regex
+# [[rules]]
+# app_id = "us.zoom.xos"
+# floating = true
+
+# [[rules]]
+# app_id_regex = "com\\.apple\\.systempreferences"
+# floating = true
+
+# Per-app matching strategy for position memory
+# [[position_memory_rules]]
+# app_id = "com.apple.finder"
+# match_by = "order"  # "title" (default) or "order"
+

@@ -653,8 +653,6 @@ public final class WindowManager: @unchecked Sendable {
             stripController.closeActiveWindow()
         case .workspace:
             break  // TODO: Phase 3
-        case .spawnTerminal:
-            spawnTerminal()
         }
     }
 
@@ -743,12 +741,6 @@ public final class WindowManager: @unchecked Sendable {
         }
 
         return adopted
-    }
-
-    // MARK: - Terminal Spawning
-
-    private func spawnTerminal() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: config.terminalApp))
     }
 
     // MARK: - Crash Recovery

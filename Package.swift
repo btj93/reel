@@ -51,7 +51,8 @@ let package = Package(
         .target(
             name: "Config",
             dependencies: ["Core", "TOMLKit"],
-            path: "Sources/Config"
+            path: "Sources/Config",
+            resources: [.copy("config.default.toml")]
         ),
 
         // IPC: shared command definitions + socket client/server
