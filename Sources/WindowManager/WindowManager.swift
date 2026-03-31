@@ -433,7 +433,7 @@ public final class WindowManager: @unchecked Sendable {
         stripController.clearCommittedFrames()
         stripController.applyLayout()
 
-        print("[WM] Config reloaded successfully")
+        print("[WM] Config reloaded (gestureSnap=\(config.gestureSnap), snap=\(config.snapPoints))")
         fflush(stdout)
     }
 

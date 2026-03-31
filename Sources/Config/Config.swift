@@ -143,23 +143,33 @@ extension ScrollWMConfig {
     /// Read a number from a TOML value (handles both Int and Double in TOML).
     private static func readDouble(_ value: TOMLValueConvertible?) -> Double? {
         if let v = value {
-            // TOMLKit stores integers as TOMLInt and floats as Double
             if let i = v as? Int { return Double(i) }
             if let d = v as? Double { return d }
-            // Try parsing the description
-            return Double(v.debugDescription)
+            if let i = v.int { return Double(i) }
+            if let d = v.double { return d }
         }
         return nil
     }
 
     private static func readString(_ value: TOMLValueConvertible?) -> String? {
         if let v = value as? String { return v }
-        if let v = value { return v.debugDescription }
-        return nil
+        return value?.string
     }
 
     private static func readBool(_ value: TOMLValueConvertible?) -> Bool? {
         if let v = value as? Bool { return v }
+        return value?.bool
+    }
+
+    private static func readArray(_ value: TOMLValueConvertible?) -> TOMLArray? {
+        if let a = value as? TOMLArray { return a }
+        return value?.array
+    }
+
+    /// Unwrap a TOML value to a TOMLTable, handling both direct TOMLTable and wrapped TOMLValue.
+    private static func readTable(_ value: TOMLValueConvertible?) -> TOMLTable? {
+        if let t = value as? TOMLTable { return t }
+        return value?.table
         return nil
     }
 
@@ -169,13 +179,13 @@ extension ScrollWMConfig {
         var config = base
 
         // [layout]
-        if let layout = table["layout"] as? TOMLTable {
+        if let layout = readTable(table["layout"]) {
             if let v = readDouble(layout["gap"]) { config.gap = v }
-            if let dw = layout["default_width"] as? TOMLTable {
+            if let dw = readTable(layout["default_width"]) {
                 config.defaultWidth = parseColumnWidth(dw)
             }
             // Parse snap array
-            if let snapArray = layout["snap"] as? TOMLArray {
+            if let snapArray = readArray(layout["snap"]) {
                 var points: [SnapPoint] = []
                 for item in snapArray {
                     if let str = readString(item) {
@@ -200,7 +210,7 @@ extension ScrollWMConfig {
             }
             if let v = readBool(layout["animation_enabled"]) { config.animationEnabled = v }
 
-            if let struts = layout["struts"] as? TOMLTable {
+            if let struts = readTable(layout["struts"]) {
                 if let v = readDouble(struts["left"]) { config.struts.left = v }
                 if let v = readDouble(struts["right"]) { config.struts.right = v }
                 if let v = readDouble(struts["top"]) { config.struts.top = v }
@@ -211,7 +221,7 @@ extension ScrollWMConfig {
         }
 
         // [animation]
-        if let anim = table["animation"] as? TOMLTable {
+        if let anim = readTable(table["animation"]) {
             if let v = readDouble(anim["scroll_stiffness"]) { config.scrollStiffness = v }
             if let v = readDouble(anim["scroll_damping_ratio"]) { config.scrollDampingRatio = v }
             if let v = readDouble(anim["bounce_distance"]) { config.bounceDistance = v }
@@ -219,7 +229,7 @@ extension ScrollWMConfig {
         }
 
         // [keybindings]
-        if let kb = table["keybindings"] as? TOMLTable {
+        if let kb = readTable(table["keybindings"]) {
             for (key, value) in kb {
                 if let v = readString(value) {
                     config.keybindings[key] = v
@@ -228,15 +238,15 @@ extension ScrollWMConfig {
         }
 
         // [gesture]
-        if let gesture = table["gesture"] as? TOMLTable {
+        if let gesture = readTable(table["gesture"]) {
             if let v = readString(gesture["modifier"]) { config.gestureModifier = v }
             if let v = readBool(gesture["snap"]) { config.gestureSnap = v }
         }
 
         // [[rules]]
-        if let rules = table["rules"] as? TOMLArray {
+        if let rules = readArray(table["rules"]) {
             for item in rules {
-                if let rule = item as? TOMLTable {
+                if let rule = readTable(item) {
                     var rc = WindowRuleConfig()
                     rc.appID = readString(rule["app_id"])
                     rc.appIDRegex = readString(rule["app_id_regex"])
@@ -247,9 +257,9 @@ extension ScrollWMConfig {
             }
         }
 
-        if let pmRules = table["position_memory_rules"] as? TOMLArray {
+        if let pmRules = readArray(table["position_memory_rules"]) {
             for item in pmRules {
-                if let rule = item as? TOMLTable {
+                if let rule = readTable(item) {
                     var rc = PositionMemoryRuleConfig(appID: "")
                     if let v = readString(rule["app_id"]) { rc.appID = v }
                     if let v = readString(rule["match_by"]) { rc.matchBy = v }
