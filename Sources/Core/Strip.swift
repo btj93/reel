@@ -88,6 +88,13 @@ public struct Strip: Sendable {
     /// Add a new column to the right of the active column.
     public mutating func insertColumn(_ column: Column, at time: Double) {
         let insertIndex = min(activeColumnIndex + 1, columns.count)
+        insertColumn(column, at: time, atIndex: insertIndex)
+    }
+
+    /// Insert a column at a specific index (clamped to valid range).
+    /// Used by position memory to restore windows to saved positions.
+    public mutating func insertColumn(_ column: Column, at time: Double, atIndex requestedIndex: Int) {
+        let insertIndex = max(0, min(requestedIndex, columns.count))
         let resolvedWidth = column.isFullWidth
             ? workingArea.width
             : column.width.resolve(workingAreaWidth: workingArea.width, gap: gap)
@@ -95,10 +102,8 @@ public struct Strip: Sendable {
         columns.insert(column, at: insertIndex)
         columnData.insert(ColumnData(cachedWidth: resolvedWidth), at: insertIndex)
 
-        // Focus the new column
         activeColumnIndex = insertIndex
 
-        // Recompute view offset for the new active column
         let newOffset = computeNewViewOffset(
             forColumn: activeColumnIndex,
             previousColumn: max(0, insertIndex - 1),

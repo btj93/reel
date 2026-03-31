@@ -12,6 +12,8 @@ public enum ScrollWMCommand: String, Codable, CaseIterable, Sendable {
     case closeWindow = "close-window"
     case listWindows = "list-windows"
     case getLayout = "get-layout"
+    case listPositions = "list-positions"
+    case clearPositions = "clear-positions"
     case recover = "recover"
     case quit = "quit"
 }
@@ -33,4 +35,14 @@ public struct ScrollWMResponse: Codable, Sendable {
 public func scrollWMSocketPath() -> String {
     let uid = getuid()
     return "/tmp/scrollwm_\(uid).sock"
+}
+
+public struct IPCMessage: Codable, Sendable {
+    public let command: String
+    public var appID: String?
+
+    public init(command: String, appID: String? = nil) {
+        self.command = command
+        self.appID = appID
+    }
 }

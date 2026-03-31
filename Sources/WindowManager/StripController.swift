@@ -26,7 +26,16 @@ public final class StripController: @unchecked Sendable {
     private var savedSpaces: [Set<UInt32>: SavedStripState] = [:]
 
     /// The fingerprint of the current Space.
-    private var currentSpaceFingerprint: Set<UInt32> = []
+    public internal(set) var currentSpaceFingerprint: Set<UInt32> = []
+
+    /// Called before a column is removed. Provides column metadata for position memory.
+    /// Parameters: tileID, column, columnData, columnIndex, neighborBefore bundleID, neighborAfter bundleID
+    public var onBeforeRemoveWindow: ((_ tileID: TileID, _ column: Column, _ columnData: ColumnData,
+                                        _ columnIndex: Int, _ neighborBefore: String?,
+                                        _ neighborAfter: String?) -> Void)?
+
+    /// Set to true to suppress position save during removeWindow (e.g., toggleFloating)
+    public var suppressPositionSave: Bool = false
 
     /// Timestamp of the last layout application. Used to suppress echo AX events.
     public private(set) var lastLayoutTime: Double = 0
@@ -83,16 +92,91 @@ public final class StripController: @unchecked Sendable {
         }
     }
 
-    /// Remove a window from the strip.
-    public func removeWindow(tileID: TileID) {
-        // Find the column containing this tile
-        if let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
-            strip.removeColumn(at: colIndex, at: currentTime())
+    /// Add a window at a specific position with saved column properties from position memory.
+    /// When restoredPosition is non-nil, inserts at the saved position with saved width.
+    /// When nil, falls back to default behavior.
+    public func addWindow(_ window: AXWindow, app: AXApp, restoredPosition: SavedPosition?) {
+        guard let saved = restoredPosition else {
+            addWindow(window, app: app)
+            return
         }
 
+        print("[Strip] addWindow (restored): tileID=\(window.tileID.rawValue) pid=\(window.pid) at index=\(saved.columnIndex)")
+        windowMap[window.tileID] = window
+        apps[window.pid] = app
+
+        // Determine insertion index: neighbor → columnIndex → default
+        let insertIndex = resolveInsertIndex(saved: saved)
+
+        // Normalize width: never restore .auto
+        let width: ColumnWidth
+        switch saved.width {
+        case .auto:
+            width = .fixed(saved.width.resolve(workingAreaWidth: strip.workingArea.width, gap: strip.gap))
+        default:
+            width = saved.width
+        }
+
+        let column = Column(tiles: [window.tileID], width: width,
+                            presetIndex: saved.presetIndex, isFullWidth: saved.isFullWidth)
+        strip.insertColumn(column, at: currentTime(), atIndex: insertIndex)
+
+        if !isBatching {
+            applyLayout()
+        }
+    }
+
+    /// Resolve the best insertion index from saved position data.
+    private func resolveInsertIndex(saved: SavedPosition) -> Int {
+        // Priority 1: Insert right of neighborBefore
+        if let beforeID = saved.neighborBefore {
+            for (i, col) in strip.columns.enumerated() {
+                if let tile = col.activeTile, let win = windowMap[tile],
+                   let app = apps[win.pid], app.bundleIdentifier == beforeID {
+                    return i + 1
+                }
+            }
+        }
+
+        // Priority 2: Insert left of neighborAfter
+        if let afterID = saved.neighborAfter {
+            for (i, col) in strip.columns.enumerated() {
+                if let tile = col.activeTile, let win = windowMap[tile],
+                   let app = apps[win.pid], app.bundleIdentifier == afterID {
+                    return i
+                }
+            }
+        }
+
+        // Priority 3: Clamped columnIndex
+        return max(0, min(saved.columnIndex, strip.columns.count))
+    }
+
+    /// Remove a window from the strip.
+    public func removeWindow(tileID: TileID) {
+        if let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
+            // Fire callback before removal so strip state is intact
+            if !suppressPositionSave, let callback = onBeforeRemoveWindow {
+                let column = strip.columns[colIndex]
+                let colData = strip.columnData[colIndex]
+
+                let neighborBefore: String? = if colIndex > 0,
+                    let tile = strip.columns[colIndex - 1].activeTile,
+                    let win = windowMap[tile],
+                    let app = apps[win.pid] { app.bundleIdentifier } else { nil }
+
+                let neighborAfter: String? = if colIndex < strip.columns.count - 1,
+                    let tile = strip.columns[colIndex + 1].activeTile,
+                    let win = windowMap[tile],
+                    let app = apps[win.pid] { app.bundleIdentifier } else { nil }
+
+                callback(tileID, column, colData, colIndex, neighborBefore, neighborAfter)
+            }
+
+            strip.removeColumn(at: colIndex, at: currentTime())
+        }
         windowMap.removeValue(forKey: tileID)
         lastCommittedFrames.removeValue(forKey: tileID)
-
         applyLayout()
     }
 
@@ -179,8 +263,9 @@ public final class StripController: @unchecked Sendable {
         guard let activeTile = strip.activeColumn?.activeTile,
               let window = windowMap[activeTile] else { return nil }
 
-        // Remove from strip — it becomes floating
+        suppressPositionSave = true
         removeWindow(tileID: activeTile)
+        suppressPositionSave = false
         return window
     }
 

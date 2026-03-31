@@ -89,6 +89,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(pauseItem)
             menu.addItem(NSMenuItem(title: "Reload Config", action: #selector(reloadConfig), keyEquivalent: "r"))
             menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem(title: "Clear Saved Positions", action: #selector(clearPositions), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         }
 
@@ -145,6 +146,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let config = windowManager?.config {
             applyLoginItem(enabled: config.startAtLogin)
         }
+    }
+
+    @objc private func clearPositions() {
+        windowManager?.positionMemory?.clearAll()
+        windowManager?.positionMemory?.persistToDisk()
+        print("[ScrollWM] Cleared all saved positions")
+        fflush(stdout)
     }
 
     @objc private func quit() {

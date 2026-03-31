@@ -338,6 +338,75 @@ do {
     assertEq(classifyWindow(props), .ignore)
 }
 
+// ═══════════════════════════════════════
+// ColumnWidth Codable
+// ═══════════════════════════════════════
+print()
+print("═ ColumnWidth Codable")
+
+section("Encode/decode proportion")
+do {
+    let width = ColumnWidth.proportion(0.5)
+    let data = try! JSONEncoder().encode(width)
+    let json = String(data: data, encoding: .utf8)!
+    check(json.contains("proportion"), "should contain 'proportion' key: \(json)")
+    let decoded = try! JSONDecoder().decode(ColumnWidth.self, from: data)
+    assertEq(decoded, width, "round-trip proportion")
+}
+
+section("Encode/decode fixed")
+do {
+    let width = ColumnWidth.fixed(800.0)
+    let data = try! JSONEncoder().encode(width)
+    let json = String(data: data, encoding: .utf8)!
+    check(json.contains("fixed"), "should contain 'fixed' key: \(json)")
+    let decoded = try! JSONDecoder().decode(ColumnWidth.self, from: data)
+    assertEq(decoded, width, "round-trip fixed")
+}
+
+section("Encode/decode auto")
+do {
+    let width = ColumnWidth.auto
+    let data = try! JSONEncoder().encode(width)
+    let json = String(data: data, encoding: .utf8)!
+    check(json.contains("auto"), "should contain 'auto' key: \(json)")
+    let decoded = try! JSONDecoder().decode(ColumnWidth.self, from: data)
+    assertEq(decoded, width, "round-trip auto")
+}
+
+// ═══════════════════════════════════════
+// Strip insertColumn at index
+// ═══════════════════════════════════════
+print()
+print("═ Strip insertColumn at index")
+
+section("Insert at specific index 0")
+do {
+    var strip = makeStrip(columnCount: 3)
+    let newCol = Column(tiles: [TileID(99)], width: .proportion(0.5))
+    strip.insertColumn(newCol, at: 0, atIndex: 0)
+    assertEq(strip.columns.count, 4, "should have 4 columns")
+    assertEq(strip.columns[0].tiles.first, TileID(99), "new column at index 0")
+}
+
+section("Insert at specific index end")
+do {
+    var strip = makeStrip(columnCount: 3)
+    let newCol = Column(tiles: [TileID(99)], width: .proportion(0.5))
+    strip.insertColumn(newCol, at: 0, atIndex: 3)
+    assertEq(strip.columns.count, 4, "should have 4 columns")
+    assertEq(strip.columns[3].tiles.first, TileID(99), "new column at end")
+}
+
+section("Insert at clamped index")
+do {
+    var strip = makeStrip(columnCount: 2)
+    let newCol = Column(tiles: [TileID(99)], width: .proportion(0.5))
+    strip.insertColumn(newCol, at: 0, atIndex: 10)
+    assertEq(strip.columns.count, 3, "should have 3 columns")
+    assertEq(strip.columns[2].tiles.first, TileID(99), "clamped to end")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

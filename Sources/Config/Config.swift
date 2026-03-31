@@ -47,6 +47,11 @@ public struct ScrollWMConfig: Sendable {
 
     public var terminalApp: String = "/System/Applications/Utilities/Terminal.app"
 
+    // MARK: - Position Memory
+    public var positionMemory: Bool = true
+    public var savedPositionLimit: Int = 50
+    public var positionMemoryRules: [PositionMemoryRuleConfig] = []
+
     // MARK: - Startup
 
     public var startAtLogin: Bool = false
@@ -55,6 +60,16 @@ public struct ScrollWMConfig: Sendable {
 
     public static let configDir = NSHomeDirectory() + "/.config/scrollwm"
     public static let configPath = configDir + "/config.toml"
+}
+
+public struct PositionMemoryRuleConfig: Sendable {
+    public var appID: String
+    public var matchBy: String = "title"  // "title" or "order"
+
+    public init(appID: String, matchBy: String = "title") {
+        self.appID = appID
+        self.matchBy = matchBy
+    }
 }
 
 /// Window rule from config.
@@ -162,6 +177,8 @@ extension ScrollWMConfig {
                 if let v = readDouble(struts["top"]) { config.struts.top = v }
                 if let v = readDouble(struts["bottom"]) { config.struts.bottom = v }
             }
+            if let v = readBool(layout["position_memory"]) { config.positionMemory = v }
+            if let v = readDouble(layout["saved_position_limit"]) { config.savedPositionLimit = Int(v) }
         }
 
         // [animation]
@@ -196,6 +213,19 @@ extension ScrollWMConfig {
                     rc.titleRegex = readString(rule["title_regex"])
                     if let v = readBool(rule["floating"]) { rc.floating = v }
                     config.rules.append(rc)
+                }
+            }
+        }
+
+        if let pmRules = table["position_memory_rules"] as? TOMLArray {
+            for item in pmRules {
+                if let rule = item as? TOMLTable {
+                    var rc = PositionMemoryRuleConfig(appID: "")
+                    if let v = readString(rule["app_id"]) { rc.appID = v }
+                    if let v = readString(rule["match_by"]) { rc.matchBy = v }
+                    if !rc.appID.isEmpty {
+                        config.positionMemoryRules.append(rc)
+                    }
                 }
             }
         }
@@ -236,6 +266,10 @@ extension ScrollWMConfig {
 
         # default_width = { proportion = 0.5 }
 
+        # Position memory: remember window positions across close/reopen
+        # position_memory = true
+        # saved_position_limit = 50
+
         # Insets for external status bars (e.g., SketchyBar)
         # [layout.struts]
         # left = 0
@@ -272,6 +306,11 @@ extension ScrollWMConfig {
         # [[rules]]
         # app_id_regex = "com\\\\.apple\\\\.systempreferences"
         # floating = true
+
+        # Per-app matching strategy for position memory
+        # [[position_memory_rules]]
+        # app_id = "com.apple.finder"
+        # match_by = "order"  # "title" (default) or "order"
 
         [terminal]
         app = "/System/Applications/Utilities/Terminal.app"

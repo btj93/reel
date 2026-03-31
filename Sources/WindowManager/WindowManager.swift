@@ -16,6 +16,9 @@ public final class WindowManager: @unchecked Sendable {
     /// Per-display strip controllers. One strip per connected monitor.
     public private(set) var stripControllers: [CGDirectDisplayID: StripController] = [:]
 
+    /// Position memory for restoring window placement.
+    public var positionMemory: PositionMemory?
+
     /// The currently active (focused) display.
     public private(set) var activeDisplayID: CGDirectDisplayID = CGMainDisplayID()
 
@@ -149,6 +152,15 @@ public final class WindowManager: @unchecked Sendable {
             sc.setSpaceFingerprint(initialFingerprint)
         }
 
+        // Initialize position memory before window discovery
+        if config.positionMemory {
+            let pmStateDir = NSHomeDirectory() + "/.local/state/scrollwm"
+            let filePath = URL(fileURLWithPath: pmStateDir + "/window-positions.json")
+            let rules = positionMemoryMatchingRules
+            positionMemory = PositionMemory(capacity: config.savedPositionLimit, filePath: filePath, matchingRules: rules)
+            positionMemory?.loadFromDisk()
+        }
+
         // Start subsystems — batch window discovery to avoid N layout passes
         for (_, sc) in stripControllers { sc.beginBatch() }
         print("[WM] tracking windows..."); fflush(stdout)
@@ -156,6 +168,43 @@ public final class WindowManager: @unchecked Sendable {
         print("[WM] tracked \(tracker.windows.count) windows, \(tracker.apps.count) apps"); fflush(stdout)
         for (_, sc) in stripControllers { sc.finishBatch() }
         print("[WM] batch finished, strip has \(stripController.strip.columns.count) cols"); fflush(stdout)
+
+        // Wire position memory save callback on each strip controller
+        for (displayID, sc) in stripControllers {
+            sc.onBeforeRemoveWindow = { [weak self] tileID, column, columnData, colIndex, neighborBefore, neighborAfter in
+                guard let self, let positionMemory = self.positionMemory, self.config.positionMemory else { return }
+
+                let window = sc.windowMap[tileID]
+                let bundleID = window.flatMap { self.tracker.apps[$0.pid]?.bundleIdentifier }
+                guard let bundleID else { return }
+
+                let windowTitle = window?.getTitle()
+                let spaceFingerprint = sc.currentSpaceFingerprint
+
+                // Normalize .auto width to .fixed
+                let width: ColumnWidth
+                switch column.width {
+                case .auto:
+                    width = .fixed(columnData.cachedWidth)
+                default:
+                    width = column.width
+                }
+
+                let position = SavedPosition(
+                    columnIndex: colIndex,
+                    neighborBefore: neighborBefore,
+                    neighborAfter: neighborAfter,
+                    width: width,
+                    presetIndex: column.presetIndex,
+                    isFullWidth: column.isFullWidth,
+                    lastSeen: Date()
+                )
+
+                positionMemory.save(bundleID: bundleID, windowTitle: windowTitle,
+                                    displayID: UInt32(displayID), spaceFingerprint: spaceFingerprint,
+                                    position: position)
+            }
+        }
 
         hotkeyManager.registerFromConfig(config.keybindings)
         let hotkeyOk = hotkeyManager.start()
@@ -197,6 +246,7 @@ public final class WindowManager: @unchecked Sendable {
         // Start periodic state persistence (every 5 seconds)
         stateWriteTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.persistState()
+            self?.positionMemory?.persistToDisk()
         }
 
         print("[WM] Config loaded from \(ScrollWMConfig.configPath)"); fflush(stdout)
@@ -206,6 +256,24 @@ public final class WindowManager: @unchecked Sendable {
         server.onCommand = { [weak self] command in
             guard let self = self else { return ScrollWMResponse(success: false, message: "Shutting down") }
             return self.handleIPCCommand(command)
+        }
+        server.onMessage = { [weak self] message in
+            guard let self else { return ScrollWMResponse(success: false, message: "No handler") }
+            switch message.command {
+            case "clear-positions-app":
+                guard let appID = message.appID else {
+                    return ScrollWMResponse(success: false, message: "Missing appID")
+                }
+                self.positionMemory?.clear(bundleID: appID)
+                self.positionMemory?.persistToDisk()
+                return ScrollWMResponse(success: true, message: "Cleared positions for \(appID)")
+            default:
+                // Fall back to standard command handling
+                if let cmd = ScrollWMCommand(rawValue: message.command) {
+                    return self.handleIPCCommand(cmd)
+                }
+                return ScrollWMResponse(success: false, message: "Unknown command: \(message.command)")
+            }
         }
         let ipcOk = server.start()
         self.ipcServer = server
@@ -267,6 +335,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Persist final state
         persistState()
+        positionMemory?.persistToDisk()
 
         // Stop subsystems
         ipcServer?.stop()
@@ -325,6 +394,24 @@ public final class WindowManager: @unchecked Sendable {
                 titleRegex: rule.titleRegex,
                 classification: rule.floating ? .float : .tile
             )
+        }
+
+        // Position memory
+        if config.positionMemory {
+            if positionMemory == nil {
+                let stateDir = NSHomeDirectory() + "/.local/state/scrollwm"
+                let filePath = URL(fileURLWithPath: stateDir + "/window-positions.json")
+                let rules = config.positionMemoryRules.reduce(into: [String: String]()) { dict, rule in
+                    dict[rule.appID] = rule.matchBy
+                }
+                positionMemory = PositionMemory(capacity: config.savedPositionLimit, filePath: filePath, matchingRules: rules)
+                positionMemory?.loadFromDisk()
+            } else {
+                let rules = config.positionMemoryRules.reduce(into: [String: String]()) { dict, rule in
+                    dict[rule.appID] = rule.matchBy
+                }
+                positionMemory?.applyConfig(capacity: config.savedPositionLimit, matchingRules: rules)
+            }
         }
 
         // Relayout
@@ -387,8 +474,9 @@ public final class WindowManager: @unchecked Sendable {
         case .windowAdded(let window, let classification):
             guard classification == .tile else { return }
             if let app = tracker.apps[window.pid] {
-                let sc = stripControllerForWindow(window) ?? stripController
-                sc.addWindow(window, app: app)
+                let (displayID, sc) = stripControllerEntryForWindow(window)
+                let saved = lookupSavedPosition(for: window, on: sc, displayID: displayID)
+                sc.addWindow(window, app: app, restoredPosition: saved)
             }
 
         case .windowRemoved(_, let tileID):
@@ -424,7 +512,9 @@ public final class WindowManager: @unchecked Sendable {
         case .windowDeminimized(let windowID):
             if let window = tracker.windows[windowID],
                let app = tracker.apps[window.pid] {
-                stripController.addWindow(window, app: app)
+                let (displayID, sc) = stripControllerEntryForWindow(window)
+                let saved = lookupSavedPosition(for: window, on: sc, displayID: displayID)
+                sc.addWindow(window, app: app, restoredPosition: saved)
             }
 
         case .windowResized(let windowID):
@@ -476,7 +566,9 @@ public final class WindowManager: @unchecked Sendable {
                         guard classification == .tile else { continue }
                         tracker.registerTrackedWindow(window)
                         app.observeWindow(window.element)
-                        stripController.addWindow(window, app: app)
+                        let (displayID, targetSC) = stripControllerEntryForWindow(window)
+                        let saved = lookupSavedPosition(for: window, on: targetSC, displayID: displayID)
+                        targetSC.addWindow(window, app: app, restoredPosition: saved)
                     }
                 }
 
@@ -507,7 +599,9 @@ public final class WindowManager: @unchecked Sendable {
 
                 tracker.registerTrackedWindow(window)
                 app.observeWindow(window.element)
-                stripController.addWindow(window, app: app)
+                let (displayID, targetSC) = stripControllerEntryForWindow(window)
+                let saved = lookupSavedPosition(for: window, on: targetSC, displayID: displayID)
+                targetSC.addWindow(window, app: app, restoredPosition: saved)
             }
         }
         stripController.finishBatch()
@@ -620,7 +714,9 @@ public final class WindowManager: @unchecked Sendable {
                     tracker.registerTrackedWindow(window)
                     app.observeWindow(window.element)
                 }
-                stripController.addWindow(window, app: app)
+                let (displayID, targetSC) = stripControllerEntryForWindow(window)
+                let saved = lookupSavedPosition(for: window, on: targetSC, displayID: displayID)
+                targetSC.addWindow(window, app: app, restoredPosition: saved)
                 adopted = true
                 print("[HealthCheck] Adopted unmanaged window wid=\(window.windowID) pid=\(pid)")
                 fflush(stdout)
@@ -739,6 +835,29 @@ public final class WindowManager: @unchecked Sendable {
                 return ScrollWMResponse(success: true, data: json)
             }
             return ScrollWMResponse(success: true, data: "[]")
+        case .listPositions:
+            if let pm = positionMemory {
+                let entries = pm.allEntries().map { entry -> [String: Any] in
+                    [
+                        "bundleID": entry.key.bundleID,
+                        "windowTitle": entry.key.windowTitle ?? "nil",
+                        "displayID": entry.key.displayID,
+                        "columnIndex": entry.position.columnIndex,
+                        "width": "\(entry.position.width)",
+                        "lastSeen": ISO8601DateFormatter().string(from: entry.position.lastSeen),
+                    ]
+                }
+                if let data = try? JSONSerialization.data(withJSONObject: entries),
+                   let json = String(data: data, encoding: .utf8) {
+                    return ScrollWMResponse(success: true, data: json)
+                }
+            }
+            return ScrollWMResponse(success: true, data: "[]")
+
+        case .clearPositions:
+            positionMemory?.clearAll()
+            positionMemory?.persistToDisk()
+            return ScrollWMResponse(success: true, message: "Cleared all saved positions")
         case .recover:
             restoreAllWindows()
             return ScrollWMResponse(success: true, message: "Windows restored")
@@ -749,6 +868,46 @@ public final class WindowManager: @unchecked Sendable {
     }
 
     // MARK: - Multi-Monitor Helpers
+
+    /// Convert config position memory rules to the dictionary format PositionMemory expects.
+    private var positionMemoryMatchingRules: [String: String] {
+        config.positionMemoryRules.reduce(into: [String: String]()) { dict, rule in
+            dict[rule.appID] = rule.matchBy
+        }
+    }
+
+    /// Look up a saved position for a window and consume it if found.
+    private func lookupSavedPosition(for window: AXWindow, on sc: StripController, displayID: CGDirectDisplayID) -> SavedPosition? {
+        guard config.positionMemory, let positionMemory else { return nil }
+
+        let bundleID = tracker.apps[window.pid]?.bundleIdentifier
+        guard let bundleID else { return nil }
+
+        let title = window.getTitle()
+        let fingerprint = sc.currentSpaceFingerprint
+
+        guard let result = positionMemory.lookup(bundleID: bundleID, windowTitle: title,
+                                                  displayID: UInt32(displayID),
+                                                  spaceFingerprint: fingerprint) else {
+            return nil
+        }
+
+        positionMemory.consume(key: result.key)
+        return result.position
+    }
+
+    /// Returns both the displayID and StripController for a window based on its frame.
+    private func stripControllerEntryForWindow(_ window: AXWindow) -> (CGDirectDisplayID, StripController) {
+        if let frame = try? window.getFrame().get() {
+            for (displayID, sc) in stripControllers {
+                if sc.strip.workingArea.intersects(frame) {
+                    return (displayID, sc)
+                }
+            }
+        }
+        let primary = stripControllers.first!
+        return (primary.key, primary.value)
+    }
 
     /// Determine which strip controller a window belongs to based on its screen position.
     private func stripControllerForWindow(_ window: AXWindow) -> StripController? {

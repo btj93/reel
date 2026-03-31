@@ -11,6 +11,8 @@ public final class SocketServer: @unchecked Sendable {
     /// Called when a command is received. Returns a response.
     public var onCommand: ((ScrollWMCommand) -> ScrollWMResponse)?
 
+    public var onMessage: ((IPCMessage) -> ScrollWMResponse)?
+
     public init() {
         self.socketPath = scrollWMSocketPath()
     }
@@ -110,11 +112,22 @@ public final class SocketServer: @unchecked Sendable {
 
         // Parse command
         let response: ScrollWMResponse
-        if let commandStr = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           let command = ScrollWMCommand(rawValue: commandStr) {
-            response = onCommand?(command) ?? ScrollWMResponse(success: false, message: "No handler")
+        if let rawStr = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            // Try JSON protocol first
+            if let jsonData = rawStr.data(using: .utf8),
+               let message = try? JSONDecoder().decode(IPCMessage.self, from: jsonData) {
+                response = onMessage?(message) ?? onCommand.flatMap { handler in
+                    ScrollWMCommand(rawValue: message.command).map { handler($0) }
+                } ?? ScrollWMResponse(success: false, message: "No handler")
+            }
+            // Fall back to raw string for backward compatibility
+            else if let command = ScrollWMCommand(rawValue: rawStr) {
+                response = onCommand?(command) ?? ScrollWMResponse(success: false, message: "No handler")
+            } else {
+                response = ScrollWMResponse(success: false, message: "Unknown command: \(rawStr)")
+            }
         } else {
-            response = ScrollWMResponse(success: false, message: "Unknown command")
+            response = ScrollWMResponse(success: false, message: "Invalid data")
         }
 
         // Send response

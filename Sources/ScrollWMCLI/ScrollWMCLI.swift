@@ -3,14 +3,36 @@ import IPC
 
 @main
 struct ScrollWMCLI {
-    static func main() {
-        let args = CommandLine.arguments.dropFirst()
+    static func printUsage() {
+        let commands = ScrollWMCommand.allCases.map(\.rawValue) + ["clear-positions-app <bundle-id>"]
+        print("Usage: scrollwm-msg <command>")
+        print("Commands: \(commands.joined(separator: ", "))")
+    }
 
-        guard let commandStr = args.first,
-              let command = ScrollWMCommand(rawValue: commandStr) else {
-            print("Usage: scrollwm-msg <command>")
-            print("Commands: \(ScrollWMCommand.allCases.map(\.rawValue).joined(separator: ", "))")
+    static func main() {
+        let args = Array(CommandLine.arguments.dropFirst())
+
+        guard let commandStr = args.first else {
+            printUsage()
             Foundation.exit(1)
+        }
+
+        // Build the payload to send
+        let payload: String
+        if commandStr == "clear-positions-app" {
+            guard args.count >= 2 else {
+                print("Usage: scrollwm-msg clear-positions-app <bundle-id>")
+                Foundation.exit(1)
+            }
+            let message = IPCMessage(command: commandStr, appID: args[1])
+            let data = try! JSONEncoder().encode(message)
+            payload = String(data: data, encoding: .utf8)!
+        } else {
+            guard ScrollWMCommand(rawValue: commandStr) != nil else {
+                printUsage()
+                Foundation.exit(1)
+            }
+            payload = commandStr
         }
 
         let socketPath = scrollWMSocketPath()
@@ -45,7 +67,7 @@ struct ScrollWMCLI {
         }
 
         // Send command
-        let cmdStr = command.rawValue + "\n"
+        let cmdStr = payload + "\n"
         cmdStr.withCString { ptr in
             _ = write(fd, ptr, strlen(ptr))
         }
