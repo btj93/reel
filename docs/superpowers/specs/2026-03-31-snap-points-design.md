@@ -39,6 +39,15 @@ If both `snap` and `focus_mode` are present, `snap` wins with a log warning. If 
 ```swift
 public enum SnapPoint: String, Sendable, Comparable {
     case left, middle, right
+
+    // Swift doesn't auto-synthesize Comparable for String raw-value enums.
+    // Explicit implementation ensures .sorted() produces spatial order.
+    private var sortOrder: Int {
+        switch self { case .left: 0; case .middle: 1; case .right: 2 }
+    }
+    public static func < (lhs: SnapPoint, rhs: SnapPoint) -> Bool {
+        lhs.sortOrder < rhs.sortOrder
+    }
 }
 ```
 
@@ -102,9 +111,8 @@ The existing centering math (`-(workingAreaWidth - columnWidth) / 2`) is the `.m
      if activeColumnIndex < columns.count - 1:
        activeColumnIndex += 1
        newColWidth = columnData[activeColumnIndex].currentWidth  // use NEW column's width
-       // Advance new column's snap one step in travel direction (clamped)
-       snapIndices[activeColumnIndex] = min(snapIndices[activeColumnIndex] + 1,
-                                            snapPoints.count - 1)
+       // DON'T advance the new column's snap — just snap to its current position.
+       // The advance happens on the next same-direction keypress.
        targetOffset = computeSnapOffset(snapPoints[snapIndices[activeColumnIndex]],
                                         newColWidth, screenWidth)
        animate to targetOffset
@@ -117,7 +125,7 @@ The existing centering math (`-(workingAreaWidth - columnWidth) / 2`) is the `.m
 
 Mirror of `navigateRight`:
 - Decrement snap index if > 0
-- Else move focus left, decrement new column's snap index (clamped to 0)
+- Else move focus left — snap to the new column's current snap index (no decrement)
 - Else rubber-band bounce at left boundary
 
 ### Non-animated variants
@@ -128,7 +136,7 @@ Same logic, `viewOffset = .static(offset)` instead of spring animation.
 
 - `snapPoints.count == 1`, so step 2 never triggers (currentSnap 0 is already at max index 0)
 - Always falls through to step 3: move focus to next column
-- New column's snap: `min(0 + 1, 0) = 0` — clamped back to 0 (the only valid index)
+- New column's snap index is already 0 (default), and we don't advance it — stays at 0
 - Offset = `computeSnapOffset(.middle, ...)` = `-(screenWidth - colWidth) / 2` — identical to old `focusMode = .always`
 
 ## Integration Points
@@ -137,7 +145,7 @@ Same logic, `viewOffset = .static(offset)` instead of spring animation.
 
 - `focusLeft()` / `focusRight()` → call `strip.navigateLeft()` / `strip.navigateRight()`
 - `scrollToWindow(tileID:)` → set target column's snap index to default (middle)
-- `handleGestureEnd` / `snapToNearestColumnEdge` → gestures ignore snap points; after settle, set focused column's snap index to default
+- `handleGestureEnd` / `snapToNearestColumnEdge` → gestures ignore snap points; after settle, set the **newly-focused column's** snap index to default (not the previously-active column). This reset is intentional — after a free-scroll gesture, the snap index is treated as fresh regardless of where the column was before the gesture.
 - `handleUserResize` debounced recenter → use current snap index (not always middle)
 - `rebuildStrip()` → clear `strip.snapIndices` alongside `strip.columns` and `strip.columnData`
 - `switchSpace()` → restore `snapIndices` from `SavedStripState`; if absent or wrong length (e.g., saved before this feature existed), initialize as `Array(repeating: defaultSnapIndex, count: columns.count)`
@@ -154,6 +162,7 @@ Same logic, `viewOffset = .static(offset)` instead of spring animation.
 | `Strip.insertColumn` | Default snap index → `computeSnapOffset` |
 | `Strip.removeColumn` | Surviving column keeps snap index → `computeSnapOffset` |
 | `Strip.recenterActiveColumn` | Current snap index → `computeSnapOffset` |
+| `Strip.recenterActiveColumnAnimated` | Current snap index → `computeSnapOffset` (animated variant) |
 | `Strip.navigateLeft/Right` | New snap index → `computeSnapOffset` |
 | `StripController.scrollToWindow` | Default snap index → `computeSnapOffset` |
 | `StripController.snapToNearestColumnEdge` | Default snap index → `computeSnapOffset` |
@@ -243,7 +252,7 @@ All tests in `Tests/CoreTests/main.swift` using `section()` / `check()` / `asser
 | `Sources/Config/Config.swift` | Replace `focusMode` with `snapPoints`. Parse `snap` array. Backward-compat `focus_mode` mapping. Update `createDefaultConfig()` to emit `snap = ["middle"]` instead of `focus_mode = "always"`. |
 | `Sources/WindowManager/StripController.swift` | Update `focusLeft/Right` to call `navigateLeft/Right`. Update `scrollToWindow`, `snapToNearestColumnEdge`, `handleUserResize`. Add `snapIndices` to `SavedStripState`. |
 | `Sources/WindowManager/WindowManager.swift` | `applyConfig`: set `snapPoints` instead of `focusMode`. |
-| `Tests/CoreTests/main.swift` | Add snap point test sections. |
+| `Tests/CoreTests/main.swift` | Update `makeStrip`/`makeLayoutStrip` helpers: replace `focusMode: .always` with `snapPoints: [.middle], snapIndices: [...]`. Add snap point test sections. |
 
 ## IPC
 
