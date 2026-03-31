@@ -156,8 +156,8 @@ public final class WindowTracker: @unchecked Sendable {
         let wid = window.windowID
         guard windows[wid] == nil else { return }
 
-        // Classify the window
-        var props = window.getProperties()
+        // Classify the window — use fast path to skip non-essential AX reads
+        var props = window.getPropertiesFast()
         props.bundleIdentifier = bundleID
         props.windowLayer = windowLayer(for: wid)
 

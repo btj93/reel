@@ -46,6 +46,9 @@ public final class StripController: @unchecked Sendable {
     /// Focus ring overlay.
     public let focusRing: FocusRing
 
+    /// Debounced recenter after user resize settles.
+    private var resizeRecenterWork: DispatchWorkItem?
+
     /// Frame loop for animated scrolling (nil until Phase 2 is wired).
     public var frameLoop: FrameLoop?
 
@@ -122,6 +125,14 @@ public final class StripController: @unchecked Sendable {
         strip.insertColumn(column, at: currentTime(), atIndex: insertIndex)
 
         if !isBatching {
+            // Pre-position the new window immediately before the full layout pass.
+            // This eliminates the flicker where the window briefly appears at its
+            // native/app-default position before snapping to the strip position.
+            let frames = computeTargetFrames(strip: strip, time: currentTime())
+            if let target = frames.first(where: { $0.tileID == window.tileID }) {
+                _ = window.setFrame(target.frame)
+                lastCommittedFrames[window.tileID] = target.frame
+            }
             applyLayout()
         }
     }
@@ -329,12 +340,43 @@ public final class StripController: @unchecked Sendable {
         // Only update strip model if width changed significantly
         guard abs(newWidth - oldWidth) > 2 else { return }
 
+        let widthDelta = newWidth - oldWidth
+
+        // Detect left-edge resize: if the right edge stayed roughly in place
+        // while the left edge moved, the user is dragging from the left side.
+        // Adjust the view offset so the right edge stays anchored on screen.
+        if let lastFrame = lastCommittedFrames[tileID] {
+            let rightEdgeDelta = abs(Double(currentFrame.maxX) - Double(lastFrame.maxX))
+            let leftEdgeDelta = abs(Double(currentFrame.minX) - Double(lastFrame.minX))
+            if leftEdgeDelta > rightEdgeDelta && leftEdgeDelta > 2 {
+                let currentOffset = strip.viewOffset.current(at: currentTime())
+                strip.viewOffset = .static(currentOffset + widthDelta)
+            }
+        }
+
         strip.columns[colIndex].width = .fixed(newWidth)
         strip.columns[colIndex].presetIndex = nil
         strip.columnData[colIndex].cachedWidth = newWidth
 
-        // Re-apply layout to reposition other columns
+        // Apply layout immediately during drag
         applyLayout()
+
+        // Debounce recenter: wait for drag to settle before animating back to center
+        resizeRecenterWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            let time = self.currentTime()
+            if self.animationEnabled {
+                if let _ = self.strip.recenterActiveColumnAnimated(at: time) {
+                    self.frameLoop?.resume()
+                }
+            } else {
+                self.strip.recenterActiveColumn(at: time)
+                self.applyLayout()
+            }
+        }
+        resizeRecenterWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     // MARK: - Scroll to Window (Cmd+Tab support)

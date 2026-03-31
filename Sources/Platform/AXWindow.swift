@@ -209,6 +209,25 @@ public final class AXWindow: @unchecked Sendable {
         )
     }
 
+    /// Fast classification-only properties. Skips hasMinimizeButton, hasZoomButton,
+    /// and title which are not needed for tile/float/ignore classification.
+    /// Saves 3 AX round-trips (~5-15ms for native apps, more for Electron).
+    public func getPropertiesFast() -> WindowProperties {
+        WindowProperties(
+            role: getRole(),
+            subrole: getSubrole(),
+            isResizable: isResizable(),
+            hasCloseButton: hasCloseButton(),
+            hasMinimizeButton: false,
+            hasZoomButton: false,
+            isMinimized: isMinimized(),
+            isFullscreen: isFullscreen(),
+            windowLayer: 0,
+            bundleIdentifier: nil,
+            title: nil
+        )
+    }
+
     // MARK: - Focus
 
     /// Raise the window to the front.
