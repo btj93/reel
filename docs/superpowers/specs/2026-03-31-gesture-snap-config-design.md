@@ -24,7 +24,7 @@ snap = true  # default: true. Set to false to disable snapping after trackpad ge
 
 ## Behavior
 
-### `gesture_snap = false` (free scroll)
+### `[gesture] snap = false` (free scroll)
 
 **`handleGestureEnd` with velocity > 50 px/s:**
 1. Project momentum endpoint via `SwipeTracker.projectedEndPosition()`
@@ -35,7 +35,7 @@ snap = true  # default: true. Set to false to disable snapping after trackpad ge
 **`handleGestureEnd` with velocity <= 50 px/s:**
 - Unchanged — freezes at current position (`.static`)
 
-### `gesture_snap = true` (default, current behavior with fixes)
+### `[gesture] snap = true` (default, current behavior with fixes)
 
 **`handleGestureEnd` with velocity > 50 px/s:**
 1. Project momentum endpoint via `SwipeTracker.projectedEndPosition()`
@@ -54,7 +54,7 @@ This replaces the current `snapToNearestColumnEdge` logic which always resets to
 At gesture end, determine which column is under the cursor:
 
 1. Read cursor position via `NSEvent.mouseLocation` (screen coordinates, bottom-left origin)
-2. Convert screen X to strip-space X. From `LayoutEngine.swift`: `screenX = stripX - viewPos + wa.minX`, where `viewPos = columnX(activeColumnIndex) + viewOffset`. Inverting: `cursorStripX = (cursorScreenX - workingArea.minX) + columnX(activeColumnIndex) + viewOffset`
+2. Convert screen X to strip-space X. From `LayoutEngine.swift`: `screenX = stripX - viewPos + wa.minX`, where `viewPos = columnX(activeColumnIndex) + viewOffset`. Inverting: `cursorStripX = (cursorScreenX - workingArea.minX) + columnX(activeColumnIndex) + state.currentOffset` (where `state` is the unpacked `GestureState` — use the live gesture accumulator at lift-off, NOT the projected endpoint from step 1)
 3. Find which column contains `cursorStripX` (account for gaps — if cursor is in a gap, pick the nearest column)
 4. Set `strip.activeColumnIndex` to that column
 
@@ -85,4 +85,4 @@ No `focusActiveWindow()` call is made — consistent with current gesture behavi
 - **Cursor outside the strip entirely:** Fall back to nearest column to viewport center (current behavior)
 - **Single column:** Always that column, regardless of cursor position
 - **Config reload:** `gestureSnap` updates take effect on next gesture (no mid-gesture change needed)
-- **Keyboard after free-scroll:** When `gesture_snap = false`, the first keyboard press after a free-scroll will jump to the default snap position of the cursor-selected column. This is intentional — keyboard navigation always snaps.
+- **Keyboard after free-scroll:** When `snap = false`, the first keyboard press after a free-scroll will jump to the default snap position of the cursor-selected column. This is intentional — keyboard navigation always snaps.
