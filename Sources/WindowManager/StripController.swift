@@ -25,6 +25,9 @@ public final class StripController: @unchecked Sendable {
     /// Whether trackpad gestures snap to columns after flick.
     public var gestureSnap: Bool = true
 
+    /// Spring parameters for width animation (from config, reuses scroll spring values).
+    public var widthSpringParams: SpringParams = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+
     /// True while a gesture-initiated momentum animation is in flight.
     /// Used to defer focus changes until the animation settles.
     private var gestureAnimating: Bool = false
@@ -260,15 +263,10 @@ public final class StripController: @unchecked Sendable {
     public func cycleWidthPreset() {
         let time = currentTime()
         if animationEnabled {
-            let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
-            strip.cycleWidthPreset(at: time, params: params)
+            strip.cycleWidthPreset(at: time, params: widthSpringParams)
             let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
-            if let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth) {
-                frameLoop?.resume()
-            } else {
-                // Scroll didn't need animation, but width does
-                frameLoop?.resume()
-            }
+            let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth)
+            frameLoop?.resume()
         } else {
             strip.cycleWidthPreset(at: time, params: nil)
             strip.recenterActiveColumn(at: time)

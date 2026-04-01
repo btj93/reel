@@ -107,6 +107,7 @@ public final class WindowManager: @unchecked Sendable {
             }
             sc.animationEnabled = config.animationEnabled
             sc.gestureSnap = config.gestureSnap
+            sc.widthSpringParams = SpringParams(dampingRatio: config.scrollDampingRatio, stiffness: config.scrollStiffness, epsilon: 0.5)
         }
 
         // Window rules
@@ -236,6 +237,7 @@ public final class WindowManager: @unchecked Sendable {
             sc.frameLoop = frameLoop
             sc.animationEnabled = config.animationEnabled
             sc.gestureSnap = config.gestureSnap
+            sc.widthSpringParams = SpringParams(dampingRatio: config.scrollDampingRatio, stiffness: config.scrollStiffness, epsilon: 0.5)
         }
         print("[WM] animation: enabled (\(stripControllers.count) displays)"); fflush(stdout)
 
@@ -407,6 +409,7 @@ public final class WindowManager: @unchecked Sendable {
             }
             sc.animationEnabled = config.animationEnabled
             sc.gestureSnap = config.gestureSnap
+            sc.widthSpringParams = SpringParams(dampingRatio: config.scrollDampingRatio, stiffness: config.scrollStiffness, epsilon: 0.5)
         }
 
         // Apply to hotkeys

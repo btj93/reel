@@ -493,6 +493,7 @@ public struct Strip: Sendable {
     /// Recalculate all column widths (e.g., after working area changes).
     public mutating func recalculateWidths() {
         for i in 0..<columns.count {
+            columnData[i].widthAnimation = nil
             if columns[i].isFullWidth {
                 columnData[i].cachedWidth = workingArea.width
             } else {
