@@ -20,9 +20,9 @@ Currently two passes over columns: first builds `columnPositions` array calling 
 
 ### 1b. Merge `isDone()` + `evaluate()` into single `solve()` call
 
-**Files:** `Sources/Core/Animation.swift`, `Sources/Core/Column.swift`, `Sources/Core/ViewOffset.swift`
+**Files:** `Sources/Core/Animation.swift`, `Sources/Core/Column.swift`
 
-`ColumnData.currentWidth(at:)` calls `isDone()` (which calls `solve()`) then `evaluate()` (which calls `solve()` again). Same pattern exists in `ViewOffset.isSettled(at:)`.
+`ColumnData.currentWidth(at:)` calls `isDone()` (which calls `solve()`) then `evaluate()` (which calls `solve()` again). Note: `ViewOffset.isSettled(at:)` does NOT have this pattern — it only calls `isDone()` (one `solve()`), so it is not a target for this optimization.
 
 **Change:** Add `evaluateWithStatus(at:) -> (value: Double, isDone: Bool)` on `SpringAnimation`. Calls `solve()` once, returns both the interpolated value and whether displacement+velocity are below epsilon. Update `ColumnData.currentWidth(at:)` to use `evaluateWithStatus` — the rewrite replaces both the fast-return branch and the evaluate branch:
 
