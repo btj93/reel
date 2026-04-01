@@ -258,8 +258,8 @@ public final class StripController: @unchecked Sendable {
     }
 
     public func cycleWidthPreset() {
-        strip.cycleWidthPreset()
         let time = currentTime()
+        strip.cycleWidthPreset(at: time, params: nil)
         if animationEnabled {
             applyLayout()
             if let _ = strip.recenterActiveColumnAnimated(at: time) {

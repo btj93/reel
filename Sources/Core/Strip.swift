@@ -444,15 +444,32 @@ public struct Strip: Sendable {
     // MARK: - Width Management
 
     /// Cycle the active column's width through presets.
-    public mutating func cycleWidthPreset() {
+    /// Pass `params` for animated transition, or `nil` for instant.
+    public mutating func cycleWidthPreset(at time: Double, params: SpringParams?) {
         guard !columns.isEmpty, !widthPresets.isEmpty else { return }
-        let col = columns[activeColumnIndex]
-        let nextPresetIndex = ((col.presetIndex ?? -1) + 1) % widthPresets.count
-        columns[activeColumnIndex].width = widthPresets[nextPresetIndex]
-        columns[activeColumnIndex].presetIndex = nextPresetIndex
-        columns[activeColumnIndex].isFullWidth = false
-        columnData[activeColumnIndex].cachedWidth = widthPresets[nextPresetIndex]
+        let i = activeColumnIndex
+        let nextPresetIndex = ((columns[i].presetIndex ?? -1) + 1) % widthPresets.count
+        let newWidth = widthPresets[nextPresetIndex]
             .resolve(workingAreaWidth: workingArea.width, gap: gap)
+
+        columns[i].width = widthPresets[nextPresetIndex]
+        columns[i].presetIndex = nextPresetIndex
+        columns[i].isFullWidth = false
+
+        if let params = params {
+            let oldWidth = columnData[i].currentWidth(at: time)
+            if let existing = columnData[i].widthAnimation, !existing.isDone(at: time) {
+                // Rapid cycling — retarget preserving velocity
+                columnData[i].widthAnimation = existing.retargeted(to: newWidth, at: time)
+            } else {
+                columnData[i].widthAnimation = SpringAnimation(
+                    from: oldWidth, to: newWidth, startTime: time, params: params
+                )
+            }
+        } else {
+            columnData[i].widthAnimation = nil
+        }
+        columnData[i].cachedWidth = newWidth
     }
 
     /// Toggle the active column to/from full-width mode.

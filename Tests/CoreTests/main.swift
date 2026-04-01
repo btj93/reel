@@ -147,13 +147,13 @@ section("Cycle width preset")
 do {
     var strip = makeStrip(columnCount: 1)
     strip.widthPresets = [.proportion(0.33), .proportion(0.5), .proportion(0.67)]
-    strip.cycleWidthPreset()
+    strip.cycleWidthPreset(at: 0, params: nil)
     assertEq(strip.columns[0].presetIndex, 0)
-    strip.cycleWidthPreset()
+    strip.cycleWidthPreset(at: 0, params: nil)
     assertEq(strip.columns[0].presetIndex, 1)
-    strip.cycleWidthPreset()
+    strip.cycleWidthPreset(at: 0, params: nil)
     assertEq(strip.columns[0].presetIndex, 2)
-    strip.cycleWidthPreset()
+    strip.cycleWidthPreset(at: 0, params: nil)
     assertEq(strip.columns[0].presetIndex, 0, "should wrap")
 }
 
@@ -747,6 +747,55 @@ do {
     data.widthAnimation = nil
     let valStatic = data.currentWidth(at: 0)
     assertClose(valStatic, 720, tolerance: 0.01, "no animation returns cachedWidth")
+}
+
+section("cycleWidthPreset animated — creates width spring")
+do {
+    var strip = makeStrip(columnCount: 1)
+    strip.widthPresets = [.proportion(0.25), .proportion(0.5), .proportion(0.75)]
+    // Column starts at 0.5 width (720px on 1440 screen)
+    let oldWidth = strip.columnData[0].cachedWidth
+    assertClose(oldWidth, 720, tolerance: 1.0, "starts at 720")
+
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    strip.cycleWidthPreset(at: 0, params: params)
+
+    // presetIndex should be 0 (first preset: 0.25)
+    assertEq(strip.columns[0].presetIndex, 0)
+    // cachedWidth should be the target (0.25 * 1440 = 360)
+    assertClose(strip.columnData[0].cachedWidth, 360, tolerance: 1.0, "cachedWidth is target")
+    // widthAnimation should be non-nil
+    check(strip.columnData[0].widthAnimation != nil, "widthAnimation should be set")
+    // currentWidth at t=0 should be the OLD width (720)
+    assertClose(strip.columnData[0].currentWidth(at: 0), 720, tolerance: 1.0, "animated from old")
+    // currentWidth at t=2.0 should converge to target (360)
+    assertClose(strip.columnData[0].currentWidth(at: 2.0), 360, tolerance: 1.0, "converges to target")
+}
+
+section("cycleWidthPreset animated — rapid retarget preserves velocity")
+do {
+    var strip = makeStrip(columnCount: 1)
+    strip.widthPresets = [.proportion(0.25), .proportion(0.5), .proportion(0.75)]
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+
+    // First cycle at t=0
+    strip.cycleWidthPreset(at: 0, params: params)
+    // Second cycle at t=0.05 (mid-animation)
+    strip.cycleWidthPreset(at: 0.05, params: params)
+
+    assertEq(strip.columns[0].presetIndex, 1, "second preset")
+    let anim = strip.columnData[0].widthAnimation!
+    check(anim.initialVelocity != 0, "velocity should be preserved from first spring")
+}
+
+section("cycleWidthPreset non-animated — no widthAnimation")
+do {
+    var strip = makeStrip(columnCount: 1)
+    strip.widthPresets = [.proportion(0.25), .proportion(0.5), .proportion(0.75)]
+    strip.cycleWidthPreset(at: 0, params: nil)
+    assertEq(strip.columns[0].presetIndex, 0)
+    assertClose(strip.columnData[0].cachedWidth, 360, tolerance: 1.0)
+    check(strip.columnData[0].widthAnimation == nil, "no animation when params is nil")
 }
 
 // ============================================================
