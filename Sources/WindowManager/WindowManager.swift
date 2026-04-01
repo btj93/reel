@@ -94,6 +94,12 @@ public final class WindowManager: @unchecked Sendable {
             sc.strip.gap = config.gap
             sc.strip.defaultWidth = config.defaultWidth
             sc.strip.widthPresets = config.widthPresets
+            // Nil out preset indices that are out of range for the new presets
+            for i in 0..<sc.strip.columns.count {
+                if let idx = sc.strip.columns[i].presetIndex, idx >= config.widthPresets.count {
+                    sc.strip.columns[i].presetIndex = nil
+                }
+            }
             sc.strip.snapPoints = config.snapPoints
             // Clamp snap indices to new range (prevents crash if snap points shrink)
             for i in 0..<sc.strip.snapIndices.count {
@@ -389,6 +395,12 @@ public final class WindowManager: @unchecked Sendable {
             sc.strip.gap = config.gap
             sc.strip.defaultWidth = config.defaultWidth
             sc.strip.widthPresets = config.widthPresets
+            // Nil out preset indices that are out of range for the new presets
+            for i in 0..<sc.strip.columns.count {
+                if let idx = sc.strip.columns[i].presetIndex, idx >= config.widthPresets.count {
+                    sc.strip.columns[i].presetIndex = nil
+                }
+            }
             sc.strip.snapPoints = config.snapPoints
             for i in 0..<sc.strip.snapIndices.count {
                 sc.strip.snapIndices[i] = min(sc.strip.snapIndices[i], config.snapPoints.count - 1)
