@@ -499,6 +499,19 @@ public final class WindowManager: @unchecked Sendable {
             }
         }
 
+        // Suppress focus events after a space switch — macOS refocuses
+        // the previously-frontmost app's window on the new space, which
+        // would override our restored activeColumnIndex.
+        if stripController.isInSpaceSwitchSuppression {
+            switch event {
+            case .windowFocused, .appActivated:
+                print("[WM] Suppressed post-space-switch focus event")
+                return
+            default:
+                break
+            }
+        }
+
         switch event {
         case .windowAdded(let window, let classification):
             guard classification == .tile else { return }
