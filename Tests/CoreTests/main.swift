@@ -798,6 +798,16 @@ do {
     check(strip.columnData[0].widthAnimation == nil, "no animation when params is nil")
 }
 
+section("Config — width_presets proportions resolve correctly")
+do {
+    let presets: [ColumnWidth] = [.proportion(0.25), .proportion(0.5), .proportion(0.75), .proportion(1.0)]
+    let resolved = presets.map { $0.resolve(workingAreaWidth: 1440, gap: 16) }
+    assertClose(resolved[0], 360, tolerance: 0.01, "0.25 preset")
+    assertClose(resolved[1], 720, tolerance: 0.01, "0.5 preset")
+    assertClose(resolved[2], 1080, tolerance: 0.01, "0.75 preset")
+    assertClose(resolved[3], 1440, tolerance: 0.01, "1.0 preset")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

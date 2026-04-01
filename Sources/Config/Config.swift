@@ -216,6 +216,20 @@ extension ScrollWMConfig {
                 if let v = readDouble(struts["top"]) { config.struts.top = v }
                 if let v = readDouble(struts["bottom"]) { config.struts.bottom = v }
             }
+            if let presetsArray = readArray(layout["width_presets"]) {
+                var presets: [ColumnWidth] = []
+                for item in presetsArray {
+                    if let v = readDouble(item), v > 0, v <= 1 {
+                        presets.append(.proportion(v))
+                    } else {
+                        print("[Config] Warning: skipping invalid width_preset value")
+                        fflush(stdout)
+                    }
+                }
+                if !presets.isEmpty {
+                    config.widthPresets = presets
+                }
+            }
             if let v = readBool(layout["position_memory"]) { config.positionMemory = v }
             if let v = readDouble(layout["saved_position_limit"]) { config.savedPositionLimit = Int(v) }
         }
