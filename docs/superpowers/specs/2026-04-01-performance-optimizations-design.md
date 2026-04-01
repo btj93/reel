@@ -24,7 +24,17 @@ Currently two passes over columns: first builds `columnPositions` array calling 
 
 `ColumnData.currentWidth(at:)` calls `isDone()` (which calls `solve()`) then `evaluate()` (which calls `solve()` again). Same pattern exists in `ViewOffset.isSettled(at:)`.
 
-**Change:** Add `evaluateWithStatus(at:) -> (value: Double, isDone: Bool)` on `SpringAnimation`. Calls `solve()` once, returns both the interpolated value and whether displacement+velocity are below epsilon. Update `ColumnData.currentWidth(at:)` to use `evaluateWithStatus` — return the computed value directly instead of calling `evaluate()` separately.
+**Change:** Add `evaluateWithStatus(at:) -> (value: Double, isDone: Bool)` on `SpringAnimation`. Calls `solve()` once, returns both the interpolated value and whether displacement+velocity are below epsilon. Update `ColumnData.currentWidth(at:)` to use `evaluateWithStatus` — the rewrite replaces both the fast-return branch and the evaluate branch:
+
+```swift
+// Before (two solve() calls):
+if anim.isDone(at: time) { return cachedWidth }   // solve() #1
+return anim.evaluate(at: time).value                // solve() #2
+
+// After (one solve() call):
+let (value, done) = anim.evaluateWithStatus(at: time)
+return done ? cachedWidth : value
+```
 
 **Important constraint:** `ColumnData` is a struct and `currentWidth(at:)` is non-mutating. The settle side-effect (setting `cachedWidth` and niling `widthAnimation`) must remain in `settleWidthAnimations` in `handleFrameTick`, not inside `currentWidth`. The optimization here is purely eliminating the double `solve()` — not moving the settle logic.
 
@@ -50,6 +60,8 @@ These are constant for the lifetime of a `SpringParams` instance.
 
 The regime enum carries the precomputed derived constant for its branch (`omegaBar = sqrt(beta^2 - omega0^2)` or `omegaD = sqrt(omega0^2 - beta^2)`), eliminating the per-call `sqrt` in the branch body.
 
+**Precondition:** All existing `SpringParams` static instances use valid values (`mass > 0`, `stiffness > 0`). The regime computation in `init` assumes these invariants — `sqrt` of a negative number would produce `nan`. No runtime guard needed (all construction sites are compile-time constants), but add a `precondition(mass > 0 && stiffness > 0)` in debug builds.
+
 **Impact:** Removes 1 `sqrt` + 2 multiplications + 1 division + 1 branch comparison per `solve()` call. For underdamped/overdamped regimes, removes an additional `sqrt` per call.
 
 ### 1d. Merge `settleWidthAnimations` + `hasActiveWidthAnimations`
@@ -58,7 +70,20 @@ The regime enum carries the precomputed derived constant for its branch (`omegaB
 
 Two separate full-column scans per frame: `settleWidthAnimations(at:)` nils out done animations, then `hasActiveWidthAnimations(at:)` re-scans to check if any remain.
 
-**Change:** Replace both with `settleWidthAnimations(at:) -> Bool` that returns `true` if any active animations remain after settling. Single pass.
+**Change:** Replace both with `settleWidthAnimations(at:) -> Bool` that returns `true` if any active animations remain after settling. Single pass: nil done animations, then return whether any are still alive.
+
+**Note:** The return value polarity is opposite to the existing `widthSettled` variable. The call site in `handleFrameTick` must negate:
+
+```swift
+// Before:
+strip.settleWidthAnimations(at: time)
+let widthSettled = !strip.hasActiveWidthAnimations(at: time)
+
+// After:
+let widthSettled = !strip.settleWidthAnimations(at: time)
+```
+
+Delete `hasActiveWidthAnimations` from `Strip.swift` after this change.
 
 **Impact:** Eliminates one O(N) column scan per frame.
 
@@ -78,8 +103,11 @@ Two separate full-column scans per frame: `settleWidthAnimations(at:)` nils out 
 
 Three independent implementations each call `mach_timebase_info()` on every invocation. The numer/denom ratio is constant for the process lifetime.
 
-**Change:** Create `Sources/Core/TimeUtil.swift` (Core has no AppKit dependency):
+**Change:** Create `Sources/Core/TimeUtil.swift` (Core has no AppKit dependency). Requires `import Darwin` for `mach_absolute_time` / `mach_timebase_info` (not guaranteed via `Foundation` alone in SPM builds). No `Package.swift` changes needed — the file is automatically picked up by the Core target.
+
 ```swift
+import Darwin
+
 public enum TimeUtil {
     private static let ratio: Double = {
         var info = mach_timebase_info_data_t()
@@ -93,7 +121,10 @@ public enum TimeUtil {
 }
 ```
 
-Replace all three `currentTime()` / `CACurrentMediaTime()` implementations with `TimeUtil.now()`.
+Replace all three `currentTime()` implementations with `TimeUtil.now()`:
+- `StripController.currentTime()` in `Sources/WindowManager/StripController.swift`
+- `currentTime()` in `Sources/Platform/GestureCapture.swift`
+- `CACurrentMediaTime()` calls in `Sources/Platform/AXApp.swift` (these call the system `CACurrentMediaTime` from QuartzCore for EMA timing — replace with `TimeUtil.now()` which is semantically equivalent for elapsed time measurement)
 
 **Impact:** Eliminates per-call `mach_timebase_info` overhead. Consolidates three duplicate implementations into one.
 
@@ -115,11 +146,11 @@ Replace all three `currentTime()` / `CACurrentMediaTime()` implementations with 
 
 **Change:** Add synchronization so `stopObserving` waits for the thread to set `runLoop` before attempting `CFRunLoopStop`. Use a `DispatchSemaphore` with a short timeout (e.g., 500ms) to avoid deadlock if the thread never starts.
 
-### 2d. Delete duplicate `CACurrentMediaTime` in AXApp
+### 2d. Replace `CACurrentMediaTime()` calls in AXApp with `TimeUtil.now()`
 
 **File:** `Sources/Platform/AXApp.swift`
 
-After 2a consolidates timing, remove the private `CACurrentMediaTime()` function entirely (it duplicates the same `mach_absolute_time` + `mach_timebase_info` pattern). Any remaining callers use `TimeUtil.now()`.
+After 2a consolidates timing, replace the `CACurrentMediaTime()` calls in `dispatchSetFrame` and `dispatchSetPosition` (used for EMA timing) with `TimeUtil.now()`. These call the system `CACurrentMediaTime` from QuartzCore — there is no private shadow function to delete, just call-site replacements.
 
 ## Section 3: WindowManager Module
 
@@ -155,7 +186,18 @@ To handle `.far` zone windows correctly on the animation-settle path — which a
 
 **Change:** Dispatch `setFrame`/`setPosition` calls to GCD pool (same pattern as `handleFrameTick`'s dispatch). Keep `lastCommittedFrames` write synchronous on main thread before dispatch.
 
-For failure tracking: add a `dirtyTileIDs: Set<TileID>` on `StripController` (main-thread only, no synchronization needed). Background dispatch completion writes failures back to main via `DispatchQueue.main.async { self.dirtyTileIDs.insert(tileID) }`. The next `applyLayout()` call forces re-send for dirty IDs regardless of `framesEqual`. This avoids any cross-thread data structure. `removeWindow` must also call `dirtyTileIDs.remove(tileID)` to prevent ghost entries from accumulating.
+For failure tracking: add a `dirtyTileIDs: Set<TileID>` on `StripController` (main-thread only, no synchronization needed). Background dispatch completion writes failures back to main via `DispatchQueue.main.async { self.dirtyTileIDs.insert(tileID) }`. `removeWindow` must also call `dirtyTileIDs.remove(tileID)` to prevent ghost entries from accumulating.
+
+In `applyLayout`'s loop, the dirty-ID bypass must precede the `framesEqual` guard (since `lastCommittedFrames` was written optimistically before the failed dispatch):
+
+```swift
+let isDirty = dirtyTileIDs.contains(target.tileID)
+if !isDirty, let lastFrame = lastCommittedFrames[target.tileID], framesEqual(lastFrame, target.frame) {
+    continue  // skip unchanged, non-dirty windows
+}
+dirtyTileIDs.remove(target.tileID)
+// ... dispatch AX call
+```
 
 **Exception:** `addWindow(_:app:restoredPosition:)` pre-positions windows synchronously via direct `window.setFrame()` (not through `applyLayout`) for flicker prevention. This direct call stays synchronous — the async change only applies to the `applyLayout` loop.
 
@@ -200,7 +242,11 @@ Two back-to-back `currentTime()` calls at lines 452 and 454.
 
 Re-queries `NSScreen.main` every vsync frame for Y-flip. `StripController` has no reference to `DisplayManager`.
 
-**Change:** Add a `primaryScreenHeight: CGFloat` parameter to `StripController.init`, so the value is never zero at construction. `WindowManager` passes `displayManager.primaryScreenHeight` during init and updates it alongside `updateWorkingArea` on display-change events. `updateFocusRing` reads the stored property instead of calling `NSScreen.main` at 120Hz.
+**Change:** Add a `primaryScreenHeight: CGFloat` parameter to `StripController.init`, so the value is never zero at construction. `WindowManager` passes `displayManager.primaryScreenHeight` during init at both construction sites:
+- The display loop (line ~70): `displayManager.primaryScreenHeight`
+- The fallback path when no displays found (line ~75): `NSScreen.main?.frame.height ?? 0`
+
+`WindowManager` also updates the property alongside `updateWorkingArea` on display-change events. `updateFocusRing` reads the stored property instead of calling `NSScreen.main` at 120Hz.
 
 ## Section 4: Config, IPC, and Startup
 
@@ -242,7 +288,11 @@ Allocated per entry in `list-positions`.
 
 `reloadConfig()` copy-pastes `applyConfig()` logic.
 
-**Change:** Have `reloadConfig()` call `applyConfig(newConfig)` for shared logic, then handle reload-specific work after.
+**Change:** Extract the shared strip-level field application into `applyConfig(newConfig)`. Have `reloadConfig()` call `applyConfig(newConfig)` for that shared logic. Reload-specific work that stays in `reloadConfig()`:
+- `positionMemory` creation/update (uses `positionMemoryMatchingRules` which differs from `applyConfig`'s inline reduce)
+- `strip.recalculateWidths()` + `clearCommittedFrames()` + `applyLayout()` at the end
+
+`applyConfig` must NOT call `applyLayout()` itself — callers handle layout separately. This prevents double-apply on the `reloadConfig` path.
 
 ### 4f. Remove dead code in Config
 
@@ -263,7 +313,7 @@ Each section is a natural commit/review boundary.
 
 - **Core changes:** `swift run RunTests` — existing tests cover `computeTargetFrames` output and `SpringAnimation.solve()` regimes. **New tests required** for:
   - `SpringAnimation.evaluateWithStatus(at:)` — verify value matches `evaluate` and isDone matches `isDone` for same inputs. Include an epsilon-boundary test: spring evaluated at time where displacement is at `epsilon - delta` (not done) vs `epsilon + delta` (done) to verify the `<` threshold is preserved exactly.
-  - `settleWidthAnimations(at:) -> Bool` return value — verify returns false when all animations settled, true when active remain. Include a mixed-case test: two columns, one animation done, one active — verify the done one is niled and the function returns true (active remains). This covers the settle-then-query ordering invariant.
+  - `settleWidthAnimations(at:) -> Bool` return value — verify returns false when all animations settled, true when active remain. Include a mixed-case test: two columns, one animation done, one active — assert the return value is true (active remains) AND assert `columnData[doneIndex].widthAnimation == nil` (done one was niled). This covers both the return value and the settle-then-query ordering invariant.
   - `ColumnData.currentWidth(at:)` with active `widthAnimation` — verify returns animated value, not stale `cachedWidth`
   - `SpringParams` precomputed regime — verify `solve()` output is identical before and after the refactor for all three regimes
 - **Platform changes:** Manual — build and run, verify animations still smooth, verify Electron app windows resize correctly
