@@ -14,7 +14,7 @@ animation_enabled = true
 
 # Position memory: remember window positions across close/reopen
 # position_memory = true
-# saved_position_limit = 50
+# saved_position_limit = 500
 
 # Insets for external status bars (e.g., SketchyBar)
 # [layout.struts]
