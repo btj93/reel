@@ -95,7 +95,7 @@ public enum TimeUtil {
 
 Replace all three `currentTime()` / `CACurrentMediaTime()` implementations with `TimeUtil.now()`.
 
-**Impact:** Eliminates per-call `mach_timebase_info` syscall overhead. Removes the `CACurrentMediaTime` shadow in `AXApp.swift` that hides the more efficient system function.
+**Impact:** Eliminates per-call `mach_timebase_info` overhead. Consolidates three duplicate implementations into one.
 
 ### 2b. Cache `AXEnhancedUserInterface` settability per window
 
@@ -115,11 +115,11 @@ Replace all three `currentTime()` / `CACurrentMediaTime()` implementations with 
 
 **Change:** Add synchronization so `stopObserving` waits for the thread to set `runLoop` before attempting `CFRunLoopStop`. Use a `DispatchSemaphore` with a short timeout (e.g., 500ms) to avoid deadlock if the thread never starts.
 
-### 2d. Delete `CACurrentMediaTime` shadow
+### 2d. Delete duplicate `CACurrentMediaTime` in AXApp
 
 **File:** `Sources/Platform/AXApp.swift`
 
-After 2a consolidates timing, remove the private `CACurrentMediaTime()` function entirely. Any remaining callers use `TimeUtil.now()`.
+After 2a consolidates timing, remove the private `CACurrentMediaTime()` function entirely (it duplicates the same `mach_absolute_time` + `mach_timebase_info` pattern). Any remaining callers use `TimeUtil.now()`.
 
 ## Section 3: WindowManager Module
 
@@ -139,9 +139,9 @@ Zero `#if DEBUG` guards in the entire codebase. `print()` + `fflush(stdout)` fir
 
 On animation settle, `clearCommittedFrames()` + `applyLayout()` forces re-sending every window's frame, defeating the `framesEqual` diff logic.
 
-**Change:** Remove the `clearCommittedFrames()` call on the settle path. Let `applyLayout`'s existing diff skip unchanged windows. Only clear committed frames on structural changes (window add/remove, column reorder, space switch).
+**Change:** Remove the `clearCommittedFrames()` call on the animation-settle path in `handleFrameTick` only (not in `handleGestureEnd` or `handleGestureCancel`, which need the full clear since gesture paths are structural repositions). To handle `.far` zone windows correctly — which are skipped during animation ticks and therefore have stale entries in `lastCommittedFrames` — update `handleFrameTick` to write `lastCommittedFrames` entries for `.far` zone windows too (writing the off-screen position), so that the settle `applyLayout()` diff correctly detects they haven't moved.
 
-**Impact:** Reduces settle-frame AX calls from N to ~1-2 (only the windows that actually moved during the last animation frame).
+**Impact:** Reduces settle-frame AX calls from N to ~1-2 (only windows whose position actually changed since last committed).
 
 ### 3c. Make `applyLayout()` dispatch AX calls async
 
@@ -149,7 +149,11 @@ On animation settle, `clearCommittedFrames()` + `applyLayout()` forces re-sendin
 
 `applyLayout()` runs N synchronous `setFrame` calls on main thread. For 10 Electron windows worst case: ~300ms blocking main.
 
-**Change:** Dispatch `setFrame`/`setPosition` calls to GCD pool (same pattern as `handleFrameTick`'s dispatch). Keep `lastCommittedFrames` write synchronous on main. Track dispatch success: if the AX call fails (background thread), mark the tileID dirty so the next layout pass retries.
+**Change:** Dispatch `setFrame`/`setPosition` calls to GCD pool (same pattern as `handleFrameTick`'s dispatch). Keep `lastCommittedFrames` write synchronous on main thread before dispatch.
+
+For failure tracking: add a `dirtyTileIDs: Set<TileID>` on `StripController` (main-thread only, no synchronization needed). Background dispatch completion writes failures back to main via `DispatchQueue.main.async { self.dirtyTileIDs.insert(tileID) }`. The next `applyLayout()` call forces re-send for dirty IDs regardless of `framesEqual`. This avoids any cross-thread data structure.
+
+**Exception:** `addWindow(_:app:restoredPosition:)` pre-positions windows synchronously via direct `window.setFrame()` (not through `applyLayout`) for flicker prevention. This direct call stays synchronous — the async change only applies to the `applyLayout` loop.
 
 **Impact:** Unblocks main thread during layout. AX calls run in parallel across apps.
 
@@ -165,13 +169,18 @@ On animation settle, `clearCommittedFrames()` + `applyLayout()` forces re-sendin
 
 **Impact:** Reduces idle AX calls from O(N windows + M apps) per second to O(dead windows) per second + O(M apps) per 5 seconds.
 
-### 3e. Use `getPropertiesFast()` in `adoptUnmanagedWindows`
+### 3e. Use `getPropertiesFast()` in `adoptUnmanagedWindows` and `handleSpaceChange`
 
 **File:** `Sources/WindowManager/WindowManager.swift`
 
-Simple substitution: `getProperties()` (8 AX reads) -> `getPropertiesFast()` (5 AX reads).
+Three call sites use `getProperties()` (8 AX reads) where `getPropertiesFast()` (5 AX reads) suffices:
+- `adoptUnmanagedWindows` (line ~757)
+- `handleSpaceChange` reconciliation path (line ~607)
+- `handleSpaceChange` new-space discovery path (line ~647)
 
-**Impact:** Saves 3 AX calls per adopted window.
+**Change:** Replace all three with `getPropertiesFast()`.
+
+**Impact:** Saves 3 AX calls per window discovery across all paths.
 
 ### 3f. Deduplicate `currentTime()` calls in `applyLayout()`
 
@@ -181,13 +190,13 @@ Two back-to-back `currentTime()` calls at lines 452 and 454.
 
 **Change:** Single `let time = currentTime()` used for both `lastLayoutTime` and `computeTargetFrames`.
 
-### 3g. Cache `NSScreen.main` height in `updateFocusRing`
+### 3g. Cache primary screen height in `updateFocusRing`
 
-**File:** `Sources/WindowManager/StripController.swift`
+**File:** `Sources/WindowManager/StripController.swift`, `Sources/WindowManager/WindowManager.swift`
 
-Re-queries `NSScreen.main` every vsync frame for Y-flip.
+Re-queries `NSScreen.main` every vsync frame for Y-flip. `StripController` has no reference to `DisplayManager`.
 
-**Change:** Use `DisplayManager.primaryScreenHeight` (already maintained on display change events) instead of querying `NSScreen.main` at 120Hz.
+**Change:** Add a `primaryScreenHeight: CGFloat` stored property on `StripController`. Have `WindowManager` update it alongside `updateWorkingArea` on display-change events. `updateFocusRing` reads the stored property instead of calling `NSScreen.main` at 120Hz.
 
 ## Section 4: Config, IPC, and Startup
 
@@ -248,13 +257,17 @@ Each section is a natural commit/review boundary.
 
 ## Testing Strategy
 
-- **Core changes:** `swift run RunTests` — existing test suite covers layout, springs, and animations
+- **Core changes:** `swift run RunTests` — existing tests cover `computeTargetFrames` output and `SpringAnimation.solve()` regimes. **New tests required** for:
+  - `SpringAnimation.evaluateWithStatus(at:)` — verify value matches `evaluate` and isDone matches `isDone` for same inputs
+  - `settleWidthAnimations(at:) -> Bool` return value — verify returns false when all animations settled, true when active remain
+  - `ColumnData.currentWidth(at:)` with active `widthAnimation` — verify returns animated value, not stale `cachedWidth`
+  - `SpringParams` precomputed regime — verify `solve()` output is identical before and after the refactor for all three regimes
 - **Platform changes:** Manual — build and run, verify animations still smooth, verify Electron app windows resize correctly
-- **WindowManager changes:** Manual — verify space switching, health check still catches dead windows (kill an app), animation settle still snaps correctly
+- **WindowManager changes:** Manual — verify space switching, health check still catches dead windows (kill an app), animation settle still snaps correctly, far-zone windows reposition correctly after scroll animation
 - **Config/IPC changes:** Manual — `scrollwm-msg list-windows`, config reload via menu bar
 
 ## Risks
 
-- **3c (async `applyLayout`)** is the highest-risk change. If AX calls complete out of order, windows could briefly flash at wrong positions. Mitigated by the `lastCommittedFrames` diff logic and the existing tolerance for async dispatch in `handleFrameTick`.
-- **3b (no `clearCommittedFrames` on settle)** could cause windows to be stuck at stale positions if `lastCommittedFrames` has a wrong entry. Mitigated by the fact that `handleFrameTick` updates `lastCommittedFrames` on every dispatched frame.
-- **1b (`evaluateWithStatus`)** changes the settle semantics for width animations — need to verify the `cachedWidth` invariant (any `cachedWidth` write must nil `widthAnimation`) is preserved.
+- **3c (async `applyLayout`)** is the highest-risk change. If AX calls complete out of order, windows could briefly flash at wrong positions. Mitigated by the `lastCommittedFrames` diff logic and the existing tolerance for async dispatch in `handleFrameTick`. The `dirtyTileIDs` retry mechanism adds complexity but is main-thread-only. The `addWindow(restoredPosition:)` pre-positioning path is explicitly excluded from the async change.
+- **3b (no `clearCommittedFrames` on settle)** — `.far` zone windows are skipped during animation ticks, so their `lastCommittedFrames` entries are stale. Mitigated by writing off-screen positions to `lastCommittedFrames` for far-zone windows during ticks, ensuring the settle diff sees accurate state. Only the `handleFrameTick` settle path is changed; `handleGestureEnd` / `handleGestureCancel` keep their `clearCommittedFrames()` calls.
+- **1b (`evaluateWithStatus`)** — does NOT move settle logic into `currentWidth(at:)`. The `cachedWidth` invariant (any `cachedWidth` write must nil `widthAnimation`) is preserved because settle remains in `settleWidthAnimations`. The change is purely mechanical: one `solve()` call instead of two in the layout computation path.
