@@ -259,13 +259,18 @@ public final class StripController: @unchecked Sendable {
 
     public func cycleWidthPreset() {
         let time = currentTime()
-        strip.cycleWidthPreset(at: time, params: nil)
         if animationEnabled {
-            applyLayout()
-            if let _ = strip.recenterActiveColumnAnimated(at: time) {
+            let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+            strip.cycleWidthPreset(at: time, params: params)
+            let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
+            if let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth) {
+                frameLoop?.resume()
+            } else {
+                // Scroll didn't need animation, but width does
                 frameLoop?.resume()
             }
         } else {
+            strip.cycleWidthPreset(at: time, params: nil)
             strip.recenterActiveColumn(at: time)
             applyLayout()
         }
@@ -498,13 +503,17 @@ public final class StripController: @unchecked Sendable {
 
     /// Called by FrameLoop every vsync frame during animation.
     public func handleFrameTick(time: Double) {
-        // Check if animation has settled
-        if strip.viewOffset.isSettled(at: time) {
+        // Settle any completed width animations
+        strip.settleWidthAnimations(at: time)
+
+        let scrollSettled = strip.viewOffset.isSettled(at: time)
+        let widthSettled = !strip.hasActiveWidthAnimations(at: time)
+
+        // Check if all animations have settled
+        if scrollSettled && widthSettled {
             let finalOffset = strip.viewOffset.current(at: time)
 
             // After gesture momentum settles, re-anchor focus to the cursor column.
-            // viewPos = columnX(oldActive) + finalOffset — we preserve this while
-            // switching activeColumnIndex, so there's no visual jump.
             if gestureAnimating {
                 gestureAnimating = false
                 let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + finalOffset
@@ -518,7 +527,7 @@ public final class StripController: @unchecked Sendable {
 
             frameLoop?.pause()
 
-            // One final layout with exact positions + full setFrame (not position-only)
+            // One final layout with exact positions + full setFrame
             clearCommittedFrames()
             applyLayout()
             return
@@ -528,32 +537,38 @@ public final class StripController: @unchecked Sendable {
         let frames = computeTargetFrames(strip: strip, time: time)
 
         // Dispatch position updates to per-app threads IN PARALLEL.
-        // This prevents a slow Electron app from blocking a fast native app.
         for target in frames {
             guard let window = windowMap[target.tileID] else { continue }
 
             // Skip if position hasn't changed enough to matter.
-            // During animation, use a larger threshold (2px) to reduce AX call volume.
-            // Each AX call costs 0.5-5ms, so skipping sub-pixel changes saves significant time.
             if let lastFrame = lastCommittedFrames[target.tileID],
                abs(lastFrame.minX - target.frame.minX) < 2.0 &&
-               abs(lastFrame.minY - target.frame.minY) < 2.0 {
+               abs(lastFrame.minY - target.frame.minY) < 2.0 &&
+               abs(lastFrame.width - target.frame.width) < 2.0 &&
+               abs(lastFrame.height - target.frame.height) < 2.0 {
                 continue
             }
 
-            // During animation: position-only for visible, skip far windows
+            // During animation: use setFrame for visible (width may be changing), skip far windows
             switch target.visibilityZone {
             case .visible, .nearBuffer:
-                // Dispatch to per-app thread (non-blocking)
                 if let app = apps[window.pid] {
-                    let position = target.frame.origin
-                    DispatchQueue.global(qos: .userInteractive).async {
-                        app.dispatchSetPosition(window, position: position)
+                    if widthSettled {
+                        // Width done, only position changing — position-only is cheaper
+                        let position = target.frame.origin
+                        DispatchQueue.global(qos: .userInteractive).async {
+                            app.dispatchSetPosition(window, position: position)
+                        }
+                    } else {
+                        // Width still animating — need full setFrame to resize
+                        let frame = target.frame
+                        DispatchQueue.global(qos: .userInteractive).async {
+                            app.dispatchSetFrame(window, frame: frame)
+                        }
                     }
                 }
                 lastCommittedFrames[target.tileID] = target.frame
             case .far:
-                // Skip during animation — will be updated on settle
                 break
             }
         }
