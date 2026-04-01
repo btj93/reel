@@ -418,6 +418,7 @@ public final class StripController: @unchecked Sendable {
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
 
         let time = currentTime()
+        strip.columnData[colIndex].widthAnimation = nil
         strip.activeColumnIndex = colIndex
         strip.snapIndices[colIndex] = strip.defaultSnapIndex
 
@@ -513,6 +514,8 @@ public final class StripController: @unchecked Sendable {
             let finalOffset = strip.viewOffset.current(at: time)
 
             // After gesture momentum settles, re-anchor focus to the cursor column.
+            // viewPos = columnX(oldActive) + finalOffset — we preserve this while
+            // switching activeColumnIndex, so there's no visual jump.
             if gestureAnimating {
                 gestureAnimating = false
                 let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + finalOffset
@@ -536,10 +539,13 @@ public final class StripController: @unchecked Sendable {
         let frames = computeTargetFrames(strip: strip, time: time)
 
         // Dispatch position updates to per-app threads IN PARALLEL.
+        // This prevents a slow Electron app from blocking a fast native app.
         for target in frames {
             guard let window = windowMap[target.tileID] else { continue }
 
             // Skip if position hasn't changed enough to matter.
+            // During animation, use a larger threshold (2px) to reduce AX call volume.
+            // Each AX call costs 0.5-5ms, so skipping sub-pixel changes saves significant time.
             if let lastFrame = lastCommittedFrames[target.tileID],
                abs(lastFrame.minX - target.frame.minX) < 2.0 &&
                abs(lastFrame.minY - target.frame.minY) < 2.0 &&
@@ -568,6 +574,7 @@ public final class StripController: @unchecked Sendable {
                 }
                 lastCommittedFrames[target.tileID] = target.frame
             case .far:
+                // Skip during animation — will be updated on settle
                 break
             }
         }
