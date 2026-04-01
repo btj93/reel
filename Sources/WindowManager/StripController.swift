@@ -53,6 +53,15 @@ public final class StripController: @unchecked Sendable {
     /// How long to ignore AX echo events after a layout (100ms).
     public static let echoSuppressionInterval: Double = 0.15
 
+    /// Timestamp of the last space switch. Used to suppress macOS-initiated
+    /// focus changes that arrive after echo suppression expires.
+    private var lastSpaceSwitchTime: Double = 0
+
+    /// How long to ignore focus events after a space switch (300ms).
+    /// macOS space-switch animations take ~250ms; focus notifications for the
+    /// previously-frontmost app arrive during or just after. 300ms gives margin.
+    public static let spaceSwitchFocusSuppressionInterval: Double = 0.3
+
     /// Focus ring overlay.
     public let focusRing: FocusRing
 
@@ -763,6 +772,11 @@ public final class StripController: @unchecked Sendable {
         currentTime() - lastLayoutTime < Self.echoSuppressionInterval
     }
 
+    /// True if we recently switched spaces and should ignore external focus changes.
+    public var isInSpaceSwitchSuppression: Bool {
+        currentTime() - lastSpaceSwitchTime < Self.spaceSwitchFocusSuppressionInterval
+    }
+
     // MARK: - Space Management
 
     /// Save the current strip state for the current Space.
@@ -821,6 +835,7 @@ public final class StripController: @unchecked Sendable {
             lastCommittedFrames.removeAll()  // Force re-apply
 
             applyLayout()
+            lastSpaceSwitchTime = currentTime()
             return true
         }
 
@@ -834,6 +849,7 @@ public final class StripController: @unchecked Sendable {
         apps.removeAll()
         lastCommittedFrames.removeAll()
         focusRing.hide()
+        lastSpaceSwitchTime = currentTime()
         return false
     }
 
