@@ -139,7 +139,11 @@ Zero `#if DEBUG` guards in the entire codebase. `print()` + `fflush(stdout)` fir
 
 On animation settle, `clearCommittedFrames()` + `applyLayout()` forces re-sending every window's frame, defeating the `framesEqual` diff logic.
 
-**Change:** Remove the `clearCommittedFrames()` call on the animation-settle path in `handleFrameTick` only (not in `handleGestureEnd` or `handleGestureCancel`, which need the full clear since gesture paths are structural repositions). To handle `.far` zone windows correctly — which are skipped during animation ticks and therefore have stale entries in `lastCommittedFrames` — update `handleFrameTick` to write `lastCommittedFrames` entries for `.far` zone windows too (writing the off-screen position), so that the settle `applyLayout()` diff correctly detects they haven't moved.
+**Change:** Remove the `clearCommittedFrames()` call on the animation-settle path in `handleFrameTick` only. Keep `clearCommittedFrames()` in `handleGestureEnd` and `handleGestureCancel` — gesture ticks do not write `lastCommittedFrames` for far-zone windows, so the cache is unreliable at gesture-end and a full clear is still required.
+
+To handle `.far` zone windows correctly on the animation-settle path — which are skipped during animation ticks and therefore have stale entries in `lastCommittedFrames` — update `handleFrameTick` to write `lastCommittedFrames` entries for `.far` zone windows too (writing the off-screen position), so that the settle `applyLayout()` diff correctly detects they haven't moved.
+
+**Note:** `handleUserResize` reads `lastCommittedFrames` for left-edge resize detection. After this change, far-zone entries will hold sliver/off-screen positions. Guard the left-edge heuristic to only apply when `lastCommittedFrames[tileID]` is within the working area x-range, preventing incorrect view-offset adjustments for windows that transited through the far zone.
 
 **Impact:** Reduces settle-frame AX calls from N to ~1-2 (only windows whose position actually changed since last committed).
 
@@ -151,7 +155,7 @@ On animation settle, `clearCommittedFrames()` + `applyLayout()` forces re-sendin
 
 **Change:** Dispatch `setFrame`/`setPosition` calls to GCD pool (same pattern as `handleFrameTick`'s dispatch). Keep `lastCommittedFrames` write synchronous on main thread before dispatch.
 
-For failure tracking: add a `dirtyTileIDs: Set<TileID>` on `StripController` (main-thread only, no synchronization needed). Background dispatch completion writes failures back to main via `DispatchQueue.main.async { self.dirtyTileIDs.insert(tileID) }`. The next `applyLayout()` call forces re-send for dirty IDs regardless of `framesEqual`. This avoids any cross-thread data structure.
+For failure tracking: add a `dirtyTileIDs: Set<TileID>` on `StripController` (main-thread only, no synchronization needed). Background dispatch completion writes failures back to main via `DispatchQueue.main.async { self.dirtyTileIDs.insert(tileID) }`. The next `applyLayout()` call forces re-send for dirty IDs regardless of `framesEqual`. This avoids any cross-thread data structure. `removeWindow` must also call `dirtyTileIDs.remove(tileID)` to prevent ghost entries from accumulating.
 
 **Exception:** `addWindow(_:app:restoredPosition:)` pre-positions windows synchronously via direct `window.setFrame()` (not through `applyLayout`) for flicker prevention. This direct call stays synchronous — the async change only applies to the `applyLayout` loop.
 
@@ -196,7 +200,7 @@ Two back-to-back `currentTime()` calls at lines 452 and 454.
 
 Re-queries `NSScreen.main` every vsync frame for Y-flip. `StripController` has no reference to `DisplayManager`.
 
-**Change:** Add a `primaryScreenHeight: CGFloat` stored property on `StripController`. Have `WindowManager` update it alongside `updateWorkingArea` on display-change events. `updateFocusRing` reads the stored property instead of calling `NSScreen.main` at 120Hz.
+**Change:** Add a `primaryScreenHeight: CGFloat` parameter to `StripController.init`, so the value is never zero at construction. `WindowManager` passes `displayManager.primaryScreenHeight` during init and updates it alongside `updateWorkingArea` on display-change events. `updateFocusRing` reads the stored property instead of calling `NSScreen.main` at 120Hz.
 
 ## Section 4: Config, IPC, and Startup
 
@@ -258,8 +262,8 @@ Each section is a natural commit/review boundary.
 ## Testing Strategy
 
 - **Core changes:** `swift run RunTests` — existing tests cover `computeTargetFrames` output and `SpringAnimation.solve()` regimes. **New tests required** for:
-  - `SpringAnimation.evaluateWithStatus(at:)` — verify value matches `evaluate` and isDone matches `isDone` for same inputs
-  - `settleWidthAnimations(at:) -> Bool` return value — verify returns false when all animations settled, true when active remain
+  - `SpringAnimation.evaluateWithStatus(at:)` — verify value matches `evaluate` and isDone matches `isDone` for same inputs. Include an epsilon-boundary test: spring evaluated at time where displacement is at `epsilon - delta` (not done) vs `epsilon + delta` (done) to verify the `<` threshold is preserved exactly.
+  - `settleWidthAnimations(at:) -> Bool` return value — verify returns false when all animations settled, true when active remain. Include a mixed-case test: two columns, one animation done, one active — verify the done one is niled and the function returns true (active remains). This covers the settle-then-query ordering invariant.
   - `ColumnData.currentWidth(at:)` with active `widthAnimation` — verify returns animated value, not stale `cachedWidth`
   - `SpringParams` precomputed regime — verify `solve()` output is identical before and after the refactor for all three regimes
 - **Platform changes:** Manual — build and run, verify animations still smooth, verify Electron app windows resize correctly
