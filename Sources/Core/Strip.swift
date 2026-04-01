@@ -181,12 +181,14 @@ public struct Strip: Sendable {
     }
 
     /// Recenter the viewport on the active column with spring animation.
-    public mutating func recenterActiveColumnAnimated(at time: Double) -> SpringAnimation? {
+    /// Pass `columnWidth` to override the current width (e.g., target width during animation).
+    public mutating func recenterActiveColumnAnimated(at time: Double, columnWidth: Double? = nil) -> SpringAnimation? {
         guard !columns.isEmpty else { return nil }
         let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
+        let width = columnWidth ?? columnData[activeColumnIndex].currentWidth(at: time)
         let targetOffset = computeSnapOffset(
             snapPoint: snapPoint,
-            columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
+            columnWidth: width,
             workingAreaWidth: workingArea.width
         )
         return createScrollAnimation(to: targetOffset, at: time)
