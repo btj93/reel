@@ -808,6 +808,30 @@ do {
     assertClose(resolved[3], 1440, tolerance: 0.01, "1.0 preset")
 }
 
+section("hasActiveWidthAnimations / settleWidthAnimations")
+do {
+    var strip = makeStrip(columnCount: 2)
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+
+    // No animations initially
+    check(!strip.hasActiveWidthAnimations(at: 0), "no animations initially")
+
+    // Add a width animation to column 0
+    strip.columnData[0].widthAnimation = SpringAnimation(from: 360, to: 720, startTime: 0, params: params)
+    check(strip.hasActiveWidthAnimations(at: 0), "active at t=0")
+
+    // settleWidthAnimations at t=0 — animation still in-flight, should NOT nil it
+    strip.settleWidthAnimations(at: 0)
+    check(strip.columnData[0].widthAnimation != nil, "not settled at t=0")
+
+    // At t=2.0, animation should be done
+    check(!strip.hasActiveWidthAnimations(at: 2.0), "settled at t=2.0")
+
+    // settleWidthAnimations at t=2.0 — should nil it out
+    strip.settleWidthAnimations(at: 2.0)
+    check(strip.columnData[0].widthAnimation == nil, "nilled after settle")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

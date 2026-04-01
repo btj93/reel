@@ -266,6 +266,7 @@ public final class StripController: @unchecked Sendable {
             strip.cycleWidthPreset(at: time, params: widthSpringParams)
             let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
             let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth)
+            // Always resume — width animation needs ticking even if scroll is already at target
             frameLoop?.resume()
         } else {
             strip.cycleWidthPreset(at: time, params: nil)

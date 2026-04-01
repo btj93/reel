@@ -21,6 +21,11 @@ public struct ScrollWMConfig: Sendable {
     public var bounceDistance: Double = 40
     public var bounceDampingRatio: Double = 0.6
 
+    /// Spring params for width animation (reuses scroll spring values).
+    public var widthSpringParams: SpringParams {
+        SpringParams(dampingRatio: scrollDampingRatio, stiffness: scrollStiffness, epsilon: 0.5)
+    }
+
     // MARK: - Keybindings (action → key string like "hyper-h")
 
     public var keybindings: [String: String] = [
@@ -45,7 +50,7 @@ public struct ScrollWMConfig: Sendable {
 
     // MARK: - Position Memory
     public var positionMemory: Bool = true
-    public var savedPositionLimit: Int = 50
+    public var savedPositionLimit: Int = 500
     public var positionMemoryRules: [PositionMemoryRuleConfig] = []
 
     // MARK: - Startup
