@@ -762,6 +762,11 @@ public final class StripController: @unchecked Sendable {
     /// Save the current strip state for the current Space.
     public func saveCurrentSpace() {
         guard !currentSpaceFingerprint.isEmpty else { return }
+        // Clear in-flight width animations — stale springs with old startTimes
+        // would evaluate incorrectly when restored later.
+        for i in 0..<strip.columnData.count {
+            strip.columnData[i].widthAnimation = nil
+        }
         savedSpaces[currentSpaceFingerprint] = SavedStripState(
             columns: strip.columns,
             columnData: strip.columnData,
