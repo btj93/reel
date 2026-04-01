@@ -81,6 +81,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem(title: "ScrollWM v0.1.0", action: nil, keyEquivalent: ""))
             menu.addItem(NSMenuItem.separator())
 
+            // Keybinding actions
+            let keybindings = windowManager?.config.keybindings ?? [:]
+            let actions: [(action: String, title: String, tag: Int)] = [
+                ("focus_left",       "Focus Left",        1),
+                ("focus_right",      "Focus Right",       2),
+                ("move_left",        "Move Left",         3),
+                ("move_right",       "Move Right",        4),
+                ("cycle_width",      "Cycle Width",       5),
+                ("toggle_full_width","Toggle Full Width",  6),
+                ("toggle_floating",  "Toggle Floating",   7),
+                ("close_window",     "Close Window",      8),
+            ]
+            for entry in actions {
+                let keyHint = keybindings[entry.action] ?? ""
+                let title = keyHint.isEmpty ? entry.title : "\(entry.title)\t\(keyHint)"
+                let item = NSMenuItem(title: title, action: #selector(handleMenuAction(_:)), keyEquivalent: "")
+                item.tag = entry.tag
+                menu.addItem(item)
+            }
+
+            menu.addItem(NSMenuItem.separator())
+
             let pauseItem = NSMenuItem(
                 title: isPaused ? "Resume" : "Pause",
                 action: #selector(togglePause),
@@ -133,6 +155,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openAccessibilitySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func handleMenuAction(_ sender: NSMenuItem) {
+        let actionMap: [Int: HotkeyAction] = [
+            1: .focusLeft,
+            2: .focusRight,
+            3: .moveColumnLeft,
+            4: .moveColumnRight,
+            5: .cycleWidthPreset,
+            6: .toggleFullWidth,
+            7: .toggleFloating,
+            8: .closeWindow,
+        ]
+        if let action = actionMap[sender.tag] {
+            windowManager?.performAction(action)
         }
     }
 

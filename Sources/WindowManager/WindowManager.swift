@@ -477,7 +477,7 @@ public final class WindowManager: @unchecked Sendable {
         // Ignore move/resize/focus events that echo from our own layout calls
         if stripController.isInEchoSuppression {
             switch event {
-            case .windowResized, .windowMoved, .windowFocused:
+            case .windowResized, .windowMoved, .windowFocused, .appActivated:
                 return
             default:
                 break
@@ -630,6 +630,11 @@ public final class WindowManager: @unchecked Sendable {
 
         print("[ScrollWM] Space changed: new strip with \(stripController.strip.columns.count) cols")
         fflush(stdout)
+    }
+
+    public func performAction(_ action: HotkeyAction) {
+        guard !isPaused else { return }
+        handleHotkeyAction(action)
     }
 
     private func handleHotkeyAction(_ action: HotkeyAction) {

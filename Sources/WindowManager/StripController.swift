@@ -25,6 +25,10 @@ public final class StripController: @unchecked Sendable {
     /// Whether trackpad gestures snap to columns after flick.
     public var gestureSnap: Bool = true
 
+    /// True while a gesture-initiated momentum animation is in flight.
+    /// Used to defer focus changes until the animation settles.
+    private var gestureAnimating: Bool = false
+
     /// Saved strip states per Space, keyed by a fingerprint of on-screen window IDs.
     private var savedSpaces: [Set<UInt32>: SavedStripState] = [:]
 
@@ -255,12 +259,32 @@ public final class StripController: @unchecked Sendable {
 
     public func cycleWidthPreset() {
         strip.cycleWidthPreset()
-        applyLayout()
+        let time = currentTime()
+        if animationEnabled {
+            applyLayout()
+            if let _ = strip.recenterActiveColumnAnimated(at: time) {
+                frameLoop?.resume()
+            }
+        } else {
+            strip.recenterActiveColumn(at: time)
+            applyLayout()
+        }
     }
 
     public func toggleFullWidth() {
         strip.toggleFullWidth()
-        applyLayout()
+        let time = currentTime()
+        if animationEnabled {
+            // Apply layout immediately so the window resizes right away,
+            // then animate the scroll to recenter the column.
+            applyLayout()
+            if let _ = strip.recenterActiveColumnAnimated(at: time) {
+                frameLoop?.resume()
+            }
+        } else {
+            strip.recenterActiveColumn(at: time)
+            applyLayout()
+        }
     }
 
     /// Close the focused window via its AX close button.
@@ -476,7 +500,21 @@ public final class StripController: @unchecked Sendable {
         // Check if animation has settled
         if strip.viewOffset.isSettled(at: time) {
             let finalOffset = strip.viewOffset.current(at: time)
-            strip.viewOffset = .static(finalOffset)
+
+            // After gesture momentum settles, re-anchor focus to the cursor column.
+            // viewPos = columnX(oldActive) + finalOffset — we preserve this while
+            // switching activeColumnIndex, so there's no visual jump.
+            if gestureAnimating {
+                gestureAnimating = false
+                let viewPos = strip.columnX(at: strip.activeColumnIndex) + finalOffset
+                let newActive = columnUnderCursor(gestureOffset: finalOffset)
+                strip.activeColumnIndex = newActive
+                let adjustedOffset = viewPos - strip.columnX(at: newActive)
+                strip.viewOffset = .static(adjustedOffset)
+            } else {
+                strip.viewOffset = .static(finalOffset)
+            }
+
             frameLoop?.pause()
 
             // One final layout with exact positions + full setFrame (not position-only)
@@ -541,6 +579,8 @@ public final class StripController: @unchecked Sendable {
     }
 
     /// End a gesture — start momentum animation or stop.
+    /// Focus is NOT changed here — it's deferred until the animation settles
+    /// (in handleFrameTick) to avoid a visual jump from shifting the coordinate reference.
     public func handleGestureEnd(time: Double) {
         guard case .gesture(let state) = strip.viewOffset else { return }
         let velocity = state.tracker.velocity()
@@ -548,16 +588,13 @@ public final class StripController: @unchecked Sendable {
         if abs(velocity) > 50 {
             let projected = state.tracker.projectedEndPosition(isTouchpad: state.isTouchpad)
 
-            // Determine active column by cursor position (before creating spring)
-            strip.activeColumnIndex = columnUnderCursor(gestureOffset: state.currentOffset)
-
             if gestureSnap {
-                // Snap to next milestone in the flick direction
-                let colWidth = strip.columnData[strip.activeColumnIndex].currentWidth
+                // Determine target column for snap calculation (but don't change focus yet)
+                let targetColumn = columnUnderCursor(gestureOffset: state.currentOffset)
+                let colWidth = strip.columnData[targetColumn].currentWidth
                 let wa = strip.workingArea.width
                 let (snapIdx, snapOffset): (Int, Double)
                 if velocity > 0 {
-                    // Flick right → window slides right → next rightward milestone
                     (snapIdx, snapOffset) = nextSnapMilestoneRight(
                         currentOffset: state.currentOffset,
                         snapPoints: strip.snapPoints,
@@ -565,7 +602,6 @@ public final class StripController: @unchecked Sendable {
                         workingAreaWidth: wa
                     )
                 } else {
-                    // Flick left → window slides left → next leftward milestone
                     (snapIdx, snapOffset) = nextSnapMilestoneLeft(
                         currentOffset: state.currentOffset,
                         snapPoints: strip.snapPoints,
@@ -573,7 +609,8 @@ public final class StripController: @unchecked Sendable {
                         workingAreaWidth: wa
                     )
                 }
-                strip.snapIndices[strip.activeColumnIndex] = snapIdx
+                // Store snap index for the target column — will be applied when focus moves on settle
+                strip.snapIndices[targetColumn] = snapIdx
 
                 let anim = SpringAnimation(
                     from: state.currentOffset,
@@ -594,10 +631,15 @@ public final class StripController: @unchecked Sendable {
                 )
                 strip.viewOffset = .animation(anim)
             }
+            gestureAnimating = true
             // Frame loop continues to tick
         } else {
-            // No significant velocity — just stop
-            strip.viewOffset = .static(state.currentOffset)
+            // No significant velocity — just stop, then re-anchor focus to cursor column
+            let viewPos = strip.columnX(at: strip.activeColumnIndex) + state.currentOffset
+            let newActive = columnUnderCursor(gestureOffset: state.currentOffset)
+            strip.activeColumnIndex = newActive
+            let adjustedOffset = viewPos - strip.columnX(at: newActive)
+            strip.viewOffset = .static(adjustedOffset)
             frameLoop?.pause()
             clearCommittedFrames()
             applyLayout()
@@ -606,6 +648,7 @@ public final class StripController: @unchecked Sendable {
 
     /// Cancel a gesture (e.g., another event interrupted it).
     public func handleGestureCancel() {
+        gestureAnimating = false
         let time = currentTime()
         let current = strip.viewOffset.current(at: time)
         strip.viewOffset = .static(current)
