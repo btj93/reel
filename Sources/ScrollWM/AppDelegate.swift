@@ -94,9 +94,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 ("close_window",     "Close Window",      8),
             ]
             for entry in actions {
-                let keyHint = keybindings[entry.action] ?? ""
-                let title = keyHint.isEmpty ? entry.title : "\(entry.title)\t\(keyHint)"
-                let item = NSMenuItem(title: title, action: #selector(handleMenuAction(_:)), keyEquivalent: "")
+                let keyString = keybindings[entry.action] ?? ""
+                let parsed = AppDelegate.parseKeyEquivalent(keyString)
+                let item = NSMenuItem(title: entry.title, action: #selector(handleMenuAction(_:)), keyEquivalent: parsed.key)
+                item.keyEquivalentModifierMask = parsed.modifiers
                 item.tag = entry.tag
                 menu.addItem(item)
             }
@@ -184,6 +185,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let config = windowManager?.config {
             applyLoginItem(enabled: config.startAtLogin)
         }
+        setupMenuBar()
     }
 
     @objc private func clearPositions() {
@@ -196,5 +198,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() {
         windowManager?.shutdown()
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Key String → NSMenuItem Key Equivalent
+
+    /// Convert a key string like "hyper-h" into an NSMenuItem keyEquivalent + modifierMask.
+    private static func parseKeyEquivalent(_ str: String) -> (key: String, modifiers: NSEvent.ModifierFlags) {
+        guard !str.isEmpty else { return ("", []) }
+        let parts = str.lowercased().split(separator: "-").map(String.init)
+        guard parts.count >= 2 else { return ("", []) }
+
+        var modifiers: NSEvent.ModifierFlags = []
+        let keyName = parts.last!
+
+        for part in parts.dropLast() {
+            switch part {
+            case "hyper":
+                modifiers.insert(.control)
+                modifiers.insert(.shift)
+                modifiers.insert(.command)
+                modifiers.insert(.option)
+            case "ctrl", "control": modifiers.insert(.control)
+            case "shift": modifiers.insert(.shift)
+            case "cmd", "command": modifiers.insert(.command)
+            case "alt", "opt", "option": modifiers.insert(.option)
+            case "fn": modifiers.insert(.function)
+            default: break
+            }
+        }
+
+        let key: String
+        switch keyName {
+        case "space": key = " "
+        case "return": key = "\r"
+        case "tab": key = "\t"
+        case "escape": key = "\u{1b}"
+        case "delete": key = "\u{08}"
+        case "left": key = "\u{F702}"
+        case "right": key = "\u{F703}"
+        case "up": key = "\u{F700}"
+        case "down": key = "\u{F701}"
+        default: key = keyName
+        }
+
+        return (key, modifiers)
     }
 }

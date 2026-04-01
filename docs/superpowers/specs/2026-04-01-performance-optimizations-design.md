@@ -24,9 +24,13 @@ Currently two passes over columns: first builds `columnPositions` array calling 
 
 `ColumnData.currentWidth(at:)` calls `isDone()` (which calls `solve()`) then `evaluate()` (which calls `solve()` again). Same pattern exists in `ViewOffset.isSettled(at:)`.
 
-**Change:** Add `evaluateWithStatus(at:) -> (value: Double, isDone: Bool)` on `SpringAnimation`. Calls `solve()` once, returns both the interpolated value and whether displacement+velocity are below epsilon. Update `ColumnData.currentWidth(at:)` to use it — if done, set `cachedWidth` and nil the animation in one pass. Update `ViewOffset` to use it where both value and convergence status are needed.
+**Change:** Add `evaluateWithStatus(at:) -> (value: Double, isDone: Bool)` on `SpringAnimation`. Calls `solve()` once, returns both the interpolated value and whether displacement+velocity are below epsilon. Update `ColumnData.currentWidth(at:)` to use `evaluateWithStatus` — return the computed value directly instead of calling `evaluate()` separately.
 
-**Impact:** Halves the number of `solve()` calls per animated column per frame.
+**Important constraint:** `ColumnData` is a struct and `currentWidth(at:)` is non-mutating. The settle side-effect (setting `cachedWidth` and niling `widthAnimation`) must remain in `settleWidthAnimations` in `handleFrameTick`, not inside `currentWidth`. The optimization here is purely eliminating the double `solve()` — not moving the settle logic.
+
+Call sites that only need the boolean (`hasActiveWidthAnimations`, `settleWidthAnimations`, `ViewOffset.isSettled`, `cycleWidthPreset`) should continue using `isDone(at:)`.
+
+**Impact:** Halves the number of `solve()` calls per animated column per frame in the layout computation path.
 
 ### 1c. Precompute spring constants in `SpringParams.init`
 
@@ -125,7 +129,7 @@ After 2a consolidates timing, remove the private `CACurrentMediaTime()` function
 
 Zero `#if DEBUG` guards in the entire codebase. `print()` + `fflush(stdout)` fires at 60-120Hz during animations (`updateFocusRing`, per-window in `applyLayout`). Swift's `print` takes a global lock.
 
-**Change:** Wrap all diagnostic/coordinate prints in `#if DEBUG`. For frame-tick and `applyLayout` hot paths, remove per-window coordinate prints entirely (use Instruments for profiling, not stdout). Keep structural prints (startup banner, window add/remove, space switch) but gate them behind `#if DEBUG`.
+**Change:** Wrap all diagnostic/coordinate prints in `#if DEBUG`, including their paired `fflush(stdout)` calls — `fflush` is a syscall even when there's no output. For frame-tick and `applyLayout` hot paths, remove per-window coordinate prints entirely (use Instruments for profiling, not stdout). Keep structural prints (startup banner, window add/remove, space switch) but gate them behind `#if DEBUG`.
 
 **Impact:** Eliminates global-lock contention and syscall overhead at 120Hz. Likely the single biggest win for animation smoothness.
 

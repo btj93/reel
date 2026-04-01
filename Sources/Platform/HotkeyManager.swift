@@ -80,14 +80,14 @@ public final class HotkeyManager: @unchecked Sendable {
     /// Register hardcoded defaults (fallback if no config).
     public func registerDefaults() {
         registerFromConfig([
-            "focus_left": "hyper-h",
-            "focus_right": "hyper-l",
-            "move_left": "hyper-j",
-            "move_right": "hyper-k",
-            "cycle_width": "hyper-r",
-            "toggle_full_width": "hyper-f",
-            "toggle_floating": "hyper-space",
-            "close_window": "hyper-w",
+            "focus_left": "alt-h",
+            "focus_right": "alt-l",
+            "move_left": "alt-shift-h",
+            "move_right": "alt-shift-l",
+            "cycle_width": "alt-r",
+            "toggle_full_width": "alt-f",
+            "toggle_floating": "alt-space",
+            "close_window": "alt-w",
         ])
     }
 
