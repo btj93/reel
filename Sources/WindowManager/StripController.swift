@@ -552,13 +552,27 @@ public final class StripController: @unchecked Sendable {
             strip.activeColumnIndex = columnUnderCursor(gestureOffset: state.currentOffset)
 
             if gestureSnap {
-                // Snap to nearest configured snap point for the target column
-                let (snapIdx, snapOffset) = nearestSnapPoint(
-                    projectedOffset: projected,
-                    snapPoints: strip.snapPoints,
-                    columnWidth: strip.columnData[strip.activeColumnIndex].currentWidth,
-                    workingAreaWidth: strip.workingArea.width
-                )
+                // Snap to next milestone in the flick direction
+                let colWidth = strip.columnData[strip.activeColumnIndex].currentWidth
+                let wa = strip.workingArea.width
+                let (snapIdx, snapOffset): (Int, Double)
+                if velocity > 0 {
+                    // Flick right → window slides right → next rightward milestone
+                    (snapIdx, snapOffset) = nextSnapMilestoneRight(
+                        currentOffset: state.currentOffset,
+                        snapPoints: strip.snapPoints,
+                        columnWidth: colWidth,
+                        workingAreaWidth: wa
+                    )
+                } else {
+                    // Flick left → window slides left → next leftward milestone
+                    (snapIdx, snapOffset) = nextSnapMilestoneLeft(
+                        currentOffset: state.currentOffset,
+                        snapPoints: strip.snapPoints,
+                        columnWidth: colWidth,
+                        workingAreaWidth: wa
+                    )
+                }
                 strip.snapIndices[strip.activeColumnIndex] = snapIdx
 
                 let anim = SpringAnimation(
@@ -621,8 +635,7 @@ public final class StripController: @unchecked Sendable {
             + strip.columnX(at: strip.activeColumnIndex)
             + gestureOffset
 
-        let columnWidths = strip.columnData.map(\.currentWidth)
-        return columnIndexAtStripX(cursorStripX, columnWidths: columnWidths, gap: strip.gap)
+        return columnIndexAtStripX(cursorStripX, columnData: strip.columnData, gap: strip.gap)
     }
 
     /// Update the working area (e.g., after display change or Dock show/hide).

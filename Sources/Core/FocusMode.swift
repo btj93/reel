@@ -113,6 +113,31 @@ public func columnIndexAtStripX(
     return columnWidths.count - 1
 }
 
+/// Overload that reads widths directly from ColumnData to avoid allocating a temporary array.
+public func columnIndexAtStripX(
+    _ stripX: Double,
+    columnData: [ColumnData],
+    gap: Double
+) -> Int {
+    guard !columnData.isEmpty else { return 0 }
+
+    var x: Double = 0
+    for i in 0..<columnData.count {
+        let colEnd = x + columnData[i].currentWidth
+        if stripX < colEnd {
+            return i
+        }
+        let gapEnd = colEnd + gap
+        if stripX < gapEnd {
+            let distLeft = stripX - colEnd
+            let distRight = gapEnd - stripX
+            return distLeft < distRight ? i : min(i + 1, columnData.count - 1)
+        }
+        x = gapEnd
+    }
+    return columnData.count - 1
+}
+
 /// Compute the X position of a column in strip-space.
 public func computeColumnX(
     at index: Int,
