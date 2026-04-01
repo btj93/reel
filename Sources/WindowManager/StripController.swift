@@ -413,13 +413,14 @@ public final class StripController: @unchecked Sendable {
     public func scrollToWindow(tileID: TileID) {
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
 
+        let time = currentTime()
         strip.activeColumnIndex = colIndex
         strip.snapIndices[colIndex] = strip.defaultSnapIndex
 
         let snapPoint = strip.snapPoints[strip.snapIndices[colIndex]]
         let newOffset = computeSnapOffset(
             snapPoint: snapPoint,
-            columnWidth: strip.columnData[colIndex].currentWidth,
+            columnWidth: strip.columnData[colIndex].currentWidth(at: time),
             workingAreaWidth: strip.workingArea.width
         )
         strip.viewOffset = .static(newOffset)
@@ -506,10 +507,10 @@ public final class StripController: @unchecked Sendable {
             // switching activeColumnIndex, so there's no visual jump.
             if gestureAnimating {
                 gestureAnimating = false
-                let viewPos = strip.columnX(at: strip.activeColumnIndex) + finalOffset
+                let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + finalOffset
                 let newActive = columnUnderCursor(gestureOffset: finalOffset)
                 strip.activeColumnIndex = newActive
-                let adjustedOffset = viewPos - strip.columnX(at: newActive)
+                let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
                 strip.viewOffset = .static(adjustedOffset)
             } else {
                 strip.viewOffset = .static(finalOffset)
@@ -591,7 +592,7 @@ public final class StripController: @unchecked Sendable {
             if gestureSnap {
                 // Determine target column for snap calculation (but don't change focus yet)
                 let targetColumn = columnUnderCursor(gestureOffset: state.currentOffset)
-                let colWidth = strip.columnData[targetColumn].currentWidth
+                let colWidth = strip.columnData[targetColumn].currentWidth(at: time)
                 let wa = strip.workingArea.width
                 let (snapIdx, snapOffset): (Int, Double)
                 if velocity > 0 {
@@ -635,10 +636,10 @@ public final class StripController: @unchecked Sendable {
             // Frame loop continues to tick
         } else {
             // No significant velocity — just stop, then re-anchor focus to cursor column
-            let viewPos = strip.columnX(at: strip.activeColumnIndex) + state.currentOffset
+            let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + state.currentOffset
             let newActive = columnUnderCursor(gestureOffset: state.currentOffset)
             strip.activeColumnIndex = newActive
-            let adjustedOffset = viewPos - strip.columnX(at: newActive)
+            let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
             strip.viewOffset = .static(adjustedOffset)
             frameLoop?.pause()
             clearCommittedFrames()
@@ -664,6 +665,7 @@ public final class StripController: @unchecked Sendable {
 
         let cursorScreenX = NSEvent.mouseLocation.x
         let wa = strip.workingArea
+        let time = currentTime()
 
         // If cursor is outside the working area X range, keep current active column
         guard cursorScreenX >= wa.minX && cursorScreenX <= wa.maxX else {
@@ -675,10 +677,10 @@ public final class StripController: @unchecked Sendable {
         // viewPos = columnX(activeColumnIndex) + viewOffset
         // So: stripX = (screenX - wa.minX) + columnX(activeColumnIndex) + viewOffset
         let cursorStripX = (cursorScreenX - wa.minX)
-            + strip.columnX(at: strip.activeColumnIndex)
+            + strip.columnX(at: strip.activeColumnIndex, time: time)
             + gestureOffset
 
-        return columnIndexAtStripX(cursorStripX, columnData: strip.columnData, gap: strip.gap)
+        return columnIndexAtStripX(cursorStripX, columnData: strip.columnData, gap: strip.gap, time: time)
     }
 
     /// Update the working area (e.g., after display change or Dock show/hide).

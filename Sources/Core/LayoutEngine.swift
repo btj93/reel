@@ -61,7 +61,7 @@ public func computeTargetFrames(
     var columnPositions: [(index: Int, stripX: Double)] = []
     var x: Double = 0
     for i in 0..<strip.columns.count {
-        let colWidth = strip.columnData[i].currentWidth
+        let colWidth = strip.columnData[i].currentWidth(at: time)
         columnPositions.append((i, x))
 
         let screenLeft = x - viewPos
@@ -85,7 +85,7 @@ public func computeTargetFrames(
 
     for (i, stripX) in columnPositions {
         let column = strip.columns[i]
-        let colWidth = strip.columnData[i].currentWidth
+        let colWidth = strip.columnData[i].currentWidth(at: time)
         let screenX = stripX - viewPos + wa.minX
 
         // Determine visibility zone

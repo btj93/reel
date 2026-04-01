@@ -68,11 +68,11 @@ public struct Strip: Sendable {
     }
 
     /// Total width of the strip (all columns + gaps).
-    public var totalWidth: Double {
+    public func totalWidth(at time: Double) -> Double {
         guard !columnData.isEmpty else { return 0 }
         var w: Double = 0
         for data in columnData {
-            w += data.currentWidth
+            w += data.currentWidth(at: time)
         }
         w += Double(max(0, columnData.count - 1)) * gap
         return w
@@ -85,13 +85,13 @@ public struct Strip: Sendable {
     }
 
     /// The X position of a column in strip-space.
-    public func columnX(at index: Int) -> Double {
-        computeColumnX(at: index, columnData: columnData, gap: gap)
+    public func columnX(at index: Int, time: Double = 0) -> Double {
+        computeColumnX(at: index, columnData: columnData, gap: gap, time: time)
     }
 
     /// The view position (left edge of the viewport in strip-space).
     public func viewPos(at time: Double) -> Double {
-        columnX(at: activeColumnIndex) + viewOffset.current(at: time)
+        columnX(at: activeColumnIndex, time: time) + viewOffset.current(at: time)
     }
 
     // MARK: - Column Mutations
@@ -119,7 +119,7 @@ public struct Strip: Sendable {
         let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
         let newOffset = computeSnapOffset(
             snapPoint: snapPoint,
-            columnWidth: columnData[activeColumnIndex].currentWidth,
+            columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
             workingAreaWidth: workingArea.width
         )
         viewOffset = .static(newOffset)
@@ -129,7 +129,7 @@ public struct Strip: Sendable {
     public mutating func removeColumn(at index: Int, at time: Double) {
         guard index >= 0, index < columns.count else { return }
 
-        let removedWidth = columnData[index].currentWidth + gap
+        let removedWidth = columnData[index].currentWidth(at: time) + gap
 
         columns.remove(at: index)
         columnData.remove(at: index)
@@ -160,7 +160,7 @@ public struct Strip: Sendable {
         let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
         let newOffset = computeSnapOffset(
             snapPoint: snapPoint,
-            columnWidth: columnData[activeColumnIndex].currentWidth,
+            columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
             workingAreaWidth: workingArea.width
         )
         viewOffset = .static(newOffset)
@@ -174,7 +174,7 @@ public struct Strip: Sendable {
         let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
         let targetOffset = computeSnapOffset(
             snapPoint: snapPoint,
-            columnWidth: columnData[activeColumnIndex].currentWidth,
+            columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
             workingAreaWidth: workingArea.width
         )
         viewOffset = .static(targetOffset)
@@ -186,7 +186,7 @@ public struct Strip: Sendable {
         let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
         let targetOffset = computeSnapOffset(
             snapPoint: snapPoint,
-            columnWidth: columnData[activeColumnIndex].currentWidth,
+            columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
             workingAreaWidth: workingArea.width
         )
         return createScrollAnimation(to: targetOffset, at: time)
@@ -280,7 +280,7 @@ public struct Strip: Sendable {
         if currentSnap > 0 {
             // Decrement snap point (window slides left on screen, revealing right)
             snapIndices[activeColumnIndex] -= 1
-            let colWidth = columnData[activeColumnIndex].currentWidth
+            let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
             let targetOffset = computeSnapOffset(
                 snapPoint: snapPoints[snapIndices[activeColumnIndex]],
                 columnWidth: colWidth,
@@ -291,11 +291,11 @@ public struct Strip: Sendable {
             // Exhausted snap points — move focus to next column
             // navigateRight → window slides left → next leftward milestone
             let currentOffset = viewOffset.current(at: time)
-            let oldColX = columnX(at: activeColumnIndex)
+            let oldColX = columnX(at: activeColumnIndex, time: time)
             activeColumnIndex += 1
-            let newColX = columnX(at: activeColumnIndex)
+            let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
-            let newColWidth = columnData[activeColumnIndex].currentWidth
+            let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
             let (snapIdx, targetOffset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -319,7 +319,7 @@ public struct Strip: Sendable {
         if currentSnap < snapPoints.count - 1 {
             // Increment snap point (window slides right on screen, revealing left)
             snapIndices[activeColumnIndex] += 1
-            let colWidth = columnData[activeColumnIndex].currentWidth
+            let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
             let targetOffset = computeSnapOffset(
                 snapPoint: snapPoints[snapIndices[activeColumnIndex]],
                 columnWidth: colWidth,
@@ -330,11 +330,11 @@ public struct Strip: Sendable {
             // Exhausted snap points — move focus to previous column
             // navigateLeft → window slides right → next rightward milestone
             let currentOffset = viewOffset.current(at: time)
-            let oldColX = columnX(at: activeColumnIndex)
+            let oldColX = columnX(at: activeColumnIndex, time: time)
             activeColumnIndex -= 1
-            let newColX = columnX(at: activeColumnIndex)
+            let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
-            let newColWidth = columnData[activeColumnIndex].currentWidth
+            let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
             let (snapIdx, targetOffset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -358,11 +358,11 @@ public struct Strip: Sendable {
             snapIndices[activeColumnIndex] -= 1
         } else if activeColumnIndex < columns.count - 1 {
             let currentOffset = viewOffset.current(at: time)
-            let oldColX = columnX(at: activeColumnIndex)
+            let oldColX = columnX(at: activeColumnIndex, time: time)
             activeColumnIndex += 1
-            let newColX = columnX(at: activeColumnIndex)
+            let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
-            let newColWidth = columnData[activeColumnIndex].currentWidth
+            let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
             let (snapIdx, offset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -376,7 +376,7 @@ public struct Strip: Sendable {
             return
         }
 
-        let colWidth = columnData[activeColumnIndex].currentWidth
+        let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
         let targetOffset = computeSnapOffset(
             snapPoint: snapPoints[snapIndices[activeColumnIndex]],
             columnWidth: colWidth,
@@ -394,11 +394,11 @@ public struct Strip: Sendable {
             snapIndices[activeColumnIndex] += 1
         } else if activeColumnIndex > 0 {
             let currentOffset = viewOffset.current(at: time)
-            let oldColX = columnX(at: activeColumnIndex)
+            let oldColX = columnX(at: activeColumnIndex, time: time)
             activeColumnIndex -= 1
-            let newColX = columnX(at: activeColumnIndex)
+            let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
-            let newColWidth = columnData[activeColumnIndex].currentWidth
+            let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
             let (snapIdx, offset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -412,7 +412,7 @@ public struct Strip: Sendable {
             return
         }
 
-        let colWidth = columnData[activeColumnIndex].currentWidth
+        let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
         let targetOffset = computeSnapOffset(
             snapPoint: snapPoints[snapIndices[activeColumnIndex]],
             columnWidth: colWidth,

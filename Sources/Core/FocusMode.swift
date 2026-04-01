@@ -117,13 +117,14 @@ public func columnIndexAtStripX(
 public func columnIndexAtStripX(
     _ stripX: Double,
     columnData: [ColumnData],
-    gap: Double
+    gap: Double,
+    time: Double = 0
 ) -> Int {
     guard !columnData.isEmpty else { return 0 }
 
     var x: Double = 0
     for i in 0..<columnData.count {
-        let colEnd = x + columnData[i].currentWidth
+        let colEnd = x + columnData[i].currentWidth(at: time)
         if stripX < colEnd {
             return i
         }
@@ -142,11 +143,12 @@ public func columnIndexAtStripX(
 public func computeColumnX(
     at index: Int,
     columnData: [ColumnData],
-    gap: Double
+    gap: Double,
+    time: Double = 0
 ) -> Double {
     var x: Double = 0
     for i in 0..<index {
-        x += columnData[i].currentWidth + gap
+        x += columnData[i].currentWidth(at: time) + gap
     }
     return x
 }
