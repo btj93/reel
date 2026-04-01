@@ -355,13 +355,14 @@ public final class WindowManager: @unchecked Sendable {
 
         // Stop subsystems
         ipcServer?.stop()
-        stripController.frameLoop?.stop()
+        for (_, sc) in stripControllers {
+            sc.frameLoop?.stop()
+            sc.focusRing.hide()
+        }
         gestureCapture?.stop()
         hotkeyManager.stop()
         tracker.stopObserving()
         displayManager.stopObserving()
-
-        stripController.focusRing.hide()
     }
 
     /// Toggle pause/resume.
@@ -369,15 +370,17 @@ public final class WindowManager: @unchecked Sendable {
         isPaused = !isPaused
         if isPaused {
             print("[ScrollWM] Paused")
-            stripController.focusRing.hide()
+            for (_, sc) in stripControllers { sc.focusRing.hide() }
             restoreAllWindows()
         } else {
             print("[ScrollWM] Resumed")
             // Re-discover any windows that aren't in the strip
             adoptUnmanagedWindows()
             // Clear committed frames so the next applyLayout reapplies everything
-            stripController.clearCommittedFrames()
-            stripController.applyLayout()
+            for (_, sc) in stripControllers {
+                sc.clearCommittedFrames()
+                sc.applyLayout()
+            }
         }
     }
 
@@ -737,7 +740,9 @@ public final class WindowManager: @unchecked Sendable {
     /// Returns true if any windows were adopted.
     @discardableResult
     private func adoptUnmanagedWindows() -> Bool {
-        let stripWindowIDs = Set(stripController.windowMap.values.map(\.windowID))
+        let stripWindowIDs: Set<UInt32> = stripControllers.values.reduce(into: []) { set, sc in
+            set.formUnion(sc.windowMap.values.map(\.windowID))
+        }
         var adopted = false
 
         for (pid, app) in tracker.apps {
@@ -783,16 +788,18 @@ public final class WindowManager: @unchecked Sendable {
 
     private func persistState() {
         var state: [[String: Any]] = []
-        for (tileID, frame) in stripController.lastCommittedFrames {
-            let window = stripController.windowMap[tileID]
-            state.append([
-                "windowID": tileID.rawValue,
-                "bundleID": window?.pid ?? 0,
-                "x": frame.minX,
-                "y": frame.minY,
-                "width": frame.width,
-                "height": frame.height,
-            ])
+        for (_, sc) in stripControllers {
+            for (tileID, frame) in sc.lastCommittedFrames {
+                let window = sc.windowMap[tileID]
+                state.append([
+                    "windowID": tileID.rawValue,
+                    "bundleID": window?.pid ?? 0,
+                    "x": frame.minX,
+                    "y": frame.minY,
+                    "width": frame.width,
+                    "height": frame.height,
+                ])
+            }
         }
 
         if let data = try? JSONSerialization.data(withJSONObject: state) {
@@ -815,19 +822,35 @@ public final class WindowManager: @unchecked Sendable {
     }
 
     private func restoreAllWindows() {
-        // Move all managed windows to a simple tiled layout
-        let wa = stripController.strip.workingArea
-        let windowCount = stripController.windowMap.count
-        guard windowCount > 0 else { return }
+        // Preserve each window's current width/height.
+        // Only reposition off-screen (sliver) windows back into view.
+        for (_, sc) in stripControllers {
+            let wa = sc.strip.workingArea
+            guard !sc.windowMap.isEmpty else { continue }
 
-        let colWidth = wa.width / Double(min(windowCount, 3))
-        var x = wa.minX
+            var cascadeOffset: Double = 0
+            let cascadeStep: Double = 30
 
-        for (_, window) in stripController.windowMap {
-            let frame = CGRect(x: x, y: wa.minY, width: colWidth, height: wa.height)
-            let _ = window.setFrame(frame)
-            x += colWidth
-            if x >= wa.maxX { x = wa.minX }
+            for (_, window) in sc.windowMap {
+                guard case .success(let frame) = window.getFrame() else { continue }
+
+                // Window center is within working area — leave it alone
+                let centerX = frame.midX
+                let centerY = frame.midY
+                if centerX >= wa.minX && centerX <= wa.maxX
+                    && centerY >= wa.minY && centerY <= wa.maxY {
+                    continue
+                }
+
+                // Off-screen window: bring back on-screen, keep width/height
+                let maxCascade = min(wa.width - frame.width, wa.height - frame.height)
+                let wrapLimit = max(maxCascade, cascadeStep)
+                let offset = cascadeOffset.truncatingRemainder(dividingBy: wrapLimit)
+                let newFrame = CGRect(x: wa.minX + offset, y: wa.minY + offset,
+                                      width: frame.width, height: frame.height)
+                _ = window.setFrame(newFrame)
+                cascadeOffset += cascadeStep
+            }
         }
     }
 
@@ -907,7 +930,11 @@ public final class WindowManager: @unchecked Sendable {
             return ScrollWMResponse(success: true, message: "Cleared all saved positions")
         case .recover:
             restoreAllWindows()
-            return ScrollWMResponse(success: true, message: "Windows restored")
+            for (_, sc) in stripControllers {
+                sc.clearCommittedFrames()
+                sc.applyLayout()
+            }
+            return ScrollWMResponse(success: true, message: "Windows recovered")
         case .quit:
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return ScrollWMResponse(success: true, message: "Quitting")
