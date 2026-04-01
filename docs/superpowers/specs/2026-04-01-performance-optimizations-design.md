@@ -124,7 +124,7 @@ public enum TimeUtil {
 Replace all three `currentTime()` implementations with `TimeUtil.now()`:
 - `StripController.currentTime()` in `Sources/WindowManager/StripController.swift`
 - `currentTime()` in `Sources/Platform/GestureCapture.swift`
-- `CACurrentMediaTime()` calls in `Sources/Platform/AXApp.swift` (these call the system `CACurrentMediaTime` from QuartzCore for EMA timing — replace with `TimeUtil.now()` which is semantically equivalent for elapsed time measurement)
+- Private `CACurrentMediaTime()` shadow function in `Sources/Platform/AXApp.swift` (lines 198-204) — this is a private file-scope wrapper around `mach_absolute_time`, not the system QuartzCore function. Replace the two call sites in `dispatchSetFrame`/`dispatchSetPosition` with `TimeUtil.now()`, then delete the shadow function definition itself
 
 **Impact:** Eliminates per-call `mach_timebase_info` overhead. Consolidates three duplicate implementations into one.
 
@@ -146,11 +146,11 @@ Replace all three `currentTime()` implementations with `TimeUtil.now()`:
 
 **Change:** Add synchronization so `stopObserving` waits for the thread to set `runLoop` before attempting `CFRunLoopStop`. Use a `DispatchSemaphore` with a short timeout (e.g., 500ms) to avoid deadlock if the thread never starts.
 
-### 2d. Replace `CACurrentMediaTime()` calls in AXApp with `TimeUtil.now()`
+### 2d. Delete private `CACurrentMediaTime` shadow and replace call sites in AXApp
 
 **File:** `Sources/Platform/AXApp.swift`
 
-After 2a consolidates timing, replace the `CACurrentMediaTime()` calls in `dispatchSetFrame` and `dispatchSetPosition` (used for EMA timing) with `TimeUtil.now()`. These call the system `CACurrentMediaTime` from QuartzCore — there is no private shadow function to delete, just call-site replacements.
+After 2a consolidates timing, replace the `CACurrentMediaTime()` calls in `dispatchSetFrame` and `dispatchSetPosition` (used for EMA timing) with `TimeUtil.now()`. These call a private shadow function `CACurrentMediaTime()` defined at lines 198-204 of `AXApp.swift` (a `mach_absolute_time` wrapper, not the QuartzCore system function). After replacing the two call sites, delete the shadow function definition.
 
 ## Section 3: WindowManager Module
 
