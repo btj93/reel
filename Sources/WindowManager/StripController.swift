@@ -389,6 +389,7 @@ public final class StripController: @unchecked Sendable {
 
         strip.columns[colIndex].width = .fixed(newWidth)
         strip.columns[colIndex].presetIndex = nil
+        strip.columnData[colIndex].widthAnimation = nil
         strip.columnData[colIndex].cachedWidth = newWidth
 
         // Apply layout immediately during drag

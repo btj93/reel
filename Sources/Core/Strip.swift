@@ -477,6 +477,7 @@ public struct Strip: Sendable {
     /// Toggle the active column to/from full-width mode.
     public mutating func toggleFullWidth() {
         guard !columns.isEmpty else { return }
+        columnData[activeColumnIndex].widthAnimation = nil
         let isCurrentlyFull = columns[activeColumnIndex].isFullWidth
         columns[activeColumnIndex].isFullWidth = !isCurrentlyFull
         if !isCurrentlyFull {
