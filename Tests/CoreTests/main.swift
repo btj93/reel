@@ -67,7 +67,7 @@ section("Empty strip")
 do {
     let strip = Strip()
     check(strip.columns.isEmpty, "should be empty")
-    assertEq(strip.totalWidth, 0, "total width should be 0")
+    assertEq(strip.totalWidth(at: 0), 0, "total width should be 0")
     check(strip.activeColumn == nil, "no active column")
 }
 
@@ -726,6 +726,27 @@ do {
 
     let idx = columnIndexAtStripX(cursorStripX, columnWidths: [720, 720], gap: 16)
     assertEq(idx, 0, "column under cursor is column 0")
+}
+
+// MARK: - Width Animation Tests
+print()
+print("Width Animation Tests")
+
+section("currentWidth(at:) returns animated value")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    let anim = SpringAnimation(from: 360, to: 720, startTime: 0, params: params)
+    var data = ColumnData(cachedWidth: 720, widthAnimation: anim)
+    // At t=0, should return the start value (360), not the target
+    let val0 = data.currentWidth(at: 0)
+    assertClose(val0, 360, tolerance: 1.0, "currentWidth at t=0 should be start value")
+    // At t=2.0, spring should be settled, should return cachedWidth
+    let valEnd = data.currentWidth(at: 2.0)
+    assertClose(valEnd, 720, tolerance: 1.0, "currentWidth at t=2.0 should be target")
+    // With no animation, returns cachedWidth
+    data.widthAnimation = nil
+    let valStatic = data.currentWidth(at: 0)
+    assertClose(valStatic, 720, tolerance: 0.01, "no animation returns cachedWidth")
 }
 
 // ============================================================

@@ -46,10 +46,11 @@ public struct ColumnData: Sendable {
     /// Non-nil when the width is animating (e.g., during resize).
     public var widthAnimation: SpringAnimation?
 
-    /// Current effective width (reads animation if active).
-    public var currentWidth: Double {
-        if let anim = widthAnimation, !anim.isDone {
-            return anim.currentValue
+    /// Current effective width at a given time (reads animation if active).
+    public func currentWidth(at time: Double) -> Double {
+        if let anim = widthAnimation {
+            if anim.isDone(at: time) { return cachedWidth }
+            return anim.evaluate(at: time).value
         }
         return cachedWidth
     }
