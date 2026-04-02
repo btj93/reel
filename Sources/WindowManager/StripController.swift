@@ -491,6 +491,7 @@ public final class StripController: @unchecked Sendable {
         strip.viewOffset = .static(newOffset)
 
         applyLayout()
+        updateZenDimmer(at: time)
     }
 
     // MARK: - Layout Application
@@ -611,6 +612,7 @@ public final class StripController: @unchecked Sendable {
                 // lastCommittedFrames, so applyLayout() will detect the change
                 // and dispatch the off-screen move.
                 applyLayout()
+                updateZenDimmer(at: time)
             } else if focusIndicator.isAnimating || zenDimmer.isAnimating {
                 // Scroll and width are done but indicator/zen is still animating — keep ticking
                 if focusIndicator.isAnimating {
@@ -754,6 +756,7 @@ public final class StripController: @unchecked Sendable {
             strip.viewOffset = .static(adjustedOffset)
             clearCommittedFrames()
             applyLayout()
+            updateZenDimmer(at: time)
         }
     }
 
