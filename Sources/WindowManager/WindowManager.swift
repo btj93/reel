@@ -50,7 +50,6 @@ public final class WindowManager: @unchecked Sendable {
     private var stateWriteTimer: Timer?
 
     /// Counter to throttle adoptUnmanagedWindows to every 5 seconds.
-    private var adoptCounter: Int = 0
 
     public init() {
         // Load config first
@@ -783,12 +782,9 @@ public final class WindowManager: @unchecked Sendable {
             // when the process eventually terminates and disappears from CGWindowList.
         }
 
-        // Pass 2: Adopt unmanaged windows that should be in the strip (throttled to every 5 seconds)
-        adoptCounter += 1
-        if adoptCounter >= 5 {
-            adoptCounter = 0
-            changed = adoptUnmanagedWindows() || changed
-        }
+        // Pass 2: Adopt unmanaged windows that should be in the strip
+        let didAdopt = adoptUnmanagedWindows()
+        changed = didAdopt || changed
 
         if changed {
             stripController.clearCommittedFrames()
