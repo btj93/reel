@@ -98,7 +98,7 @@ Rename `FocusRing` → `FocusIndicator`. Same Platform module, file renamed.
 - Springs use the same stiffness/damping as the scroll animation config (reuse `ScrollWMConfig.scrollStiffness` and `ScrollWMConfig.scrollDampingRatio`, or the `widthSpringParams` computed property which wraps them into a `SpringParams`).
 
 **Public API — `StripController` always calls these, never `show()` directly:**
-- `snapTo(frame:)` — sets `currentFrame` instantly, nils all springs, positions overlay. Used on first show (bootstrap guard), large jumps, and `applyLayout()` path.
+- `snapTo(frame:) -> Bool` — sets `currentFrame` instantly, nils all springs, positions overlay. Used on first show (bootstrap guard), large jumps, and `applyLayout()` path. **In flash mode:** also starts `flashEasing` (opacity 0.2→0 over 0.2s) and returns `true`. In other modes returns `false`. On rapid focus changes in flash mode, cancels any in-progress `flashEasing` before starting a new one.
 - `animateTo(frame:at:)` — if springs exist and haven't converged: `retargeted(to:at:)` on each, preserving velocity. If no springs: creates new springs from `currentFrame` to `frame`. Returns `true` if an animation was started/retargeted (caller uses this to resume FrameLoop).
 - Each display-link tick: evaluate all 4 springs at current time, update `currentFrame`, reposition the overlay.
 - When all 4 springs converge (within tolerance): nil out springs (`isAnimating` becomes false).
@@ -176,7 +176,7 @@ This ensures the loop stays alive as long as *any* strip has an active animation
 
 All three bypass the `allSatisfy` check and can race with other strips on multi-display setups. Remove all of them — the `onTick` closure is the sole authority for pausing.
 
-**Resume:** `frameLoop?.resume()` must be called when an indicator animation starts. `FocusIndicator` does not hold a `FrameLoop` reference (and shouldn't — it's a Platform type, FrameLoop ownership is in WindowManager). Instead, `StripController` checks after every call to `animateTo`, `fadeOut`, or flash trigger methods: if `focusIndicator.isAnimating` became true, call `frameLoop?.resume()`. Concretely, `animateTo` and `fadeOut` return a `Bool` indicating whether an animation was started; `StripController` resumes the loop when the return is `true`.
+**Resume:** `frameLoop?.resume()` must be called when an indicator animation starts. `FocusIndicator` does not hold a `FrameLoop` reference (and shouldn't — it's a Platform type, FrameLoop ownership is in WindowManager). Instead, `StripController` checks after every call to `snapTo`, `animateTo`, or `fadeOut`: if the method returns `true`, call `frameLoop?.resume()`. All three methods return `Bool` — `true` when an animation was started or retargeted. `snapTo` returns `true` only in flash mode (starts `flashEasing`); `animateTo` returns `true` when springs are created/retargeted; `fadeOut` returns `true` when `fadeOutEasing` is started.
 
 ### `hide()` semantics per style
 
