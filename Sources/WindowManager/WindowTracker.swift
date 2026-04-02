@@ -27,6 +27,16 @@ public final class WindowTracker: @unchecked Sendable {
         windows[window.windowID] = window
     }
 
+    /// Mark a window as floating (won't be re-adopted by health check).
+    public func markFloating(_ windowID: CGWindowID) {
+        floatingWindows.insert(windowID)
+    }
+
+    /// Unmark a window as floating (will be managed again).
+    public func unmarkFloating(_ windowID: CGWindowID) {
+        floatingWindows.remove(windowID)
+    }
+
     /// Remove a window from tracking (used by health check).
     public func untrackWindow(_ windowID: CGWindowID) {
         windows.removeValue(forKey: windowID)

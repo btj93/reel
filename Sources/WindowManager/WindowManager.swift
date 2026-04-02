@@ -48,7 +48,9 @@ public final class WindowManager: @unchecked Sendable {
     private let stateFilePath: String
     private var stateWriteTimer: Timer?
 
-    /// Counter to throttle adoptUnmanagedWindows to every 5 seconds.
+    /// Pending external focus scroll — debounced to avoid visual flash during space transitions.
+    private var pendingFocusScroll: DispatchWorkItem?
+
 
     public init() {
         // Load config first
@@ -415,7 +417,8 @@ public final class WindowManager: @unchecked Sendable {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self = self, !self.isPaused else { return }
 
-                let adopted = self.adoptUnmanagedWindows()
+                let onScreenIDs = Set(getAllWindowInfo().map(\.windowID))
+                let adopted = self.adoptUnmanagedWindows(onScreenIDs: onScreenIDs)
                 if adopted {
                     self.stripController.clearCommittedFrames()
                     self.stripController.applyLayout()
@@ -479,7 +482,8 @@ public final class WindowManager: @unchecked Sendable {
                 fflush(stdout)
             #endif
             // Re-discover any windows that aren't in the strip
-            adoptUnmanagedWindows()
+            let onScreenIDs = Set(getAllWindowInfo().map(\.windowID))
+            adoptUnmanagedWindows(onScreenIDs: onScreenIDs)
             // Clear committed frames so the next applyLayout reapplies everything
             for (_, sc) in stripControllers {
                 sc.clearCommittedFrames()
@@ -625,27 +629,58 @@ public final class WindowManager: @unchecked Sendable {
             }
 
         case .windowFocused(let windowID):
-            // Only scroll to window if it's not already the active column
             let tileID = TileID(windowID)
-            if let colIndex = stripController.strip.columns.firstIndex(where: {
-                $0.tiles.contains(tileID)
-            }),
-                colIndex != stripController.strip.activeColumnIndex
-            {
-                stripController.scrollToWindow(tileID: tileID)
+            // Suppress focus events for windows not on the current strip
+            // (destination-space windows during space transitions).
+            guard stripController.windowMap[tileID] != nil else {
+                #if DEBUG
+                    print("[WM] Suppressed pre-space-switch focus wid=\(windowID)")
+                    fflush(stdout)
+                #endif
+                break
             }
+            // Debounce the scroll — if spaceChanged arrives within 150ms,
+            // the scroll is cancelled and we avoid a visual flash.
+            pendingFocusScroll?.cancel()
+            let sc = stripController
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, !self.isPaused else { return }
+                if let colIndex = sc.strip.columns.firstIndex(where: {
+                    $0.tiles.contains(tileID)
+                }),
+                    colIndex != sc.strip.activeColumnIndex
+                {
+                    sc.scrollToWindow(tileID: tileID)
+                }
+            }
+            pendingFocusScroll = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+            // Update user focus — marked as external so saveCurrentSpace can
+            // ignore it if a space switch follows within 300ms.
+            stripController.userActiveTileID = tileID
+            stripController.userActiveTileIDTime = TimeUtil.now()
 
         case .appActivated(let pid):
             // Cmd+Tab support: find the first window of this app and scroll to it
             if let window = tracker.windows.values.first(where: { $0.pid == pid }) {
                 let tileID = window.tileID
-                if let colIndex = stripController.strip.columns.firstIndex(where: {
-                    $0.tiles.contains(tileID)
-                }),
-                    colIndex != stripController.strip.activeColumnIndex
-                {
-                    stripController.scrollToWindow(tileID: tileID)
+                // Debounce — same as windowFocused to avoid space-transition flash
+                pendingFocusScroll?.cancel()
+                let sc = stripController
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, !self.isPaused else { return }
+                    if let colIndex = sc.strip.columns.firstIndex(where: {
+                        $0.tiles.contains(tileID)
+                    }),
+                        colIndex != sc.strip.activeColumnIndex
+                    {
+                        sc.scrollToWindow(tileID: tileID)
+                    }
                 }
+                pendingFocusScroll = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+                stripController.userActiveTileID = tileID
+                stripController.userActiveTileIDTime = TimeUtil.now()
             }
             // Focus indicator: hide when unmanaged app activates, show when managed
             let isManaged = tracker.windows.values.contains(where: { $0.pid == pid })
@@ -697,10 +732,20 @@ public final class WindowManager: @unchecked Sendable {
     private func handleSpaceChange() {
         guard !isPaused else { return }
 
+        // Cancel any pending external focus scroll — it was a space-transition artifact.
+        pendingFocusScroll?.cancel()
+        pendingFocusScroll = nil
+
         // Get all currently on-screen window IDs to identify this Space
         let onScreenWindows = getAllWindowInfo()
         let onScreenIDs = Set(
             onScreenWindows.filter { $0.layer == 0 && $0.isOnScreen }.map(\.windowID))
+        #if DEBUG
+            let leavingTile = stripController.userActiveTileID ?? stripController.strip.activeColumn?.activeTile
+            let leavingWindow = leavingTile.flatMap { stripController.windowMap[$0] }
+            print("[WM] spaceChanged leaving wid=\(leavingWindow?.windowID ?? 0) title=\(leavingWindow?.getTitle() ?? "none") onScreenIDs=\(onScreenIDs)")
+            fflush(stdout)
+        #endif
 
         // Try to restore saved state for this Space
         let restored = stripController.switchSpace(onScreenWindowIDs: onScreenIDs)
@@ -724,6 +769,9 @@ public final class WindowManager: @unchecked Sendable {
                     let appWindows = discoverWindows(pid: pid)
                     for window in appWindows {
                         guard newWindowIDs.contains(window.windowID) else { continue }
+                        guard !tracker.floatingWindows.contains(window.windowID),
+                              !tracker.ignoredWindows.contains(window.windowID)
+                        else { continue }
                         let props = window.getPropertiesFast()
                         guard !props.isMinimized && !props.isFullscreen else { continue }
                         let classification = classifyWindow(props)
@@ -759,6 +807,9 @@ public final class WindowManager: @unchecked Sendable {
                 stripController.windowMap[focusTile] != nil
             {
                 stripController.scrollToWindow(tileID: focusTile)
+                // Trusted focus — space restore
+                stripController.userActiveTileID = focusTile
+                stripController._confirmedUserActiveTileID = focusTile
             } else {
                 // Original window was closed while away — just re-apply layout
                 // with whatever activeColumnIndex removeColumn settled on
@@ -777,6 +828,9 @@ public final class WindowManager: @unchecked Sendable {
             let appWindows = discoverWindows(pid: pid)
             for window in appWindows {
                 guard onScreenIDs.contains(window.windowID) else { continue }
+                guard !tracker.floatingWindows.contains(window.windowID),
+                      !tracker.ignoredWindows.contains(window.windowID)
+                else { continue }
 
                 let props = window.getPropertiesFast()
                 guard !props.isMinimized && !props.isFullscreen else { continue }
@@ -822,7 +876,8 @@ public final class WindowManager: @unchecked Sendable {
             stripController.toggleFullWidth()
         case .toggleFloating:
             if let window = stripController.toggleFloating() {
-                // Window is now floating — it keeps its current position
+                // Window is now floating — register with tracker so it won't be re-adopted
+                tracker.markFloating(window.windowID)
                 #if DEBUG
                     print("[WM] Window \(window.tileID.rawValue) is now floating")
                     fflush(stdout)
@@ -866,8 +921,10 @@ public final class WindowManager: @unchecked Sendable {
             // when the process eventually terminates and disappears from CGWindowList.
         }
 
-        // Pass 2: Adopt unmanaged windows that should be in the strip
-        let didAdopt = adoptUnmanagedWindows()
+        // Pass 2: Adopt unmanaged windows that should be in the strip.
+        // Filter by onScreenIDs to avoid re-adopting windows that Pass 1 just removed
+        // (AX API can find windows that CGWindowList doesn't report).
+        let didAdopt = adoptUnmanagedWindows(onScreenIDs: onScreenIDs)
         changed = didAdopt || changed
 
         if changed {
@@ -877,9 +934,11 @@ public final class WindowManager: @unchecked Sendable {
     }
 
     /// Discover on-screen windows not currently in the strip and add them.
+    /// When `onScreenIDs` is provided, only adopts windows present in that set
+    /// (prevents re-adopting windows that CGWindowList doesn't report).
     /// Returns true if any windows were adopted.
     @discardableResult
-    private func adoptUnmanagedWindows() -> Bool {
+    private func adoptUnmanagedWindows(onScreenIDs: Set<CGWindowID>? = nil) -> Bool {
         let stripWindowIDs: Set<UInt32> = stripControllers.values.reduce(into: []) { set, sc in
             set.formUnion(sc.windowMap.values.map(\.windowID))
         }
@@ -890,6 +949,8 @@ public final class WindowManager: @unchecked Sendable {
             for window in newWindows {
                 // Skip windows already tracked and in the strip
                 guard !stripWindowIDs.contains(window.windowID) else { continue }
+                // Skip windows not confirmed on-screen by CGWindowList
+                if let onScreenIDs, !onScreenIDs.contains(window.windowID) { continue }
                 // Skip windows already tracked as floating/ignored
                 guard !tracker.floatingWindows.contains(window.windowID),
                     !tracker.ignoredWindows.contains(window.windowID)
@@ -1029,9 +1090,10 @@ public final class WindowManager: @unchecked Sendable {
             stripController.toggleFullWidth()
             return ScrollWMResponse(success: true)
         case .toggleFloating:
-            let window = stripController.toggleFloating()
-            return ScrollWMResponse(
-                success: true, message: window != nil ? "Toggled floating" : "No active window")
+            if let window = stripController.toggleFloating() {
+                tracker.markFloating(window.windowID)
+            }
+            return ScrollWMResponse(success: true)
         case .closeWindow:
             stripController.closeActiveWindow()
             return ScrollWMResponse(success: true)
@@ -1118,18 +1180,11 @@ public final class WindowManager: @unchecked Sendable {
         let title = window.getTitle()
         let fingerprint = sc.currentSpaceFingerprint
 
-        guard
-            let result = positionMemory.lookup(
-                bundleID: bundleID, windowTitle: title,
-                displayID: UInt32(displayID),
-                spaceFingerprint: fingerprint,
-                windowID: window.windowID)
-        else {
-            return nil
-        }
-
-        positionMemory.consume(key: result.key)
-        return result.position
+        return positionMemory.lookupAndConsume(
+            bundleID: bundleID, windowTitle: title,
+            displayID: UInt32(displayID),
+            spaceFingerprint: fingerprint,
+            windowID: window.windowID)
     }
 
     /// Returns both the displayID and StripController for a window based on its frame.

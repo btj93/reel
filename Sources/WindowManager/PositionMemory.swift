@@ -57,9 +57,16 @@ struct PositionFileEntry: Codable {
 
 // MARK: - PositionMemory Service
 
+/// Two-store design:
+/// - `windowEntries` (in-session): keyed by CGWindowID. One entry per window, no collisions.
+///   Not persisted to disk — CGWindowIDs are ephemeral.
+/// - `semanticEntries` (cross-session): keyed by PositionKey (bundleID + title + display + space).
+///   Persisted to disk. Used when CGWindowID lookup misses (app restart, new window).
+///
+/// All access is on the main thread — no locking needed.
 public class PositionMemory {
-    private var entries: [PositionKey: SavedPosition] = [:]
-    private var windowIDIndex: [CGWindowID: PositionKey] = [:]  // fast-path: same session
+    private var windowEntries: [CGWindowID: (key: PositionKey, position: SavedPosition)] = [:]
+    private var semanticEntries: [PositionKey: SavedPosition] = [:]
     private var capacity: Int
     private var matchingRules: [String: String] = [:]  // bundleID -> "title" or "order"
     private let filePath: URL
@@ -82,22 +89,23 @@ public class PositionMemory {
         let key = PositionKey(
             bundleID: bundleID, windowTitle: windowTitle,
             displayID: displayID, spaceFingerprint: spaceFingerprint)
-        entries[key] = position
-        windowIDIndex[windowID] = key
+
+        windowEntries[windowID] = (key, position)
+        semanticEntries[key] = position
         isDirty = true
         evictIfNeeded()
     }
 
-    // MARK: - Lookup
+    // MARK: - Lookup + Consume
 
-    /// Looks up a saved position using a 4-step fallback chain.
-    /// Returns the matching key and position, or nil.
-    /// For order-based matching (steps 3-4), returns the entry with lowest columnIndex.
-    public func lookup(
+    /// Looks up a saved position and removes it from the store.
+    /// Step 0: CGWindowID match (same session, exact window — no collisions).
+    /// Steps 1-4: semantic fallback chain on the cross-session store.
+    public func lookupAndConsume(
         bundleID: String, windowTitle: String?,
         displayID: UInt32, spaceFingerprint: Set<UInt32>,
         windowID: CGWindowID
-    ) -> (key: PositionKey, position: SavedPosition)? {
+    ) -> SavedPosition? {
         let isOrderBased = matchingRules[bundleID] == "order"
         #if DEBUG
             print(
@@ -107,20 +115,45 @@ public class PositionMemory {
         #endif
 
         // Step 0: Fast-path — CGWindowID match (same session, exact window)
-        if let key = windowIDIndex[windowID], let pos = entries[key] {
+        if let entry = windowEntries.removeValue(forKey: windowID) {
             #if DEBUG
-                print("[PositionMemory] hit step=0 (windowID) col=\(pos.columnIndex)")
+                print("[PositionMemory] hit step=0 (windowID) col=\(entry.position.columnIndex)")
                 fflush(stdout)
             #endif
-            return (key, pos)
+            return entry.position
         }
 
+        // Steps 1-4: semantic fallback on cross-session store
+        let result = semanticLookup(
+            bundleID: bundleID, windowTitle: windowTitle,
+            displayID: displayID, spaceFingerprint: spaceFingerprint,
+            isOrderBased: isOrderBased)
+
+        if let (key, pos) = result {
+            semanticEntries.removeValue(forKey: key)
+            isDirty = true
+            return pos
+        }
+
+        #if DEBUG
+            print("[PositionMemory] miss")
+            fflush(stdout)
+        #endif
+        return nil
+    }
+
+    /// Semantic fallback chain for cross-session matching.
+    private func semanticLookup(
+        bundleID: String, windowTitle: String?,
+        displayID: UInt32, spaceFingerprint: Set<UInt32>,
+        isOrderBased: Bool
+    ) -> (key: PositionKey, position: SavedPosition)? {
         // Step 1: Exact match (bundleID, title, displayID, spaceFingerprint)
         if !isOrderBased, let title = windowTitle {
             let key = PositionKey(
                 bundleID: bundleID, windowTitle: title,
                 displayID: displayID, spaceFingerprint: spaceFingerprint)
-            if let pos = entries[key] {
+            if let pos = semanticEntries[key] {
                 #if DEBUG
                     print("[PositionMemory] hit step=1 (exact) col=\(pos.columnIndex)")
                     fflush(stdout)
@@ -131,7 +164,7 @@ public class PositionMemory {
 
         // Step 2: Match ignoring space (bundleID, title, displayID)
         if !isOrderBased, let title = windowTitle {
-            if let match = entries.first(where: {
+            if let match = semanticEntries.first(where: {
                 $0.key.bundleID == bundleID && $0.key.windowTitle == title
                     && $0.key.displayID == displayID
             }) {
@@ -144,7 +177,7 @@ public class PositionMemory {
         }
 
         // Step 3: Match ignoring title (bundleID, displayID, spaceFingerprint) — lowest columnIndex
-        let step3Matches = entries.filter {
+        let step3Matches = semanticEntries.filter {
             $0.key.bundleID == bundleID && $0.key.displayID == displayID
                 && $0.key.spaceFingerprint == spaceFingerprint
         }
@@ -157,7 +190,7 @@ public class PositionMemory {
         }
 
         // Step 4: Match ignoring title and space (bundleID, displayID) — lowest columnIndex
-        let step4Matches = entries.filter {
+        let step4Matches = semanticEntries.filter {
             $0.key.bundleID == bundleID && $0.key.displayID == displayID
         }
         if let best = step4Matches.min(by: { $0.value.columnIndex < $1.value.columnIndex }) {
@@ -168,34 +201,20 @@ public class PositionMemory {
             return (best.key, best.value)
         }
 
-        #if DEBUG
-            print("[PositionMemory] miss")
-            fflush(stdout)
-        #endif
         return nil
-    }
-
-    // MARK: - Consume
-
-    public func consume(key: PositionKey) {
-        entries.removeValue(forKey: key)
-        windowIDIndex = windowIDIndex.filter { $0.value != key }
-        isDirty = true
     }
 
     // MARK: - Clear
 
     public func clearAll() {
-        entries.removeAll()
-        windowIDIndex.removeAll()
+        windowEntries.removeAll()
+        semanticEntries.removeAll()
         isDirty = true
     }
 
     public func clear(bundleID: String) {
-        let removed = entries.filter { $0.key.bundleID == bundleID }
-        entries = entries.filter { $0.key.bundleID != bundleID }
-        let removedKeys = Set(removed.map(\.key))
-        windowIDIndex = windowIDIndex.filter { !removedKeys.contains($0.value) }
+        windowEntries = windowEntries.filter { $0.value.key.bundleID != bundleID }
+        semanticEntries = semanticEntries.filter { $0.key.bundleID != bundleID }
         isDirty = true
     }
 
@@ -210,10 +229,12 @@ public class PositionMemory {
     // MARK: - LRU Eviction
 
     private func evictIfNeeded() {
-        while entries.count > capacity {
-            if let oldest = entries.min(by: { $0.value.lastSeen < $1.value.lastSeen }) {
-                entries.removeValue(forKey: oldest.key)
-                windowIDIndex = windowIDIndex.filter { $0.value != oldest.key }
+        // Only evict from semanticEntries (persisted, capacity-bounded).
+        // windowEntries is not evicted — it's bounded by session lifetime (~100 bytes/entry)
+        // and evicting risks losing the fast-path for live windows.
+        while semanticEntries.count > capacity {
+            if let oldest = semanticEntries.min(by: { $0.value.lastSeen < $1.value.lastSeen }) {
+                semanticEntries.removeValue(forKey: oldest.key)
             } else {
                 break
             }
@@ -224,7 +245,9 @@ public class PositionMemory {
 
     public func persistToDisk() {
         guard isDirty else { return }
-        let fileEntries = entries.map { PositionFileEntry(key: $0.key, position: $0.value) }
+        let fileEntries = semanticEntries.map {
+            PositionFileEntry(key: $0.key, position: $0.value)
+        }
         let file = PositionFile(version: 1, entries: fileEntries)
 
         do {
@@ -254,7 +277,7 @@ public class PositionMemory {
                 #endif
                 return
             }
-            entries.removeAll()
+            semanticEntries.removeAll()
             for entry in file.entries {
                 // Normalize stale space fingerprints to empty set on load
                 let normalizedKey = PositionKey(
@@ -263,12 +286,12 @@ public class PositionMemory {
                     displayID: entry.key.displayID,
                     spaceFingerprint: []
                 )
-                entries[normalizedKey] = entry.position
+                semanticEntries[normalizedKey] = entry.position
             }
             isDirty = true  // Normalized fingerprints need persisting
             evictIfNeeded()
             #if DEBUG
-                print("[PositionMemory] Loaded \(entries.count) entries from disk")
+                print("[PositionMemory] Loaded \(semanticEntries.count) entries from disk")
                 fflush(stdout)
             #endif
         } catch {
@@ -282,9 +305,10 @@ public class PositionMemory {
     // MARK: - Debug
 
     public func allEntries() -> [(key: PositionKey, position: SavedPosition)] {
-        entries.map { (key: $0.key, position: $0.value) }
+        semanticEntries.map { (key: $0.key, position: $0.value) }
             .sorted { $0.position.lastSeen > $1.position.lastSeen }
     }
 
-    public var count: Int { entries.count }
+    public var count: Int { semanticEntries.count }
+    public var windowCount: Int { windowEntries.count }
 }

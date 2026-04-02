@@ -108,8 +108,12 @@ public final class GestureCapture: @unchecked Sendable {
 
         let timestamp = TimeUtil.now()
 
-        // Horizontal delta (positive = scroll right in strip, negative = scroll left)
+        // Use both axes — vertical scroll (axis1) is the natural two-finger gesture direction
         let deltaX = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
+        let deltaY = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+        // Pick whichever axis has more movement; vertical scroll maps to horizontal strip motion
+        // 2x multiplier so light swipes move the strip meaningfully
+        let delta = (abs(deltaX) >= abs(deltaY) ? deltaX : deltaY) * 2.0
 
         switch phase {
         case 1:  // kCGScrollPhaseBegan
@@ -118,8 +122,8 @@ public final class GestureCapture: @unchecked Sendable {
 
         case 2:  // kCGScrollPhaseChanged
             if isGesturing {
-                // Negate delta: trackpad scroll right = content moves left = negative offset change
-                onGestureUpdate?(-deltaX, timestamp)
+                // Negate delta: trackpad scroll right/down = content moves left = negative offset change
+                onGestureUpdate?(-delta, timestamp)
             }
 
         case 4:  // kCGScrollPhaseEnded

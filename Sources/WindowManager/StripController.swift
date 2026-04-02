@@ -50,6 +50,27 @@ public final class StripController: @unchecked Sendable {
     /// Set to true to suppress position save during removeWindow (e.g., toggleFloating)
     public var suppressPositionSave: Bool = false
 
+    /// The user's intended active tile. Updated by hotkeys, addWindow, space restore,
+    /// and external window focus (clicks). Used by saveCurrentSpace to persist focus.
+    public var userActiveTileID: TileID?
+
+    /// Timestamp of the last external (AX-driven) userActiveTileID update.
+    /// saveCurrentSpace ignores updates within 300ms — they may be macOS
+    /// space-transition artifacts rather than genuine user clicks.
+    public var userActiveTileIDTime: Double = 0
+
+    /// The confirmed userActiveTileID — not affected by recent external focus changes.
+    /// Falls back to userActiveTileID if the external update is old enough.
+    public var confirmedUserActiveTileID: TileID? {
+        if TimeUtil.now() - userActiveTileIDTime < 0.3 {
+            // Recent external focus — might be a space-transition artifact.
+            // Return the previous confirmed value (set by hotkeys/addWindow/restore).
+            return _confirmedUserActiveTileID
+        }
+        return userActiveTileID
+    }
+    internal var _confirmedUserActiveTileID: TileID?
+
     /// Timestamp of the last layout application. Used to suppress echo AX events.
     public private(set) var lastLayoutTime: Double = 0
 
@@ -139,6 +160,8 @@ public final class StripController: @unchecked Sendable {
 
         let column = Column(tiles: [window.tileID], width: width)
         strip.insertColumn(column, at: TimeUtil.now())
+        userActiveTileID = strip.activeColumn?.activeTile
+        _confirmedUserActiveTileID = userActiveTileID
 
         if !isBatching {
             applyLayout()
@@ -283,6 +306,8 @@ public final class StripController: @unchecked Sendable {
             strip.navigateLeftInstant(at: time)
             applyLayout()
         }
+        userActiveTileID = strip.activeColumn?.activeTile
+        _confirmedUserActiveTileID = userActiveTileID
         focusActiveWindow()
         updateZenDimmer(at: TimeUtil.now())
     }
@@ -298,6 +323,8 @@ public final class StripController: @unchecked Sendable {
             strip.navigateRightInstant(at: time)
             applyLayout()
         }
+        userActiveTileID = strip.activeColumn?.activeTile
+        _confirmedUserActiveTileID = userActiveTileID
         focusActiveWindow()
         updateZenDimmer(at: TimeUtil.now())
     }
@@ -478,6 +505,11 @@ public final class StripController: @unchecked Sendable {
     /// Scroll the strip to make a specific window visible.
     public func scrollToWindow(tileID: TileID) {
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
+        #if DEBUG
+        let window = windowMap[tileID]
+        print("[Strip] scrollTo wid=\(window?.windowID ?? 0) tileID=\(tileID.rawValue) col=\(colIndex) title=\(window?.getTitle() ?? "?")")
+        fflush(stdout)
+        #endif
 
         let time = TimeUtil.now()
         strip.columnData[colIndex].widthAnimation = nil
@@ -571,6 +603,10 @@ public final class StripController: @unchecked Sendable {
     public func focusActiveWindow() {
         guard let activeTile = strip.activeColumn?.activeTile,
               let window = windowMap[activeTile] else { return }
+        #if DEBUG
+        print("[Strip] focus wid=\(window.windowID) tileID=\(activeTile.rawValue) col=\(strip.activeColumnIndex) title=\(window.getTitle() ?? "?")")
+        fflush(stdout)
+        #endif
         window.focus()
     }
 
@@ -912,11 +948,25 @@ public final class StripController: @unchecked Sendable {
         for i in 0..<strip.columnData.count {
             strip.columnData[i].widthAnimation = nil
         }
+
+        // Use confirmedUserActiveTileID to determine the correct active column.
+        // strip.activeColumnIndex may have been corrupted by macOS AX focus events
+        // sent during space transition gestures. confirmedUserActiveTileID ignores
+        // external focus changes within the last 300ms.
+        let activeIndex: Int
+        if let tile = confirmedUserActiveTileID,
+           let idx = strip.columns.firstIndex(where: { $0.tiles.contains(tile) })
+        {
+            activeIndex = idx
+        } else {
+            activeIndex = strip.activeColumnIndex
+        }
+
         savedSpaces[currentSpaceFingerprint] = SavedStripState(
             columns: strip.columns,
             columnData: strip.columnData,
             snapIndices: strip.snapIndices,
-            activeColumnIndex: strip.activeColumnIndex,
+            activeColumnIndex: activeIndex,
             viewOffset: strip.viewOffset,
             windowMap: windowMap,
             apps: apps,
@@ -958,6 +1008,8 @@ public final class StripController: @unchecked Sendable {
             windowMap = saved.windowMap
             apps = saved.apps
             lastCommittedFrames.removeAll()  // Force re-apply
+            userActiveTileID = strip.activeColumn?.activeTile
+            _confirmedUserActiveTileID = userActiveTileID
 
             focusIndicator.hide()
             lastRaisedTileID = nil
