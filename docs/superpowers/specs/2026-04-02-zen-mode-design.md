@@ -109,7 +109,7 @@ This prevents visual jumps. `EasingAnimation` has no `retargeted(to:at:)` method
 ## StripController Integration
 
 - Holds `public let zenDimmer: ZenDimmer` (initialized in `init` alongside `focusIndicator` — `ZenDimmer()` takes no arguments, same as `FocusIndicator()`)
-- **Focus change**: When `strip.focusedIndex` changes (in focus_left/right, focus-follows-pointer, etc.), calls `zenDimmer.setFocusedWindow(...)` and if it returns `true`, calls `frameLoop.resume()`. This matches the existing pattern where `focusIndicator.animateTo(frame:at:)` returns `Bool` and the caller conditionally resumes the frame loop.
+- **Focus change**: When `strip.focusedIndex` changes (in focus_left/right, focus-follows-pointer, etc.), calls `zenDimmer.setFocusedWindow(...)` and if it returns `true`, calls `frameLoop.resume()`. This matches the existing pattern where `focusIndicator.snapTo(frame:)` returns `Bool` and the caller conditionally resumes the frame loop.
 - **Frame tick**: `handleFrameTick` calls `zenDimmer.tick(time:)`.
 - **`isFullySettled`**: Extended to: `return scrollSettled && widthSettled && !focusIndicator.isAnimating && !zenDimmer.isAnimating`. Note: the existing `scrollWidthSettled` latch is a separate mechanism used inside `handleFrameTick` for one-shot work (re-anchoring focus after scroll settles) — it does not gate `isFullySettled` and needs no changes.
 - **Window removal**: Calls `zenDimmer.restoreWindow(tileID)` before removing a tile from the strip
