@@ -154,8 +154,9 @@ public final class DisplayManager: @unchecked Sendable {
         let added = Set(displays.keys).subtracting(oldDisplays.keys)
         let removed = Set(oldDisplays.keys).subtracting(displays.keys)
         #if DEBUG
-        if !added.isEmpty { print("[ScrollWM] Displays added: \(added)") }
-        if !removed.isEmpty { print("[ScrollWM] Displays removed: \(removed)") }
+        if !added.isEmpty { print("[Display] Displays added: \(added)") }
+        if !removed.isEmpty { print("[Display] Displays removed: \(removed)") }
+        fflush(stdout)
         #endif
 
         onDisplayChange?(displays)

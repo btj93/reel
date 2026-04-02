@@ -33,6 +33,7 @@ public final class SocketServer: @unchecked Sendable {
         guard listenerFD >= 0 else {
             #if DEBUG
             print("[IPC] Failed to create socket")
+            fflush(stdout)
             #endif
             return false
         }
@@ -57,6 +58,7 @@ public final class SocketServer: @unchecked Sendable {
         guard bindResult == 0 else {
             #if DEBUG
             print("[IPC] Failed to bind to \(socketPath): \(String(cString: strerror(errno)))")
+            fflush(stdout)
             #endif
             close(listenerFD)
             return false
@@ -66,6 +68,7 @@ public final class SocketServer: @unchecked Sendable {
         guard listen(listenerFD, 5) == 0 else {
             #if DEBUG
             print("[IPC] Failed to listen")
+            fflush(stdout)
             #endif
             close(listenerFD)
             return false

@@ -237,6 +237,7 @@ extension ScrollWMConfig {
                         default:
                             #if DEBUG
                             print("[Config] Unknown snap point: \(str)")
+                            fflush(stdout)
                             #endif
                         }
                     }
@@ -251,6 +252,7 @@ extension ScrollWMConfig {
             if config.snapPoints.isEmpty {
                 #if DEBUG
                 print("[Config] Warning: snap is empty, defaulting to [middle]")
+                fflush(stdout)
                 #endif
                 config.snapPoints = [.middle]
             }

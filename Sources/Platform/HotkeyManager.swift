@@ -155,7 +155,8 @@ public final class HotkeyManager: @unchecked Sendable {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             #if DEBUG
-            print("[ScrollWM] Failed to create CGEventTap — check Accessibility permission")
+            print("[Hotkey] Failed to create CGEventTap — check Accessibility permission")
+            fflush(stdout)
             #endif
             return false
         }
@@ -169,7 +170,8 @@ public final class HotkeyManager: @unchecked Sendable {
         startHealthMonitor()
 
         #if DEBUG
-        print("[ScrollWM] Hotkey manager started")
+        print("[Hotkey] Started")
+        fflush(stdout)
         #endif
         return true
     }
@@ -199,7 +201,8 @@ public final class HotkeyManager: @unchecked Sendable {
             guard let self = self, let tap = self.eventTap else { return }
             if !CGEvent.tapIsEnabled(tap: tap) {
                 #if DEBUG
-                print("[ScrollWM] Event tap was disabled — re-enabling")
+                print("[Hotkey] Event tap was disabled — re-enabling")
+                fflush(stdout)
                 #endif
                 CGEvent.tapEnable(tap: tap, enable: true)
             }

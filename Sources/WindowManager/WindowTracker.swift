@@ -137,7 +137,23 @@ public final class WindowTracker: @unchecked Sendable {
 
     private func handleAppLaunched(_ app: NSRunningApplication) {
         guard app.activationPolicy == .regular else { return }
-        registerApp(pid: app.processIdentifier, bundleID: app.bundleIdentifier)
+        let pid = app.processIdentifier
+        let bundleID = app.bundleIdentifier
+        registerApp(pid: pid, bundleID: bundleID)
+
+        // Newly launched apps often create their first window *after* the launch
+        // notification. Retry discovery at short intervals to catch it quickly
+        // instead of waiting for the 1s health check poll.
+        for delay in [0.1, 0.3, 0.7] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self, self.apps[pid] != nil else { return }
+                let newWindows = discoverWindows(pid: pid)
+                for window in newWindows {
+                    guard self.windows[window.windowID] == nil else { continue }
+                    self.registerWindow(window, bundleID: bundleID)
+                }
+            }
+        }
     }
 
     private func handleAppTerminated(_ app: NSRunningApplication) {
@@ -234,6 +250,13 @@ public final class WindowTracker: @unchecked Sendable {
 
         case kAXFocusedWindowChangedNotification:
             if let wid = event.windowID {
+                // If this window isn't tracked yet, adopt it — this catches windows
+                // that were created without a kAXWindowCreatedNotification.
+                if windows[wid] == nil, !ignoredWindows.contains(wid), !floatingWindows.contains(wid) {
+                    let bundleID = apps[event.pid]?.bundleIdentifier
+                    let window = AXWindow(element: event.element, windowID: wid, pid: event.pid)
+                    registerWindow(window, bundleID: bundleID)
+                }
                 onEvent?(.windowFocused(windowID: wid))
             }
 

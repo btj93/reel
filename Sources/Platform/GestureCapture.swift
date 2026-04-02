@@ -46,6 +46,7 @@ public final class GestureCapture: @unchecked Sendable {
         ) else {
             #if DEBUG
             print("[GestureCapture] Failed to create CGEventTap")
+            fflush(stdout)
             #endif
             return false
         }

@@ -122,6 +122,7 @@ public final class StripController: @unchecked Sendable {
     public func addWindow(_ window: AXWindow, app: AXApp) {
         #if DEBUG
         print("[Strip] addWindow: tileID=\(window.tileID.rawValue) pid=\(window.pid) title=\(window.getTitle() ?? "?")")
+        fflush(stdout)
         #endif
         windowMap[window.tileID] = window
         apps[window.pid] = app
@@ -155,7 +156,8 @@ public final class StripController: @unchecked Sendable {
         }
 
         #if DEBUG
-        print("[Strip] addWindow (restored): tileID=\(window.tileID.rawValue) pid=\(window.pid) at index=\(saved.columnIndex)")
+        print("[Strip] addWindow (restored): tileID=\(window.tileID.rawValue) pid=\(window.pid) at index=\(saved.columnIndex) width=\(saved.width)")
+        fflush(stdout)
         #endif
         windowMap[window.tileID] = window
         apps[window.pid] = app

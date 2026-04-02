@@ -32,6 +32,7 @@ public final class FrameLoop: @unchecked Sendable {
         guard let screen = NSScreen.main else {
             #if DEBUG
             print("[FrameLoop] No main screen — cannot create display link")
+            fflush(stdout)
             #endif
             return
         }
