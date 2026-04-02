@@ -57,6 +57,10 @@ public struct ScrollWMConfig: Sendable {
 
     public var focusIndicator: FocusIndicatorConfig = FocusIndicatorConfig()
 
+    // MARK: - Zen Mode
+
+    public var zenMode: ZenModeConfig = ZenModeConfig()
+
     // MARK: - Startup
 
     public var startAtLogin: Bool = false
@@ -117,6 +121,14 @@ public struct FocusIndicatorConfig: Sendable {
     public var width: Double = 3
     public var cornerRadius: Double = 10
 
+    public init() {}
+}
+
+/// Zen mode configuration: dim unfocused tiled windows.
+public struct ZenModeConfig: Sendable {
+    public var enabled: Bool = false
+    public var dimAlpha: Double = 0.3
+    public var fadeDuration: Double = 0.15
     public init() {}
 }
 
@@ -336,6 +348,13 @@ extension ScrollWMConfig {
             if let v = readString(fi["color"]) { config.focusIndicator.color = v }
             if let v = readDouble(fi["width"]) { config.focusIndicator.width = v }
             if let v = readDouble(fi["corner_radius"]) { config.focusIndicator.cornerRadius = v }
+        }
+
+        // [zen_mode]
+        if let zm = readTable(table["zen_mode"]) {
+            if let v = readBool(zm["enabled"]) { config.zenMode.enabled = v }
+            if let v = readDouble(zm["dim_alpha"]) { config.zenMode.dimAlpha = max(0.0, min(1.0, v)) }
+            if let v = readDouble(zm["fade_duration"]) { config.zenMode.fadeDuration = max(0.05, v) }
         }
 
         return config
