@@ -347,7 +347,12 @@ public final class StripController: @unchecked Sendable {
             strip.cycleWidthPreset(at: time, params: widthSpringParams)
             let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
             let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth)
-            // Always resume — width animation needs ticking even if scroll is already at target
+            #if DEBUG
+            print("[Strip] cycleWidth animated: col=\(strip.activeColumnIndex) targetWidth=\(targetWidth) presetIndex=\(strip.columns[strip.activeColumnIndex].presetIndex ?? -1)")
+            fflush(stdout)
+            #endif
+            // Apply immediately to start resizing and refresh echo suppression
+            applyLayout()
             scrollWidthSettled = false
             frameLoop?.resume()
         } else {
@@ -454,6 +459,15 @@ public final class StripController: @unchecked Sendable {
 
         // Only update strip model if width changed significantly
         guard abs(newWidth - oldWidth) > 2 else { return }
+
+        // Skip if the column width was set by cycleWidthPreset — late AX resize
+        // notifications can arrive after echo suppression expires.
+        guard strip.columns[colIndex].presetIndex == nil else { return }
+
+        #if DEBUG
+        print("[Strip] handleUserResize wid=\(windowID) oldWidth=\(oldWidth) newWidth=\(newWidth)")
+        fflush(stdout)
+        #endif
 
         let widthDelta = newWidth - oldWidth
 

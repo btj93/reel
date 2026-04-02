@@ -579,7 +579,13 @@ public final class WindowManager: @unchecked Sendable {
         // Ignore move/resize/focus events that echo from our own layout calls
         if stripController.isInEchoSuppression {
             switch event {
-            case .windowResized, .windowMoved, .windowFocused:
+            case .windowResized(let wid):
+                #if DEBUG
+                    print("[WM] echo-suppressed resize wid=\(wid)")
+                    fflush(stdout)
+                #endif
+                return
+            case .windowMoved, .windowFocused:
                 return
             default:
                 break
