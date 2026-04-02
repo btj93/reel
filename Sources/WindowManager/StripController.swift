@@ -68,8 +68,14 @@ public final class StripController: @unchecked Sendable {
     /// Cached primary screen height for Y-coordinate flipping (avoids NSScreen.main at 120Hz).
     public var primaryScreenHeight: CGFloat
 
-    /// Focus ring overlay.
-    public let focusRing: FocusRing
+    /// Focus indicator overlay.
+    public let focusIndicator: FocusIndicator
+
+    /// Latch: true once scroll+width have settled, reset on new animation.
+    private var scrollWidthSettled: Bool = false
+
+    /// Last tile we called AXWindow.raise() on — prevents 120Hz AX spam in raise style.
+    private var lastRaisedTileID: TileID?
 
     /// Debounced recenter after user resize settles.
     private var resizeRecenterWork: DispatchWorkItem?
@@ -80,7 +86,15 @@ public final class StripController: @unchecked Sendable {
     public init(workingArea: CGRect, primaryScreenHeight: CGFloat) {
         self.strip = Strip(workingArea: workingArea)
         self.primaryScreenHeight = primaryScreenHeight
-        self.focusRing = FocusRing()
+        self.focusIndicator = FocusIndicator()
+    }
+
+    /// True when all animations (scroll, width, focus indicator) have settled.
+    public var isFullySettled: Bool {
+        let time = TimeUtil.now()
+        let scrollSettled = strip.viewOffset.isSettled(at: time)
+        let widthSettled = !strip.columnData.contains(where: { $0.widthAnimation != nil })
+        return scrollSettled && widthSettled && !focusIndicator.isAnimating
     }
 
     // MARK: - Window Registration
@@ -238,7 +252,8 @@ public final class StripController: @unchecked Sendable {
         windowMap.removeAll()
         apps.removeAll()
         lastCommittedFrames.removeAll()
-        focusRing.hide()
+        focusIndicator.hide()
+        lastRaisedTileID = nil
     }
 
     // MARK: - Navigation
@@ -247,6 +262,7 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         if animationEnabled {
             if let _ = strip.navigateLeft(at: time) {
+                scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
@@ -260,6 +276,7 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         if animationEnabled {
             if let _ = strip.navigateRight(at: time) {
+                scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
@@ -288,6 +305,7 @@ public final class StripController: @unchecked Sendable {
             let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
             let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth)
             // Always resume — width animation needs ticking even if scroll is already at target
+            scrollWidthSettled = false
             frameLoop?.resume()
         } else {
             strip.cycleWidthPreset(at: time, params: nil)
@@ -304,6 +322,7 @@ public final class StripController: @unchecked Sendable {
             // then animate the scroll to recenter the column.
             applyLayout()
             if let _ = strip.recenterActiveColumnAnimated(at: time) {
+                scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
@@ -426,6 +445,7 @@ public final class StripController: @unchecked Sendable {
             let time = TimeUtil.now()
             if self.animationEnabled {
                 if let _ = self.strip.recenterActiveColumnAnimated(at: time) {
+                    self.scrollWidthSettled = false
                     self.frameLoop?.resume()
                 }
             } else {
@@ -525,8 +545,8 @@ public final class StripController: @unchecked Sendable {
         }
         // Hot-path logging removed — fires at 120Hz during animation
 
-        // Update focus ring
-        updateFocusRing(frames: frames)
+        // Update focus indicator
+        updateFocusIndicator(frames: frames)
     }
 
     /// Focus the active window (activate app + keyboard focus + raise).
@@ -541,39 +561,50 @@ public final class StripController: @unchecked Sendable {
 
     /// Called by FrameLoop every vsync frame during animation.
     public func handleFrameTick(time: Double) {
+        // Advance focus indicator animations first (unconditional)
+        focusIndicator.tick(time: time)
+
         // Settle any completed width animations (single pass: settle + check)
         let widthSettled = !strip.settleWidthAnimations(at: time)
         let scrollSettled = strip.viewOffset.isSettled(at: time)
 
-        // Check if all animations have settled
+        // Settle latch: once scroll+width settle, do one-shot work then hold until fully settled
         if scrollSettled && widthSettled {
-            let finalOffset = strip.viewOffset.current(at: time)
+            if !scrollWidthSettled {
+                scrollWidthSettled = true
 
-            // After gesture momentum settles, re-anchor focus to the cursor column.
-            // viewPos = columnX(oldActive) + finalOffset — we preserve this while
-            // switching activeColumnIndex, so there's no visual jump.
-            if gestureAnimating {
-                gestureAnimating = false
-                let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + finalOffset
-                let newActive = columnUnderCursor(gestureOffset: finalOffset)
-                strip.activeColumnIndex = newActive
-                let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
-                strip.viewOffset = .static(adjustedOffset)
-            } else {
-                strip.viewOffset = .static(finalOffset)
+                let finalOffset = strip.viewOffset.current(at: time)
+
+                // After gesture momentum settles, re-anchor focus to the cursor column.
+                // viewPos = columnX(oldActive) + finalOffset — we preserve this while
+                // switching activeColumnIndex, so there's no visual jump.
+                if gestureAnimating {
+                    gestureAnimating = false
+                    let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + finalOffset
+                    let newActive = columnUnderCursor(gestureOffset: finalOffset)
+                    strip.activeColumnIndex = newActive
+                    let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
+                    strip.viewOffset = .static(adjustedOffset)
+                } else {
+                    strip.viewOffset = .static(finalOffset)
+                }
+
+                // One final layout with exact positions + full setFrame.
+                // Don't clearCommittedFrames() — visible windows have committed entries,
+                // so applyLayout()'s diff logic can skip unchanged windows.
+                // Far-zone windows still have their last-visible position in
+                // lastCommittedFrames, so applyLayout() will detect the change
+                // and dispatch the off-screen move.
+                applyLayout()
+            } else if focusIndicator.isAnimating {
+                // Scroll and width are done but indicator is still animating — keep ticking it
+                let frames = computeTargetFrames(strip: strip, time: time)
+                updateFocusIndicator(frames: frames)
             }
-
-            frameLoop?.pause()
-
-            // One final layout with exact positions + full setFrame.
-            // Don't clearCommittedFrames() — visible windows have committed entries,
-            // so applyLayout()'s diff logic can skip unchanged windows.
-            // Far-zone windows still have their last-visible position in
-            // lastCommittedFrames, so applyLayout() will detect the change
-            // and dispatch the off-screen move.
-            applyLayout()
             return
         }
+
+        scrollWidthSettled = false
 
         // Compute frames with animation evaluated at this timestamp
         let frames = computeTargetFrames(strip: strip, time: time)
@@ -620,8 +651,8 @@ public final class StripController: @unchecked Sendable {
             }
         }
 
-        // Update focus ring position
-        updateFocusRing(frames: frames)
+        // Update focus indicator position
+        updateFocusIndicator(frames: frames)
     }
 
     // MARK: - Gesture Handling
@@ -694,6 +725,7 @@ public final class StripController: @unchecked Sendable {
                 )
                 strip.viewOffset = .animation(anim)
             }
+            scrollWidthSettled = false
             gestureAnimating = true
             // Frame loop continues to tick
         } else {
@@ -703,7 +735,6 @@ public final class StripController: @unchecked Sendable {
             strip.activeColumnIndex = newActive
             let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
             strip.viewOffset = .static(adjustedOffset)
-            frameLoop?.pause()
             clearCommittedFrames()
             applyLayout()
         }
@@ -715,7 +746,6 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         let current = strip.viewOffset.current(at: time)
         strip.viewOffset = .static(current)
-        frameLoop?.pause()
         clearCommittedFrames()
         applyLayout()
     }
@@ -757,18 +787,30 @@ public final class StripController: @unchecked Sendable {
         applyLayout()
     }
 
-    // MARK: - Focus Ring
+    // MARK: - Focus Indicator
 
-    private func updateFocusRing(frames: [TargetFrame]) {
+    private func updateFocusIndicator(frames: [TargetFrame]) {
+        guard focusIndicator.style != .none else { return }
+
         guard let activeTile = strip.activeColumn?.activeTile,
               let target = frames.first(where: { $0.tileID == activeTile && $0.isVisible }) else {
-            focusRing.hide()
+            focusIndicator.hide()
+            lastRaisedTileID = nil
+            return
+        }
+
+        // Raise style: call AXWindow.raise() only when the active tile changes
+        if focusIndicator.style == .raise {
+            if lastRaisedTileID != activeTile {
+                lastRaisedTileID = activeTile
+                if let window = windowMap[activeTile] {
+                    _ = window.raise()
+                }
+            }
             return
         }
 
         // Convert to screen coordinates (flip Y for AppKit)
-        // CGRect from layout uses top-left origin (like CGWindowList),
-        // but NSWindow uses bottom-left origin.
         let screenHeight = primaryScreenHeight
         let flippedFrame = CGRect(
             x: target.frame.minX,
@@ -776,8 +818,39 @@ public final class StripController: @unchecked Sendable {
             width: target.frame.width,
             height: target.frame.height
         )
-        // Hot-path logging removed — fires at 120Hz during animation
-        focusRing.show(around: flippedFrame)
+
+        // Bootstrap guard + large-jump detection
+        let shouldSnap: Bool
+        if let current = focusIndicator.currentFrame {
+            shouldSnap = abs(flippedFrame.midX - current.midX) > strip.workingArea.width
+        } else {
+            shouldSnap = true
+        }
+
+        let started: Bool
+        if shouldSnap {
+            started = focusIndicator.snapTo(frame: flippedFrame)
+        } else {
+            started = focusIndicator.animateTo(frame: flippedFrame, at: TimeUtil.now())
+        }
+
+        if started {
+            frameLoop?.resume()
+        }
+    }
+
+    /// Wrapper for WindowManager — fades out the indicator when an unmanaged app activates.
+    public func fadeOutIndicator() {
+        if focusIndicator.fadeOut() {
+            frameLoop?.resume()
+        }
+    }
+
+    /// Wrapper for WindowManager — shows the indicator when a managed app activates.
+    public func showIndicator() {
+        let time = TimeUtil.now()
+        let frames = computeTargetFrames(strip: strip, time: time)
+        updateFocusIndicator(frames: frames)
     }
 
     // MARK: - Helpers
@@ -856,6 +929,8 @@ public final class StripController: @unchecked Sendable {
             apps = saved.apps
             lastCommittedFrames.removeAll()  // Force re-apply
 
+            focusIndicator.hide()
+            lastRaisedTileID = nil
             applyLayout()
             lastSpaceSwitchTime = TimeUtil.now()
             return true
@@ -870,7 +945,8 @@ public final class StripController: @unchecked Sendable {
         windowMap.removeAll()
         apps.removeAll()
         lastCommittedFrames.removeAll()
-        focusRing.hide()
+        focusIndicator.hide()
+        lastRaisedTileID = nil
         lastSpaceSwitchTime = TimeUtil.now()
         return false
     }

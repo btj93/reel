@@ -32,6 +32,9 @@ public final class WindowManager: @unchecked Sendable {
     /// Whether management is paused.
     public private(set) var isPaused: Bool = false
 
+    /// Frame loop for smooth animation — shared across all strip controllers.
+    private var frameLoop: FrameLoop?
+
     /// Gesture capture for trackpad scrolling.
     private var gestureCapture: GestureCapture?
 
@@ -115,6 +118,8 @@ public final class WindowManager: @unchecked Sendable {
             sc.animationEnabled = config.animationEnabled
             sc.gestureSnap = config.gestureSnap
             sc.widthSpringParams = config.widthSpringParams
+            sc.focusIndicator.reloadConfig(config.focusIndicator)
+            sc.focusIndicator.springParams = config.widthSpringParams
         }
 
         // Window rules
@@ -250,16 +255,20 @@ public final class WindowManager: @unchecked Sendable {
         #endif
 
         // Phase 2: Frame loop for smooth animation — shared across all strips
-        let frameLoop = FrameLoop()
-        frameLoop.onTick = { [weak self] time in
+        let fl = FrameLoop()
+        self.frameLoop = fl
+        fl.onTick = { [weak self] time in
             guard let self = self else { return }
             for (_, sc) in self.stripControllers {
                 sc.handleFrameTick(time: time)
             }
+            if self.stripControllers.values.allSatisfy({ $0.isFullySettled }) {
+                self.frameLoop?.pause()
+            }
         }
-        frameLoop.start()
+        fl.start()
         for (_, sc) in stripControllers {
-            sc.frameLoop = frameLoop
+            sc.frameLoop = fl
             sc.animationEnabled = config.animationEnabled
             sc.gestureSnap = config.gestureSnap
             sc.widthSpringParams = config.widthSpringParams
@@ -396,7 +405,7 @@ public final class WindowManager: @unchecked Sendable {
         ipcServer?.stop()
         for (_, sc) in stripControllers {
             sc.frameLoop?.stop()
-            sc.focusRing.hide()
+            sc.focusIndicator.hide()
         }
         gestureCapture?.stop()
         hotkeyManager.stop()
@@ -411,7 +420,7 @@ public final class WindowManager: @unchecked Sendable {
             #if DEBUG
             print("[ScrollWM] Paused")
             #endif
-            for (_, sc) in stripControllers { sc.focusRing.hide() }
+            for (_, sc) in stripControllers { sc.focusIndicator.hide() }
             restoreAllWindows()
         } else {
             #if DEBUG
@@ -505,7 +514,7 @@ public final class WindowManager: @unchecked Sendable {
         // Ignore move/resize/focus events that echo from our own layout calls
         if stripController.isInEchoSuppression {
             switch event {
-            case .windowResized, .windowMoved, .windowFocused, .appActivated:
+            case .windowResized, .windowMoved, .windowFocused:
                 return
             default:
                 break
@@ -517,7 +526,7 @@ public final class WindowManager: @unchecked Sendable {
         // would override our restored activeColumnIndex.
         if stripController.isInSpaceSwitchSuppression {
             switch event {
-            case .windowFocused, .appActivated:
+            case .windowFocused:
                 #if DEBUG
                 print("[WM] Suppressed post-space-switch focus event")
                 #endif
@@ -560,6 +569,19 @@ public final class WindowManager: @unchecked Sendable {
                 if let colIndex = stripController.strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }),
                    colIndex != stripController.strip.activeColumnIndex {
                     stripController.scrollToWindow(tileID: tileID)
+                }
+            }
+            // Focus indicator: hide when unmanaged app activates, show when managed
+            let isManaged = tracker.windows.values.contains(where: { $0.pid == pid })
+            if isManaged {
+                for (_, sc) in stripControllers {
+                    if sc.windowMap.values.contains(where: { $0.pid == pid }) {
+                        sc.showIndicator()
+                    }
+                }
+            } else {
+                for (_, sc) in stripControllers {
+                    sc.fadeOutIndicator()
                 }
             }
 

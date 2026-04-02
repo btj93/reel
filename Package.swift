@@ -36,7 +36,7 @@ let package = Package(
         // Platform: macOS API wrappers
         .target(
             name: "Platform",
-            dependencies: ["Core"],
+            dependencies: ["Core", "Config"],
             path: "Sources/Platform"
         ),
 

@@ -45,6 +45,13 @@ close_window = "alt-w"
 modifier = "fn"  # Hold this key + trackpad scroll to pan the strip
 snap = true  # Set to false to let gestures move freely without snapping to columns
 
+# Focus indicator: visual highlight for the active window
+# [focus_indicator]
+# style = "ring"        # "none", "ring", "raise", or "flash"
+# color = "auto"        # "auto" (system accent) or hex "#RRGGBB" / "#RGB"
+# width = 3             # border width in points (ring mode only)
+# corner_radius = 10    # corner radius in points (ring mode only)
+
 # Window rules: match by app bundle ID or title regex
 # [[rules]]
 # app_id = "us.zoom.xos"

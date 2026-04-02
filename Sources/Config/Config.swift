@@ -53,6 +53,10 @@ public struct ScrollWMConfig: Sendable {
     public var savedPositionLimit: Int = 500
     public var positionMemoryRules: [PositionMemoryRuleConfig] = []
 
+    // MARK: - Focus Indicator
+
+    public var focusIndicator: FocusIndicatorConfig = FocusIndicatorConfig()
+
     // MARK: - Startup
 
     public var startAtLogin: Bool = false
@@ -101,6 +105,19 @@ public struct StrutsConfig: Sendable {
         self.top = top
         self.bottom = bottom
     }
+}
+
+/// Focus indicator configuration.
+public struct FocusIndicatorConfig: Sendable {
+    public enum Style: String, Sendable {
+        case none, ring, raise, flash
+    }
+    public var style: Style = .ring
+    public var color: String = "auto"    // "auto" or hex "#RRGGBB" / "#RGB"
+    public var width: Double = 3
+    public var cornerRadius: Double = 10
+
+    public init() {}
 }
 
 // MARK: - Loading
@@ -303,6 +320,23 @@ extension ScrollWMConfig {
 
         // start_at_login (top-level)
         if let v = readBool(table["start_at_login"]) { config.startAtLogin = v }
+
+        // [focus_indicator]
+        if let fi = readTable(table["focus_indicator"]) {
+            if let v = readString(fi["style"]) {
+                if let style = FocusIndicatorConfig.Style(rawValue: v) {
+                    config.focusIndicator.style = style
+                } else {
+                    #if DEBUG
+                    print("[Config] Unknown focus_indicator style: \(v)")
+                    fflush(stdout)
+                    #endif
+                }
+            }
+            if let v = readString(fi["color"]) { config.focusIndicator.color = v }
+            if let v = readDouble(fi["width"]) { config.focusIndicator.width = v }
+            if let v = readDouble(fi["corner_radius"]) { config.focusIndicator.cornerRadius = v }
+        }
 
         return config
     }
