@@ -117,34 +117,13 @@ public final class FocusIndicator: @unchecked Sendable {
         return false
     }
 
-    /// Spring-animate overlay to frame. Returns true if an animation was started/retargeted.
-    @discardableResult
-    public func animateTo(frame: CGRect, at time: Double) -> Bool {
-        guard style == .ring else {
-            // Non-ring styles don't spring-animate frames
-            return snapTo(frame: frame)
-        }
-
-        guard let current = currentFrame else {
-            // Bootstrap: no current frame, snap instead
-            return snapTo(frame: frame)
-        }
-
-        if let sx = springX {
-            // Retarget existing springs
-            springX = sx.retargeted(to: frame.minX, at: time)
-            springY = springY!.retargeted(to: frame.minY, at: time)
-            springW = springW!.retargeted(to: frame.width, at: time)
-            springH = springH!.retargeted(to: frame.height, at: time)
-        } else {
-            // Create new springs
-            springX = SpringAnimation(from: current.minX, to: frame.minX, initialVelocity: 0, startTime: time, params: springParams)
-            springY = SpringAnimation(from: current.minY, to: frame.minY, initialVelocity: 0, startTime: time, params: springParams)
-            springW = SpringAnimation(from: current.width, to: frame.width, initialVelocity: 0, startTime: time, params: springParams)
-            springH = SpringAnimation(from: current.height, to: frame.height, initialVelocity: 0, startTime: time, params: springParams)
-        }
-
-        return true
+    /// Directly position overlay at frame without springs or flash trigger.
+    /// Keeps the indicator exactly synchronized with the focused window's computed position.
+    public func trackFrame(_ frame: CGRect) {
+        guard style == .ring || style == .flash else { return }
+        springX = nil; springY = nil; springW = nil; springH = nil
+        currentFrame = frame
+        positionOverlay(at: frame)
     }
 
     /// Fade out the overlay (unmanaged app became frontmost). Returns true if animation started.

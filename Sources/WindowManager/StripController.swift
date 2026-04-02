@@ -77,6 +77,9 @@ public final class StripController: @unchecked Sendable {
     /// Last tile we called AXWindow.raise() on — prevents 120Hz AX spam in raise style.
     private var lastRaisedTileID: TileID?
 
+    /// Last tile the indicator tracked — detects focus changes for flash trigger.
+    private var lastIndicatorTileID: TileID?
+
     /// Debounced recenter after user resize settles.
     private var resizeRecenterWork: DispatchWorkItem?
 
@@ -254,6 +257,7 @@ public final class StripController: @unchecked Sendable {
         lastCommittedFrames.removeAll()
         focusIndicator.hide()
         lastRaisedTileID = nil
+        lastIndicatorTileID = nil
     }
 
     // MARK: - Navigation
@@ -796,6 +800,7 @@ public final class StripController: @unchecked Sendable {
               let target = frames.first(where: { $0.tileID == activeTile && $0.isVisible }) else {
             focusIndicator.hide()
             lastRaisedTileID = nil
+            lastIndicatorTileID = nil
             return
         }
 
@@ -819,23 +824,21 @@ public final class StripController: @unchecked Sendable {
             height: target.frame.height
         )
 
-        // Bootstrap guard + large-jump detection
-        let shouldSnap: Bool
-        if let current = focusIndicator.currentFrame {
-            shouldSnap = abs(flippedFrame.midX - current.midX) > strip.workingArea.width
-        } else {
-            shouldSnap = true
-        }
+        let tileChanged = lastIndicatorTileID != activeTile
+        lastIndicatorTileID = activeTile
 
-        let started: Bool
-        if shouldSnap {
-            started = focusIndicator.snapTo(frame: flippedFrame)
+        // Bootstrap (no current frame) or tile change in flash mode → snapTo triggers flash easing
+        let isBootstrap = focusIndicator.currentFrame == nil
+        if isBootstrap || (tileChanged && focusIndicator.style == .flash) {
+            let started = focusIndicator.snapTo(frame: flippedFrame)
+            if started {
+                frameLoop?.resume()
+            }
         } else {
-            started = focusIndicator.animateTo(frame: flippedFrame, at: TimeUtil.now())
-        }
-
-        if started {
-            frameLoop?.resume()
+            // Direct tracking: position indicator exactly at the computed frame.
+            // The scroll/width animations already produce smooth positions, so no
+            // separate indicator springs are needed — this eliminates the double-spring lag.
+            focusIndicator.trackFrame(flippedFrame)
         }
     }
 
@@ -931,6 +934,7 @@ public final class StripController: @unchecked Sendable {
 
             focusIndicator.hide()
             lastRaisedTileID = nil
+            lastIndicatorTileID = nil
             applyLayout()
             lastSpaceSwitchTime = TimeUtil.now()
             return true
@@ -947,6 +951,7 @@ public final class StripController: @unchecked Sendable {
         lastCommittedFrames.removeAll()
         focusIndicator.hide()
         lastRaisedTileID = nil
+        lastIndicatorTileID = nil
         lastSpaceSwitchTime = TimeUtil.now()
         return false
     }
