@@ -1,6 +1,8 @@
 import Foundation
 import Core
 import CoreGraphics
+import Config
+import TOMLKit
 
 // Simple test runner — no Xcode or XCTest required
 var passed = 0
@@ -54,6 +56,26 @@ func makeLayoutStrip(widths: [Double], activeIndex: Int = 0, viewOffset: Double 
     }
     let snapIndices = Array(repeating: 0, count: widths.count)
     return Strip(columns: columns, columnData: columnData, activeColumnIndex: activeIndex, viewOffset: .static(viewOffset), snapIndices: snapIndices, gap: 16, workingArea: wa)
+}
+
+/// Parse a TOML string into a ScrollWMConfig for testing.
+func parseTestConfig(_ toml: String) -> (ScrollWMConfig, String?) {
+    do {
+        let table = try TOMLKit.TOMLTable(string: toml)
+        var config = ScrollWMConfig()
+        if let zm = table["zen_mode"]?.table {
+            if let v = zm["enabled"]?.bool { config.zenMode.enabled = v }
+            if let v = zm["dim_alpha"]?.double ?? zm["dim_alpha"]?.int.map({ Double($0) }) {
+                config.zenMode.dimAlpha = max(0.0, min(1.0, v))
+            }
+            if let v = zm["fade_duration"]?.double ?? zm["fade_duration"]?.int.map({ Double($0) }) {
+                config.zenMode.fadeDuration = max(0.05, v)
+            }
+        }
+        return (config, nil)
+    } catch {
+        return (ScrollWMConfig(), error.localizedDescription)
+    }
 }
 
 // ============================================================
@@ -992,6 +1014,66 @@ do {
     check(hasActive, "should return true — second animation still active")
     check(strip.columnData[0].widthAnimation == nil, "done animation should be niled")
     check(strip.columnData[1].widthAnimation != nil, "active animation should remain")
+}
+
+// ============================================================
+print("▶ ZenModeConfig Parsing")
+
+section("default values")
+do {
+    let config = ScrollWMConfig()
+    check(!config.zenMode.enabled, "zen mode disabled by default")
+    assertClose(config.zenMode.dimAlpha, 0.3, tolerance: 0.001, "default dimAlpha")
+    assertClose(config.zenMode.fadeDuration, 0.15, tolerance: 0.001, "default fadeDuration")
+}
+
+section("valid config round-trip")
+do {
+    let toml = """
+    [zen_mode]
+    enabled = true
+    dim_alpha = 0.5
+    fade_duration = 0.2
+    """
+    let (config, error) = parseTestConfig(toml)
+    check(error == nil, "no parse error: \(error ?? "")")
+    check(config.zenMode.enabled, "enabled parsed")
+    assertClose(config.zenMode.dimAlpha, 0.5, tolerance: 0.001, "dimAlpha parsed")
+    assertClose(config.zenMode.fadeDuration, 0.2, tolerance: 0.001, "fadeDuration parsed")
+}
+
+section("dim_alpha clamped to 0.0...1.0")
+do {
+    let toml1 = """
+    [zen_mode]
+    dim_alpha = -0.5
+    """
+    let (config1, _) = parseTestConfig(toml1)
+    assertClose(config1.zenMode.dimAlpha, 0.0, tolerance: 0.001, "negative clamped to 0")
+
+    let toml2 = """
+    [zen_mode]
+    dim_alpha = 2.0
+    """
+    let (config2, _) = parseTestConfig(toml2)
+    assertClose(config2.zenMode.dimAlpha, 1.0, tolerance: 0.001, "over 1 clamped to 1")
+}
+
+section("fade_duration clamped to minimum 0.05")
+do {
+    let toml1 = """
+    [zen_mode]
+    fade_duration = 0.0
+    """
+    let (config1, _) = parseTestConfig(toml1)
+    assertClose(config1.zenMode.fadeDuration, 0.05, tolerance: 0.001, "zero clamped to 0.05")
+
+    let toml2 = """
+    [zen_mode]
+    fade_duration = -1.0
+    """
+    let (config2, _) = parseTestConfig(toml2)
+    assertClose(config2.zenMode.fadeDuration, 0.05, tolerance: 0.001, "negative clamped to 0.05")
 }
 
 // ============================================================

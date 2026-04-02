@@ -65,6 +65,8 @@ public struct ScrollWMConfig: Sendable {
 
     public var startAtLogin: Bool = false
 
+    public init() {}
+
     // MARK: - Config Path
 
     public static let configDir = NSHomeDirectory() + "/.config/scrollwm"

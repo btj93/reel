@@ -65,7 +65,7 @@ let package = Package(
         // Tests (executable — no Xcode required)
         .executableTarget(
             name: "RunTests",
-            dependencies: ["Core"],
+            dependencies: ["Core", "Config"],
             path: "Tests/CoreTests"
         ),
     ]
