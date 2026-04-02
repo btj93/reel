@@ -177,8 +177,10 @@ public class PositionMemory {
             try data.write(to: filePath, options: .atomic)
             isDirty = false
         } catch {
+            #if DEBUG
             print("[PositionMemory] Failed to persist: \(error)")
             fflush(stdout)
+            #endif
         }
     }
 
@@ -189,8 +191,10 @@ public class PositionMemory {
             let data = try Data(contentsOf: filePath)
             let file = try JSONDecoder().decode(PositionFile.self, from: data)
             guard file.version == 1 else {
+                #if DEBUG
                 print("[PositionMemory] Unknown file version \(file.version), starting fresh")
                 fflush(stdout)
+                #endif
                 return
             }
             entries.removeAll()
@@ -206,11 +210,15 @@ public class PositionMemory {
             }
             isDirty = true  // Normalized fingerprints need persisting
             evictIfNeeded()
+            #if DEBUG
             print("[PositionMemory] Loaded \(entries.count) entries from disk")
             fflush(stdout)
+            #endif
         } catch {
+            #if DEBUG
             print("[PositionMemory] Failed to load (starting fresh): \(error)")
             fflush(stdout)
+            #endif
         }
     }
 

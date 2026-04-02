@@ -1,4 +1,5 @@
 import CoreGraphics
+import Core
 import Foundation
 
 /// Captures trackpad scroll gestures via CGEventTap for strip scrolling.
@@ -43,7 +44,9 @@ public final class GestureCapture: @unchecked Sendable {
             callback: scrollCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
+            #if DEBUG
             print("[GestureCapture] Failed to create CGEventTap")
+            #endif
             return false
         }
 
@@ -52,8 +55,10 @@ public final class GestureCapture: @unchecked Sendable {
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
+        #if DEBUG
         print("[GestureCapture] Started (modifier: fn)")
         fflush(stdout)
+        #endif
         return true
     }
 
@@ -100,7 +105,7 @@ public final class GestureCapture: @unchecked Sendable {
             return false
         }
 
-        let timestamp = currentTime()
+        let timestamp = TimeUtil.now()
 
         // Horizontal delta (positive = scroll right in strip, negative = scroll left)
         let deltaX = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
@@ -133,15 +138,10 @@ public final class GestureCapture: @unchecked Sendable {
     private func endGesture(_ event: CGEvent) {
         guard isGesturing else { return }
         isGesturing = false
-        let timestamp = currentTime()
+        let timestamp = TimeUtil.now()
         onGestureEnd?(timestamp)
     }
 
-    private func currentTime() -> Double {
-        var info = mach_timebase_info_data_t()
-        mach_timebase_info(&info)
-        return Double(mach_absolute_time()) * Double(info.numer) / Double(info.denom) / 1_000_000_000
-    }
 }
 
 // MARK: - CGEventTap C Callback

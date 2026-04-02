@@ -10,8 +10,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowManager: WindowManager?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
         print("[ScrollWM] applicationDidFinishLaunching")
         fflush(stdout)
+        #endif
 
         // Hide from Dock (works without Info.plist LSUIElement, so we can run
         // the bare debug binary without a .app bundle)
@@ -25,8 +27,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Check Accessibility permission
         let trusted = AXIsProcessTrusted()
+        #if DEBUG
         print("[ScrollWM] AXIsProcessTrusted = \(trusted)")
         fflush(stdout)
+        #endif
 
         if !trusted {
             promptForAccessibility()
@@ -124,15 +128,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         wm.start()
         windowManager = wm
         applyLoginItem(enabled: wm.config.startAtLogin)
+        #if DEBUG
         print("[ScrollWM] Ready")
         fflush(stdout)
+        #endif
     }
 
     private func applyLoginItem(enabled: Bool) {
         guard Bundle.main.bundleIdentifier != nil else {
             if enabled {
+                #if DEBUG
                 print("[ScrollWM] start_at_login requires running as .app bundle — ignoring")
                 fflush(stdout)
+                #endif
             }
             return
         }
@@ -140,16 +148,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             if enabled && service.status != .enabled {
                 try service.register()
+                #if DEBUG
                 print("[ScrollWM] Registered as login item")
                 fflush(stdout)
+                #endif
             } else if !enabled && service.status == .enabled {
                 try service.unregister()
+                #if DEBUG
                 print("[ScrollWM] Unregistered login item")
                 fflush(stdout)
+                #endif
             }
         } catch {
+            #if DEBUG
             print("[ScrollWM] Login item error: \(error)")
             fflush(stdout)
+            #endif
         }
     }
 
@@ -191,8 +205,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func clearPositions() {
         windowManager?.positionMemory?.clearAll()
         windowManager?.positionMemory?.persistToDisk()
+        #if DEBUG
         print("[ScrollWM] Cleared all saved positions")
         fflush(stdout)
+        #endif
     }
 
     @objc private func quit() {

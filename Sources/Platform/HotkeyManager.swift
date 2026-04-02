@@ -66,15 +66,19 @@ public final class HotkeyManager: @unchecked Sendable {
         for (actionName, keyString) in keybindingMap {
             guard let action = actionMap[actionName] else { continue }
             guard let (modifiers, keyCode) = parseKeyString(keyString) else {
+                #if DEBUG
                 print("[Hotkey] Cannot parse '\(keyString)' for \(actionName)")
                 fflush(stdout)
+                #endif
                 continue
             }
             bindings.append(HotkeyBinding(modifiers: modifiers, keyCode: keyCode, action: action))
         }
 
+        #if DEBUG
         print("[Hotkey] Registered \(bindings.count) bindings from config")
         fflush(stdout)
+        #endif
     }
 
     /// Register hardcoded defaults (fallback if no config).
@@ -150,7 +154,9 @@ public final class HotkeyManager: @unchecked Sendable {
             callback: hotkeyCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
+            #if DEBUG
             print("[ScrollWM] Failed to create CGEventTap — check Accessibility permission")
+            #endif
             return false
         }
 
@@ -162,7 +168,9 @@ public final class HotkeyManager: @unchecked Sendable {
         // Start health monitoring — poll every 2 seconds
         startHealthMonitor()
 
+        #if DEBUG
         print("[ScrollWM] Hotkey manager started")
+        #endif
         return true
     }
 
@@ -190,7 +198,9 @@ public final class HotkeyManager: @unchecked Sendable {
         healthTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self = self, let tap = self.eventTap else { return }
             if !CGEvent.tapIsEnabled(tap: tap) {
+                #if DEBUG
                 print("[ScrollWM] Event tap was disabled — re-enabling")
+                #endif
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
         }

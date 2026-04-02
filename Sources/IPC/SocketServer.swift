@@ -8,6 +8,9 @@ public final class SocketServer: @unchecked Sendable {
     private var isRunning = false
     private var acceptSource: DispatchSourceRead?
 
+    private static let jsonDecoder = JSONDecoder()
+    private static let jsonEncoder = JSONEncoder()
+
     /// Called when a command is received. Returns a response.
     public var onCommand: ((ScrollWMCommand) -> ScrollWMResponse)?
 
@@ -28,7 +31,9 @@ public final class SocketServer: @unchecked Sendable {
         // Create socket
         listenerFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard listenerFD >= 0 else {
+            #if DEBUG
             print("[IPC] Failed to create socket")
+            #endif
             return false
         }
 
@@ -50,14 +55,18 @@ public final class SocketServer: @unchecked Sendable {
         }
 
         guard bindResult == 0 else {
+            #if DEBUG
             print("[IPC] Failed to bind to \(socketPath): \(String(cString: strerror(errno)))")
+            #endif
             close(listenerFD)
             return false
         }
 
         // Listen
         guard listen(listenerFD, 5) == 0 else {
+            #if DEBUG
             print("[IPC] Failed to listen")
+            #endif
             close(listenerFD)
             return false
         }
@@ -77,8 +86,10 @@ public final class SocketServer: @unchecked Sendable {
         acceptSource = source
         isRunning = true
 
+        #if DEBUG
         print("[IPC] Listening on \(socketPath)")
         fflush(stdout)
+        #endif
         return true
     }
 
@@ -115,7 +126,7 @@ public final class SocketServer: @unchecked Sendable {
         if let rawStr = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
             // Try JSON protocol first
             if let jsonData = rawStr.data(using: .utf8),
-               let message = try? JSONDecoder().decode(IPCMessage.self, from: jsonData) {
+               let message = try? Self.jsonDecoder.decode(IPCMessage.self, from: jsonData) {
                 response = onMessage?(message) ?? onCommand.flatMap { handler in
                     ScrollWMCommand(rawValue: message.command).map { handler($0) }
                 } ?? ScrollWMResponse(success: false, message: "No handler")
@@ -131,7 +142,7 @@ public final class SocketServer: @unchecked Sendable {
         }
 
         // Send response
-        if let responseData = try? JSONEncoder().encode(response) {
+        if let responseData = try? Self.jsonEncoder.encode(response) {
             let responseStr = String(data: responseData, encoding: .utf8)! + "\n"
             responseStr.withCString { ptr in
                 _ = write(clientFD, ptr, strlen(ptr))

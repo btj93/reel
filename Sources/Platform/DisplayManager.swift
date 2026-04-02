@@ -153,8 +153,10 @@ public final class DisplayManager: @unchecked Sendable {
         // Log changes
         let added = Set(displays.keys).subtracting(oldDisplays.keys)
         let removed = Set(oldDisplays.keys).subtracting(displays.keys)
+        #if DEBUG
         if !added.isEmpty { print("[ScrollWM] Displays added: \(added)") }
         if !removed.isEmpty { print("[ScrollWM] Displays removed: \(removed)") }
+        #endif
 
         onDisplayChange?(displays)
     }

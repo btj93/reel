@@ -19,6 +19,9 @@ public final class StripController: @unchecked Sendable {
     /// Last committed positions (for diffing).
     public private(set) var lastCommittedFrames: [TileID: CGRect] = [:]
 
+    /// Tile IDs that need retry because a previous async AX dispatch failed.
+    private var dirtyTileIDs: Set<TileID> = []
+
     /// Whether animation is enabled (Phase 2 toggle).
     public var animationEnabled: Bool = false
 
@@ -62,6 +65,9 @@ public final class StripController: @unchecked Sendable {
     /// previously-frontmost app arrive during or just after. 300ms gives margin.
     public static let spaceSwitchFocusSuppressionInterval: Double = 0.3
 
+    /// Cached primary screen height for Y-coordinate flipping (avoids NSScreen.main at 120Hz).
+    public var primaryScreenHeight: CGFloat
+
     /// Focus ring overlay.
     public let focusRing: FocusRing
 
@@ -71,8 +77,9 @@ public final class StripController: @unchecked Sendable {
     /// Frame loop for animated scrolling (nil until Phase 2 is wired).
     public var frameLoop: FrameLoop?
 
-    public init(workingArea: CGRect) {
+    public init(workingArea: CGRect, primaryScreenHeight: CGFloat) {
         self.strip = Strip(workingArea: workingArea)
+        self.primaryScreenHeight = primaryScreenHeight
         self.focusRing = FocusRing()
     }
 
@@ -92,7 +99,9 @@ public final class StripController: @unchecked Sendable {
 
     /// Register a window and add it to the strip.
     public func addWindow(_ window: AXWindow, app: AXApp) {
+        #if DEBUG
         print("[Strip] addWindow: tileID=\(window.tileID.rawValue) pid=\(window.pid) title=\(window.getTitle() ?? "?")")
+        #endif
         windowMap[window.tileID] = window
         apps[window.pid] = app
 
@@ -107,7 +116,7 @@ public final class StripController: @unchecked Sendable {
         }
 
         let column = Column(tiles: [window.tileID], width: width)
-        strip.insertColumn(column, at: currentTime())
+        strip.insertColumn(column, at: TimeUtil.now())
 
         if !isBatching {
             applyLayout()
@@ -123,7 +132,9 @@ public final class StripController: @unchecked Sendable {
             return
         }
 
+        #if DEBUG
         print("[Strip] addWindow (restored): tileID=\(window.tileID.rawValue) pid=\(window.pid) at index=\(saved.columnIndex)")
+        #endif
         windowMap[window.tileID] = window
         apps[window.pid] = app
 
@@ -141,13 +152,13 @@ public final class StripController: @unchecked Sendable {
 
         let column = Column(tiles: [window.tileID], width: width,
                             presetIndex: saved.presetIndex, isFullWidth: saved.isFullWidth)
-        strip.insertColumn(column, at: currentTime(), atIndex: insertIndex)
+        strip.insertColumn(column, at: TimeUtil.now(), atIndex: insertIndex)
 
         if !isBatching {
             // Pre-position the new window immediately before the full layout pass.
             // This eliminates the flicker where the window briefly appears at its
             // native/app-default position before snapping to the strip position.
-            let frames = computeTargetFrames(strip: strip, time: currentTime())
+            let frames = computeTargetFrames(strip: strip, time: TimeUtil.now())
             if let target = frames.first(where: { $0.tileID == window.tileID }) {
                 _ = window.setFrame(target.frame)
                 lastCommittedFrames[window.tileID] = target.frame
@@ -203,10 +214,11 @@ public final class StripController: @unchecked Sendable {
                 callback(tileID, column, colData, colIndex, neighborBefore, neighborAfter)
             }
 
-            strip.removeColumn(at: colIndex, at: currentTime())
+            strip.removeColumn(at: colIndex, at: TimeUtil.now())
         }
         windowMap.removeValue(forKey: tileID)
         lastCommittedFrames.removeValue(forKey: tileID)
+        dirtyTileIDs.remove(tileID)
         applyLayout()
     }
 
@@ -232,7 +244,7 @@ public final class StripController: @unchecked Sendable {
     // MARK: - Navigation
 
     public func focusLeft() {
-        let time = currentTime()
+        let time = TimeUtil.now()
         if animationEnabled {
             if let _ = strip.navigateLeft(at: time) {
                 frameLoop?.resume()
@@ -245,7 +257,7 @@ public final class StripController: @unchecked Sendable {
     }
 
     public func focusRight() {
-        let time = currentTime()
+        let time = TimeUtil.now()
         if animationEnabled {
             if let _ = strip.navigateRight(at: time) {
                 frameLoop?.resume()
@@ -258,19 +270,19 @@ public final class StripController: @unchecked Sendable {
     }
 
     public func moveColumnLeft() {
-        strip.moveColumnLeft(at: currentTime())
+        strip.moveColumnLeft(at: TimeUtil.now())
         applyLayout()
         focusActiveWindow()
     }
 
     public func moveColumnRight() {
-        strip.moveColumnRight(at: currentTime())
+        strip.moveColumnRight(at: TimeUtil.now())
         applyLayout()
         focusActiveWindow()
     }
 
     public func cycleWidthPreset() {
-        let time = currentTime()
+        let time = TimeUtil.now()
         if animationEnabled {
             strip.cycleWidthPreset(at: time, params: widthSpringParams)
             let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
@@ -286,7 +298,7 @@ public final class StripController: @unchecked Sendable {
 
     public func toggleFullWidth() {
         strip.toggleFullWidth()
-        let time = currentTime()
+        let time = TimeUtil.now()
         if animationEnabled {
             // Apply layout immediately so the window resizes right away,
             // then animate the scroll to recenter the column.
@@ -386,11 +398,15 @@ public final class StripController: @unchecked Sendable {
         // Detect left-edge resize: if the right edge stayed roughly in place
         // while the left edge moved, the user is dragging from the left side.
         // Adjust the view offset so the right edge stays anchored on screen.
-        if let lastFrame = lastCommittedFrames[tileID] {
+        // Only apply when lastFrame is on-screen — far-zone sliver positions
+        // (written during animation ticks) would produce bogus deltas.
+        if let lastFrame = lastCommittedFrames[tileID],
+           lastFrame.minX >= strip.workingArea.minX - 50,
+           lastFrame.maxX <= strip.workingArea.maxX + 50 {
             let rightEdgeDelta = abs(Double(currentFrame.maxX) - Double(lastFrame.maxX))
             let leftEdgeDelta = abs(Double(currentFrame.minX) - Double(lastFrame.minX))
             if leftEdgeDelta > rightEdgeDelta && leftEdgeDelta > 2 {
-                let currentOffset = strip.viewOffset.current(at: currentTime())
+                let currentOffset = strip.viewOffset.current(at: TimeUtil.now())
                 strip.viewOffset = .static(currentOffset + widthDelta)
             }
         }
@@ -407,7 +423,7 @@ public final class StripController: @unchecked Sendable {
         resizeRecenterWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            let time = self.currentTime()
+            let time = TimeUtil.now()
             if self.animationEnabled {
                 if let _ = self.strip.recenterActiveColumnAnimated(at: time) {
                     self.frameLoop?.resume()
@@ -427,7 +443,7 @@ public final class StripController: @unchecked Sendable {
     public func scrollToWindow(tileID: TileID) {
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
 
-        let time = currentTime()
+        let time = TimeUtil.now()
         strip.columnData[colIndex].widthAnimation = nil
         strip.activeColumnIndex = colIndex
         strip.snapIndices[colIndex] = strip.defaultSnapIndex
@@ -449,17 +465,12 @@ public final class StripController: @unchecked Sendable {
     /// This is the Phase 1 "instant" mode.
     public func applyLayout() {
         // Record timestamp so echo AX events can be suppressed
-        lastLayoutTime = currentTime()
+        let time = TimeUtil.now()
+        lastLayoutTime = time
 
-        let time = currentTime()
         let frames = computeTargetFrames(strip: strip, time: time)
 
-        print("[Layout] applyLayout: \(frames.count) frames, \(strip.columns.count) cols, active=\(strip.activeColumnIndex) viewOffset=\(strip.viewOffset.current(at: time))")
-        for (i, f) in frames.enumerated() {
-            let isFocused = strip.activeColumn?.tiles.contains(f.tileID) == true
-            print("[Layout]   [\(i)] tile=\(f.tileID.rawValue) x=\(Int(f.frame.minX)) w=\(Int(f.frame.width)) vis=\(f.isVisible) off=\(f.isOffScreen)\(isFocused ? " ★" : "")")
-        }
-        fflush(stdout)
+        // Hot-path logging removed — fires at 120Hz during animation
 
         // Apply frames to real windows
         var applied = 0
@@ -471,31 +482,48 @@ public final class StripController: @unchecked Sendable {
                 continue
             }
 
-            // Only update if the frame actually changed
-            if let lastFrame = lastCommittedFrames[target.tileID],
+            // Dirty-ID bypass must precede framesEqual guard — otherwise
+            // optimistically-written frames from failed dispatches are never retried
+            let isDirty = dirtyTileIDs.contains(target.tileID)
+            if !isDirty,
+               let lastFrame = lastCommittedFrames[target.tileID],
                framesEqual(lastFrame, target.frame) {
                 skipped += 1
                 continue
             }
+            dirtyTileIDs.remove(target.tileID)
 
-            // Apply frame via AX — only record in lastCommittedFrames on success
-            let result: AXResult<Void>
+            // Record optimistically — retry via dirtyTileIDs on failure
+            lastCommittedFrames[target.tileID] = target.frame
+            applied += 1
+
+            let tileID = target.tileID
             if target.isOffScreen {
-                result = window.setPosition(target.frame.origin)
+                let position = target.frame.origin
+                DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                    let result = window.setPosition(position)
+                    if case .failure = result {
+                        DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
+                    }
+                }
             } else {
-                result = window.setFrame(target.frame)
-            }
-            switch result {
-            case .success:
-                applied += 1
-                lastCommittedFrames[target.tileID] = target.frame
-            case .failure(let err):
-                print("[Layout]   FAIL tile=\(target.tileID.rawValue) err=\(err)")
-                fflush(stdout)
-                // Don't record — will retry next applyLayout
+                let frame = target.frame
+                if let app = apps[window.pid] {
+                    DispatchQueue.global(qos: .userInteractive).async {
+                        app.dispatchSetFrame(window, frame: frame)
+                    }
+                } else {
+                    // Fallback: dispatch setFrame directly when app not in dict
+                    DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                        let result = window.setFrame(frame)
+                        if case .failure = result {
+                            DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
+                        }
+                    }
+                }
             }
         }
-        print("[Layout]   applied=\(applied) skipped=\(skipped) noWindow=\(noWindow)")
+        // Hot-path logging removed — fires at 120Hz during animation
 
         // Update focus ring
         updateFocusRing(frames: frames)
@@ -513,11 +541,9 @@ public final class StripController: @unchecked Sendable {
 
     /// Called by FrameLoop every vsync frame during animation.
     public func handleFrameTick(time: Double) {
-        // Settle any completed width animations
-        strip.settleWidthAnimations(at: time)
-
+        // Settle any completed width animations (single pass: settle + check)
+        let widthSettled = !strip.settleWidthAnimations(at: time)
         let scrollSettled = strip.viewOffset.isSettled(at: time)
-        let widthSettled = !strip.hasActiveWidthAnimations(at: time)
 
         // Check if all animations have settled
         if scrollSettled && widthSettled {
@@ -539,8 +565,12 @@ public final class StripController: @unchecked Sendable {
 
             frameLoop?.pause()
 
-            // One final layout with exact positions + full setFrame
-            clearCommittedFrames()
+            // One final layout with exact positions + full setFrame.
+            // Don't clearCommittedFrames() — visible windows have committed entries,
+            // so applyLayout()'s diff logic can skip unchanged windows.
+            // Far-zone windows still have their last-visible position in
+            // lastCommittedFrames, so applyLayout() will detect the change
+            // and dispatch the off-screen move.
             applyLayout()
             return
         }
@@ -584,7 +614,8 @@ public final class StripController: @unchecked Sendable {
                 }
                 lastCommittedFrames[target.tileID] = target.frame
             case .far:
-                // Skip during animation — will be updated on settle
+                // Don't write — let settle applyLayout() detect the position change
+                // from last-visible to off-screen and dispatch the move
                 break
             }
         }
@@ -681,7 +712,7 @@ public final class StripController: @unchecked Sendable {
     /// Cancel a gesture (e.g., another event interrupted it).
     public func handleGestureCancel() {
         gestureAnimating = false
-        let time = currentTime()
+        let time = TimeUtil.now()
         let current = strip.viewOffset.current(at: time)
         strip.viewOffset = .static(current)
         frameLoop?.pause()
@@ -696,7 +727,7 @@ public final class StripController: @unchecked Sendable {
 
         let cursorScreenX = NSEvent.mouseLocation.x
         let wa = strip.workingArea
-        let time = currentTime()
+        let time = TimeUtil.now()
 
         // If cursor is outside the working area X range, keep current active column
         guard cursorScreenX >= wa.minX && cursorScreenX <= wa.maxX else {
@@ -738,27 +769,18 @@ public final class StripController: @unchecked Sendable {
         // Convert to screen coordinates (flip Y for AppKit)
         // CGRect from layout uses top-left origin (like CGWindowList),
         // but NSWindow uses bottom-left origin.
-        if let screen = NSScreen.main {
-            let screenHeight = screen.frame.height
-            let flippedFrame = CGRect(
-                x: target.frame.minX,
-                y: screenHeight - target.frame.maxY,
-                width: target.frame.width,
-                height: target.frame.height
-            )
-            print("[FocusRing] showing at x=\(Int(flippedFrame.minX)) y=\(Int(flippedFrame.minY)) w=\(Int(flippedFrame.width)) h=\(Int(flippedFrame.height))")
-            fflush(stdout)
-            focusRing.show(around: flippedFrame)
-        }
+        let screenHeight = primaryScreenHeight
+        let flippedFrame = CGRect(
+            x: target.frame.minX,
+            y: screenHeight - target.frame.maxY,
+            width: target.frame.width,
+            height: target.frame.height
+        )
+        // Hot-path logging removed — fires at 120Hz during animation
+        focusRing.show(around: flippedFrame)
     }
 
     // MARK: - Helpers
-
-    private func currentTime() -> Double {
-        var info = mach_timebase_info_data_t()
-        mach_timebase_info(&info)
-        return Double(mach_absolute_time()) * Double(info.numer) / Double(info.denom) / 1_000_000_000
-    }
 
     private func framesEqual(_ a: CGRect, _ b: CGRect) -> Bool {
         abs(a.minX - b.minX) < 0.5 &&
@@ -769,12 +791,12 @@ public final class StripController: @unchecked Sendable {
 
     /// Whether we are within the echo suppression window after a layout.
     public var isInEchoSuppression: Bool {
-        currentTime() - lastLayoutTime < Self.echoSuppressionInterval
+        TimeUtil.now() - lastLayoutTime < Self.echoSuppressionInterval
     }
 
     /// True if we recently switched spaces and should ignore external focus changes.
     public var isInSpaceSwitchSuppression: Bool {
-        currentTime() - lastSpaceSwitchTime < Self.spaceSwitchFocusSuppressionInterval
+        TimeUtil.now() - lastSpaceSwitchTime < Self.spaceSwitchFocusSuppressionInterval
     }
 
     // MARK: - Space Management
@@ -835,7 +857,7 @@ public final class StripController: @unchecked Sendable {
             lastCommittedFrames.removeAll()  // Force re-apply
 
             applyLayout()
-            lastSpaceSwitchTime = currentTime()
+            lastSpaceSwitchTime = TimeUtil.now()
             return true
         }
 
@@ -849,7 +871,7 @@ public final class StripController: @unchecked Sendable {
         apps.removeAll()
         lastCommittedFrames.removeAll()
         focusRing.hide()
-        lastSpaceSwitchTime = currentTime()
+        lastSpaceSwitchTime = TimeUtil.now()
         return false
     }
 

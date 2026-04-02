@@ -504,22 +504,19 @@ public struct Strip: Sendable {
         }
     }
 
-    /// Whether any column has an active width animation.
-    public func hasActiveWidthAnimations(at time: Double) -> Bool {
-        for data in columnData {
-            if let anim = data.widthAnimation, !anim.isDone(at: time) {
-                return true
-            }
-        }
-        return false
-    }
-
-    /// Finalize all completed width animations (nil out done springs).
-    public mutating func settleWidthAnimations(at time: Double) {
+    /// Finalize completed width animations and return whether any active animations remain.
+    @discardableResult
+    public mutating func settleWidthAnimations(at time: Double) -> Bool {
+        var anyActive = false
         for i in 0..<columnData.count {
-            if let anim = columnData[i].widthAnimation, anim.isDone(at: time) {
-                columnData[i].widthAnimation = nil
+            if let anim = columnData[i].widthAnimation {
+                if anim.isDone(at: time) {
+                    columnData[i].widthAnimation = nil
+                } else {
+                    anyActive = true
+                }
             }
         }
+        return anyActive
     }
 }

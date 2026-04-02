@@ -51,18 +51,23 @@ public func computeTargetFrames(
 
     let viewPos = strip.viewPos(at: time)
     let wa = strip.workingArea
-    let viewLeft = viewPos
-    let viewRight = viewPos + wa.width
 
-    // First pass: determine visible column range
+    let colCount = strip.columns.count
+
+    // First pass: cache widths/positions, determine visible column range
+    var colWidths = [Double]()
+    colWidths.reserveCapacity(colCount)
+    var colXPositions = [Double]()
+    colXPositions.reserveCapacity(colCount)
+
     var visibleFirst: Int?
     var visibleLast: Int?
 
-    var columnPositions: [(index: Int, stripX: Double)] = []
     var x: Double = 0
-    for i in 0..<strip.columns.count {
+    for i in 0..<colCount {
         let colWidth = strip.columnData[i].currentWidth(at: time)
-        columnPositions.append((i, x))
+        colWidths.append(colWidth)
+        colXPositions.append(x)
 
         let screenLeft = x - viewPos
         let screenRight = screenLeft + colWidth
@@ -78,15 +83,16 @@ public func computeTargetFrames(
     let vFirst = visibleFirst ?? 0
     let vLast = visibleLast ?? 0
     let nearLeft = max(0, vFirst - nearBufferColumns)
-    let nearRight = min(strip.columns.count - 1, vLast + nearBufferColumns)
+    let nearRight = min(colCount - 1, vLast + nearBufferColumns)
 
-    // Second pass: compute target frames
+    // Second pass: compute target frames using cached widths
     var results: [TargetFrame] = []
+    results.reserveCapacity(colCount)
 
-    for (i, stripX) in columnPositions {
+    for i in 0..<colCount {
         let column = strip.columns[i]
-        let colWidth = strip.columnData[i].currentWidth(at: time)
-        let screenX = stripX - viewPos + wa.minX
+        let colWidth = colWidths[i]
+        let screenX = colXPositions[i] - viewPos + wa.minX
 
         // Determine visibility zone
         let zone: VisibilityZone
@@ -102,51 +108,39 @@ public func computeTargetFrames(
         let isPartiallyVisible = (screenX + colWidth > wa.minX) && (screenX < wa.maxX)
 
         // Compute tile frames within the column (vertical stacking)
-        let tileFrames = computeTileFrames(
+        computeTileFrames(
+            into: &results,
             column: column,
             screenX: screenX,
             colWidth: colWidth,
             workingArea: wa,
-            gap: strip.gap
+            gap: strip.gap,
+            isVisible: isVisible,
+            isPartiallyVisible: isPartiallyVisible,
+            zone: zone,
+            sliverWidth: sliverWidth
         )
-
-        for (tileID, tileFrame) in tileFrames {
-            var finalFrame = tileFrame
-            var offScreen = false
-
-            if !isPartiallyVisible {
-                // Apply sliver positioning
-                finalFrame = sliverFrame(
-                    originalFrame: tileFrame,
-                    workingArea: wa,
-                    side: screenX < wa.minX ? .left : .right,
-                    sliverWidth: sliverWidth
-                )
-                offScreen = true
-            }
-
-            results.append(TargetFrame(
-                tileID: tileID,
-                frame: finalFrame,
-                isVisible: isVisible || isPartiallyVisible,
-                isOffScreen: offScreen,
-                visibilityZone: zone
-            ))
-        }
     }
 
     return results
 }
 
 /// Compute frames for tiles within a single column (vertical stacking).
+/// Appends TargetFrames directly into the results array, applying sliver
+/// positioning for off-screen columns.
 func computeTileFrames(
+    into results: inout [TargetFrame],
     column: Column,
     screenX: Double,
     colWidth: Double,
     workingArea: CGRect,
-    gap: Double
-) -> [(TileID, CGRect)] {
-    guard !column.tiles.isEmpty else { return [] }
+    gap: Double,
+    isVisible: Bool,
+    isPartiallyVisible: Bool,
+    zone: VisibilityZone,
+    sliverWidth: Double
+) {
+    guard !column.tiles.isEmpty else { return }
 
     // Clamp column width to working area
     let clampedWidth = min(colWidth, workingArea.width)
@@ -156,21 +150,39 @@ func computeTileFrames(
     let availableHeight = workingArea.height - totalGaps
     let tileHeight = max(1, availableHeight / Double(tileCount))
 
-    var results: [(TileID, CGRect)] = []
     var y = workingArea.minY
 
     for tile in column.tiles {
-        let frame = CGRect(
+        let tileFrame = CGRect(
             x: screenX,
             y: y,
             width: clampedWidth,
             height: tileHeight
         )
-        results.append((tile, frame))
+
+        var finalFrame = tileFrame
+        var offScreen = false
+
+        if !isPartiallyVisible {
+            finalFrame = sliverFrame(
+                originalFrame: tileFrame,
+                workingArea: workingArea,
+                side: screenX < workingArea.minX ? .left : .right,
+                sliverWidth: sliverWidth
+            )
+            offScreen = true
+        }
+
+        results.append(TargetFrame(
+            tileID: tile,
+            frame: finalFrame,
+            isVisible: isVisible || isPartiallyVisible,
+            isOffScreen: offScreen,
+            visibilityZone: zone
+        ))
+
         y += tileHeight + gap
     }
-
-    return results
 }
 
 /// Side of the screen for sliver positioning.

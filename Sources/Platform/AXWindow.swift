@@ -20,6 +20,10 @@ public final class AXWindow: @unchecked Sendable {
     /// The TileID used in the Strip model.
     public let tileID: TileID
 
+    /// Cached result of whether AXEnhancedUserInterface is settable on this window.
+    /// Queried once on first toggleEnhancedUI call and reused thereafter.
+    private var _enhancedUISettable: Bool?
+
     public init(element: AXUIElement, windowID: CGWindowID, pid: pid_t) {
         self.element = element
         self.windowID = windowID
@@ -271,11 +275,14 @@ public final class AXWindow: @unchecked Sendable {
     /// Toggle AXEnhancedUserInterface. Returns the previous value.
     @discardableResult
     private func toggleEnhancedUI(_ enabled: Bool) -> Bool {
-        var settable: DarwinBoolean = false
-        let checkErr = AXUIElementIsAttributeSettable(
-            element, "AXEnhancedUserInterface" as CFString, &settable
-        )
-        guard checkErr == .success, settable.boolValue else { return false }
+        if _enhancedUISettable == nil {
+            var settable: DarwinBoolean = false
+            AXUIElementIsAttributeSettable(
+                element, "AXEnhancedUserInterface" as CFString, &settable
+            )
+            _enhancedUISettable = settable.boolValue
+        }
+        guard _enhancedUISettable == true else { return false }
 
         var currentValue: AnyObject?
         let getErr = AXUIElementCopyAttributeValue(

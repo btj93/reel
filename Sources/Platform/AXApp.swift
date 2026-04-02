@@ -13,6 +13,7 @@ public final class AXApp: @unchecked Sendable {
     private var observer: AXObserver?
     private var thread: Thread?
     private var runLoop: CFRunLoop?
+    private let runLoopReady = DispatchSemaphore(value: 0)
 
     /// Callback closure invoked on the main thread when events occur.
     public var onEvent: ((AXAppEvent) -> Void)?
@@ -48,16 +49,20 @@ public final class AXApp: @unchecked Sendable {
 
     /// Stop observing and tear down the thread.
     public func stopObserving() {
+        guard thread != nil else { return }  // never started
+        _ = runLoopReady.wait(timeout: .now() + 0.5)
         if let rl = runLoop {
             CFRunLoopStop(rl)
         }
         observer = nil
         thread = nil
         runLoop = nil
+        runLoopReady.signal()  // allow safe re-entry from deinit
     }
 
     private func observerThreadMain() {
         runLoop = CFRunLoopGetCurrent()
+        runLoopReady.signal()
 
         // Create the AX observer
         var obs: AXObserver?
@@ -140,9 +145,9 @@ public final class AXApp: @unchecked Sendable {
 
     /// Execute a setFrame call on this app's thread, tracking cost.
     public func dispatchSetFrame(_ window: AXWindow, frame: CGRect) {
-        let start = CACurrentMediaTime()
+        let start = TimeUtil.now()
         let _ = window.setFrame(frame)
-        let duration = CACurrentMediaTime() - start
+        let duration = TimeUtil.now() - start
 
         // Update EMA: 80% old, 20% new
         axCallCostEMA = axCallCostEMA * 0.8 + duration * 0.2
@@ -150,9 +155,9 @@ public final class AXApp: @unchecked Sendable {
 
     /// Execute a setPosition-only call (cheaper during animation).
     public func dispatchSetPosition(_ window: AXWindow, position: CGPoint) {
-        let start = CACurrentMediaTime()
+        let start = TimeUtil.now()
         let _ = window.setPosition(position)
-        let duration = CACurrentMediaTime() - start
+        let duration = TimeUtil.now() - start
         axCallCostEMA = axCallCostEMA * 0.8 + duration * 0.2
     }
 
@@ -195,10 +200,3 @@ private func axObserverCallback(
     app.handleNotification(notification as String, element: element)
 }
 
-/// Get the current time for AX cost tracking.
-private func CACurrentMediaTime() -> Double {
-    var info = mach_timebase_info_data_t()
-    mach_timebase_info(&info)
-    let now = mach_absolute_time()
-    return Double(now) * Double(info.numer) / Double(info.denom) / 1_000_000_000
-}

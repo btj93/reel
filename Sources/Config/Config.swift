@@ -132,15 +132,21 @@ extension ScrollWMConfig {
     }
 
     /// Load defaults from bundled config.default.toml.
-    private static func loadDefaults() -> ScrollWMConfig {
+    private static let cachedDefaults: ScrollWMConfig = {
         guard let url = Bundle.module.url(forResource: "config.default", withExtension: "toml"),
               let content = try? String(contentsOf: url, encoding: .utf8),
               let table = try? TOMLTable(string: content) else {
+            #if DEBUG
             print("[Config] Warning: could not load bundled config.default.toml, using hardcoded defaults")
             fflush(stdout)
+            #endif
             return ScrollWMConfig()
         }
         return parse(table: table, base: ScrollWMConfig())
+    }()
+
+    private static func loadDefaults() -> ScrollWMConfig {
+        cachedDefaults
     }
 
     // MARK: - Helpers for reading TOML values
@@ -175,7 +181,6 @@ extension ScrollWMConfig {
     private static func readTable(_ value: TOMLValueConvertible?) -> TOMLTable? {
         if let t = value as? TOMLTable { return t }
         return value?.table
-        return nil
     }
 
     /// Parse a TOML table into a config, starting from a base config.
@@ -198,7 +203,10 @@ extension ScrollWMConfig {
                         case "left": points.append(.left)
                         case "middle": points.append(.middle)
                         case "right": points.append(.right)
-                        default: print("[Config] Unknown snap point: \(str)")
+                        default:
+                            #if DEBUG
+                            print("[Config] Unknown snap point: \(str)")
+                            #endif
                         }
                     }
                 }
@@ -210,7 +218,9 @@ extension ScrollWMConfig {
 
             // Validation
             if config.snapPoints.isEmpty {
+                #if DEBUG
                 print("[Config] Warning: snap is empty, defaulting to [middle]")
+                #endif
                 config.snapPoints = [.middle]
             }
             if let v = readBool(layout["animation_enabled"]) { config.animationEnabled = v }
@@ -227,8 +237,10 @@ extension ScrollWMConfig {
                     if let v = readDouble(item), v > 0, v <= 1 {
                         presets.append(.proportion(v))
                     } else {
+                        #if DEBUG
                         print("[Config] Warning: skipping invalid width_preset value")
                         fflush(stdout)
+                        #endif
                     }
                 }
                 if !presets.isEmpty {
@@ -308,14 +320,18 @@ extension ScrollWMConfig {
 
         guard let url = Bundle.module.url(forResource: "config.default", withExtension: "toml"),
               let defaultConfig = try? String(contentsOf: url, encoding: .utf8) else {
+            #if DEBUG
             print("[Config] Error: could not load bundled config.default.toml")
             fflush(stdout)
+            #endif
             return
         }
 
         try? defaultConfig.write(toFile: configPath, atomically: true, encoding: .utf8)
+        #if DEBUG
         print("[Config] Created default config at \(configPath)")
         fflush(stdout)
+        #endif
     }
 }
 
@@ -338,8 +354,10 @@ public final class ConfigWatcher: @unchecked Sendable {
 
         fileDescriptor = open(path, O_EVTONLY)
         guard fileDescriptor >= 0 else {
+            #if DEBUG
             print("[Config] Cannot watch \(path) — file not found")
             fflush(stdout)
+            #endif
             return
         }
 
@@ -365,8 +383,10 @@ public final class ConfigWatcher: @unchecked Sendable {
 
         source.resume()
         self.source = source
+        #if DEBUG
         print("[Config] Watching \(path) for changes")
         fflush(stdout)
+        #endif
     }
 
     /// Stop watching.
@@ -378,12 +398,16 @@ public final class ConfigWatcher: @unchecked Sendable {
     private func reload() {
         let (config, error) = ScrollWMConfig.load()
         if let error = error {
+            #if DEBUG
             print("[Config] Reload error: \(error)")
             fflush(stdout)
+            #endif
             return
         }
+        #if DEBUG
         print("[Config] Reloaded successfully")
         fflush(stdout)
+        #endif
         onConfigChanged?(config)
     }
 }

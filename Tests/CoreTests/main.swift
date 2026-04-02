@@ -244,6 +244,69 @@ do {
     }
 }
 
+section("SpringParams precomputed regime — critical")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800)
+    let times: [Double] = [0, 0.01, 0.05, 0.1, 0.3, 0.5, 1.0, 2.0]
+    let expected: [(Double, Double)] = [
+        (100.0, -50.0),
+        (96.30312305093057, -629.934513694812),
+        (58.08577991500826, -967.4318253047313),
+        (22.332675603806926, -467.4424449835371),
+        (0.19275982986168097, -4.878366977817575),
+        (0.0010742503874700989, -0.02838015940249447),
+        (1.49779477471394e-09, -4.091827408768751e-08),
+        (1.5316838538913174e-21, -4.257025796237067e-20),
+    ]
+    for (i, t) in times.enumerated() {
+        let (d, v) = params.solve(x0: 100, v0: -50, t: t)
+        assertClose(d, expected[i].0, tolerance: 1e-10, "critical d at t=\(t)")
+        assertClose(v, expected[i].1, tolerance: 1e-10, "critical v at t=\(t)")
+    }
+}
+
+section("SpringParams precomputed regime — underdamped")
+do {
+    let params = SpringParams(dampingRatio: 0.5, stiffness: 800)
+    let times: [Double] = [0, 0.01, 0.05, 0.1, 0.3, 0.5, 1.0, 2.0]
+    let expected: [(Double, Double)] = [
+        (100.0, -50.0),
+        (95.94595202614556, -723.607700947456),
+        (42.55716290123872, -1509.8648634721399),
+        (-10.076984071510532, -492.8697772969101),
+        (1.396057248304523, -41.046085525326596),
+        (0.0658184980668828, 0.8217202990376328),
+        (3.402950711879452e-05, 0.0013614986174029186),
+        (-1.259344258226379e-11, 1.6040561037902914e-09),
+    ]
+    for (i, t) in times.enumerated() {
+        let (d, v) = params.solve(x0: 100, v0: -50, t: t)
+        assertClose(d, expected[i].0, tolerance: 1e-10, "underdamped d at t=\(t)")
+        assertClose(v, expected[i].1, tolerance: 1e-10, "underdamped v at t=\(t)")
+    }
+}
+
+section("SpringParams precomputed regime — overdamped")
+do {
+    let params = SpringParams(dampingRatio: 2.0, stiffness: 800)
+    let times: [Double] = [0, 0.01, 0.05, 0.1, 0.3, 0.5, 1.0, 2.0]
+    let expected: [(Double, Double)] = [
+        (100.0, -50.0),
+        (96.88460288658496, -487.9310691313741),
+        (73.36793751840405, -552.424762910267),
+        (50.25189607665591, -380.82800490771234),
+        (11.037543369066283, -83.6507557515311),
+        (2.424324593174694, -18.373344287323253),
+        (0.05481338558734754, -0.4154168166199714),
+        (2.802065919177662e-05, -0.00021236150470019258),
+    ]
+    for (i, t) in times.enumerated() {
+        let (d, v) = params.solve(x0: 100, v0: -50, t: t)
+        assertClose(d, expected[i].0, tolerance: 1e-10, "overdamped d at t=\(t)")
+        assertClose(v, expected[i].1, tolerance: 1e-10, "overdamped v at t=\(t)")
+    }
+}
+
 section("Spring animation retarget")
 do {
     let anim = SpringAnimation(from: 0, to: 500, initialVelocity: 0, startTime: 0, params: .horizontalScroll)
@@ -808,28 +871,127 @@ do {
     assertClose(resolved[3], 1440, tolerance: 0.01, "1.0 preset")
 }
 
-section("hasActiveWidthAnimations / settleWidthAnimations")
+section("settleWidthAnimations — merged settle + active check")
 do {
     var strip = makeStrip(columnCount: 2)
     let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
 
-    // No animations initially
-    check(!strip.hasActiveWidthAnimations(at: 0), "no animations initially")
+    // No animations initially — returns false (no active remain)
+    check(!strip.settleWidthAnimations(at: 0), "no animations initially")
 
     // Add a width animation to column 0
     strip.columnData[0].widthAnimation = SpringAnimation(from: 360, to: 720, startTime: 0, params: params)
-    check(strip.hasActiveWidthAnimations(at: 0), "active at t=0")
-
-    // settleWidthAnimations at t=0 — animation still in-flight, should NOT nil it
-    strip.settleWidthAnimations(at: 0)
+    check(strip.settleWidthAnimations(at: 0), "active at t=0")
     check(strip.columnData[0].widthAnimation != nil, "not settled at t=0")
 
-    // At t=2.0, animation should be done
-    check(!strip.hasActiveWidthAnimations(at: 2.0), "settled at t=2.0")
-
-    // settleWidthAnimations at t=2.0 — should nil it out
-    strip.settleWidthAnimations(at: 2.0)
+    // At t=2.0, animation should be done — settleWidthAnimations nils it and returns false
+    check(!strip.settleWidthAnimations(at: 2.0), "settled at t=2.0")
     check(strip.columnData[0].widthAnimation == nil, "nilled after settle")
+}
+
+section("evaluateWithStatus matches isDone + evaluate")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    let anim = SpringAnimation(from: 0, to: 500, initialVelocity: 0, startTime: 0, params: params)
+
+    // Mid-flight: not done
+    let (val1, done1) = anim.evaluateWithStatus(at: 0.05)
+    let (evalVal1, _) = anim.evaluate(at: 0.05)
+    let isDone1 = anim.isDone(at: 0.05)
+    assertClose(val1, evalVal1, tolerance: 1e-10, "value should match evaluate")
+    assertEq(done1, isDone1, "isDone should match")
+    check(!done1, "should not be done at t=0.05")
+
+    // Well past convergence: done
+    let (val2, done2) = anim.evaluateWithStatus(at: 5.0)
+    let isDone2 = anim.isDone(at: 5.0)
+    check(done2, "should be done at t=5.0")
+    assertEq(done2, isDone2, "isDone should match at convergence")
+    _ = val2 // suppress unused warning
+}
+
+section("evaluateWithStatus epsilon boundary")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    let anim = SpringAnimation(from: 0, to: 100, initialVelocity: 0, startTime: 0, params: params)
+
+    // Binary search for the convergence time
+    var lo = 0.0, hi = 2.0
+    for _ in 0..<100 {
+        let mid = (lo + hi) / 2.0
+        if anim.isDone(at: mid) { hi = mid } else { lo = mid }
+    }
+    // lo is just before done, hi is just after done
+    let (_, doneBefore) = anim.evaluateWithStatus(at: lo)
+    let (_, doneAfter) = anim.evaluateWithStatus(at: hi)
+    check(!doneBefore, "should not be done just before epsilon boundary")
+    check(doneAfter, "should be done just after epsilon boundary")
+    assertEq(doneBefore, anim.isDone(at: lo), "boundary before")
+    assertEq(doneAfter, anim.isDone(at: hi), "boundary after")
+}
+
+section("ColumnData.currentWidth with active widthAnimation")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    let anim = SpringAnimation(from: 300, to: 600, startTime: 0, params: params)
+    let data = ColumnData(cachedWidth: 600, widthAnimation: anim)
+
+    // Mid-animation: should return animated value, not cachedWidth
+    let width = data.currentWidth(at: 0.05)
+    check(width > 300 && width < 600, "should be between from and to, got \(width)")
+    check(width != 600, "should not return cachedWidth during animation")
+
+    // After convergence: should return cachedWidth
+    let widthLate = data.currentWidth(at: 5.0)
+    assertClose(widthLate, 600, tolerance: 0.5, "should return cachedWidth when done")
+}
+
+// ═══════════════════════════════════════
+// settleWidthAnimations returns Bool
+// ═══════════════════════════════════════
+print()
+print("═ settleWidthAnimations returns Bool")
+
+section("settleWidthAnimations returns false when all settled")
+do {
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    var strip = Strip(
+        columns: [Column(tiles: [TileID(1)]), Column(tiles: [TileID(2)])],
+        columnData: [ColumnData(cachedWidth: 500), ColumnData(cachedWidth: 500)],
+        activeColumnIndex: 0,
+        viewOffset: .static(0),
+        snapIndices: [0, 1],
+        gap: 16,
+        workingArea: wa
+    )
+    let hasActive = strip.settleWidthAnimations(at: 0)
+    check(!hasActive, "no animations means no active remain")
+}
+
+section("settleWidthAnimations mixed case — settle done, keep active")
+do {
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    let doneAnim = SpringAnimation(from: 300, to: 500, startTime: 0, params: params)
+    let activeAnim = SpringAnimation(from: 300, to: 500, startTime: 4.9, params: params)
+
+    var strip = Strip(
+        columns: [Column(tiles: [TileID(1)]), Column(tiles: [TileID(2)])],
+        columnData: [
+            ColumnData(cachedWidth: 500, widthAnimation: doneAnim),
+            ColumnData(cachedWidth: 500, widthAnimation: activeAnim)
+        ],
+        activeColumnIndex: 0,
+        viewOffset: .static(0),
+        snapIndices: [0, 1],
+        gap: 16,
+        workingArea: wa
+    )
+
+    let hasActive = strip.settleWidthAnimations(at: 5.0)
+    check(hasActive, "should return true — second animation still active")
+    check(strip.columnData[0].widthAnimation == nil, "done animation should be niled")
+    check(strip.columnData[1].widthAnimation != nil, "active animation should remain")
 }
 
 // ============================================================

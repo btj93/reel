@@ -49,8 +49,8 @@ public struct ColumnData: Sendable {
     /// Current effective width at a given time (reads animation if active).
     public func currentWidth(at time: Double) -> Double {
         if let anim = widthAnimation {
-            if anim.isDone(at: time) { return cachedWidth }
-            return anim.evaluate(at: time).value
+            let (value, done) = anim.evaluateWithStatus(at: time)
+            return done ? cachedWidth : value
         }
         return cachedWidth
     }
