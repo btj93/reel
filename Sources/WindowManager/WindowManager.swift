@@ -120,6 +120,18 @@ public final class WindowManager: @unchecked Sendable {
             sc.widthSpringParams = config.widthSpringParams
             sc.focusIndicator.reloadConfig(config.focusIndicator)
             sc.focusIndicator.springParams = config.widthSpringParams
+            // Zen mode
+            let oldZenEnabled = sc.zenDimmer.enabled
+            sc.zenDimmer.reloadConfig(config.zenMode)
+            // If zen mode was just enabled, apply dimming to already-unfocused windows
+            if !oldZenEnabled && config.zenMode.enabled {
+                if let activeTile = sc.strip.activeColumn?.activeTile {
+                    let allTileIDs = sc.strip.columns.compactMap(\.activeTile)
+                    if sc.zenDimmer.setFocusedWindow(activeTile, allTileIDs: allTileIDs, at: TimeUtil.now()) {
+                        sc.frameLoop?.resume()
+                    }
+                }
+            }
         }
 
         // Window rules
@@ -396,6 +408,11 @@ public final class WindowManager: @unchecked Sendable {
 
         // Restore all windows to reasonable on-screen positions
         restoreAllWindows()
+
+        // Restore zen mode alpha for all windows
+        for (_, sc) in stripControllers {
+            sc.zenDimmer.restoreAll()
+        }
 
         // Persist final state
         persistState()
