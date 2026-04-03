@@ -909,22 +909,28 @@ public final class WindowManager: @unchecked Sendable {
         case .toggleFullWidth:
             stripController.toggleFullWidth()
         case .toggleFloating:
-            // Check if the macOS-focused window is already floating → unfloat it
             if let focusedWID = getFocusedWindowID(),
                tracker.floatingWindows.contains(focusedWID),
                let window = tracker.windows[focusedWID],
                let app = tracker.apps[window.pid]
             {
                 tracker.unmarkFloating(focusedWID)
-                let (_, targetSC) = stripControllerEntryForWindow(window)
-                targetSC.unfloatWindow(window, app: app)
+                userToggledFloats.remove(focusedWID)
+                // Restore to 1.0 before unfloating — prevents visual jump
+                // when ZenDimmer assumes currentAlpha is 1.0
+                restoreFloatingOpacity(windowID: focusedWID)
+                stripController.unfloatWindow(window, app: app)
+                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
+                    stripController.zenDimmer.setRuleOpacity(for: focusedWID, opacity: ruleAlpha)
+                }
                 #if DEBUG
                     print("[WM] Window \(focusedWID) is now tiled (unfloated)")
                     fflush(stdout)
                 #endif
             } else if let window = stripController.toggleFloating() {
-                // Window is now floating — register with tracker so it won't be re-adopted
                 tracker.markFloating(window.windowID)
+                userToggledFloats.insert(window.windowID)
+                applyFloatingOpacity(windowID: window.windowID, window: window)
                 #if DEBUG
                     print("[WM] Window \(window.tileID.rawValue) is now floating")
                     fflush(stdout)
@@ -1192,10 +1198,16 @@ public final class WindowManager: @unchecked Sendable {
                let app = tracker.apps[window.pid]
             {
                 tracker.unmarkFloating(focusedWID)
-                let (_, targetSC) = stripControllerEntryForWindow(window)
-                targetSC.unfloatWindow(window, app: app)
+                userToggledFloats.remove(focusedWID)
+                restoreFloatingOpacity(windowID: focusedWID)
+                stripController.unfloatWindow(window, app: app)
+                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
+                    stripController.zenDimmer.setRuleOpacity(for: focusedWID, opacity: ruleAlpha)
+                }
             } else if let window = stripController.toggleFloating() {
                 tracker.markFloating(window.windowID)
+                userToggledFloats.insert(window.windowID)
+                applyFloatingOpacity(windowID: window.windowID, window: window)
             }
             return ScrollWMResponse(success: true)
         case .closeWindow:
