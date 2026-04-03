@@ -64,19 +64,12 @@ public final class ZenDimmer: @unchecked Sendable {
     }
 
     /// Remove a rule opacity override and restore the window to 1.0.
+    /// No-op if the window has no rule opacity.
     public func clearRuleOpacity(for wid: CGWindowID) {
-        ruleOpacities.removeValue(forKey: wid)
+        guard ruleOpacities.removeValue(forKey: wid) != nil else { return }
         currentAlphas[wid] = 1.0
         let cid = CGSDefaultConnectionForThread()
         CGSSetWindowAlpha(cid, wid, 1.0)
-    }
-
-    /// Reapply all rule opacities via CGS. Used after space switches.
-    public func reapplyRuleOpacities() {
-        let cid = CGSDefaultConnectionForThread()
-        for (wid, alpha) in ruleOpacities {
-            CGSSetWindowAlpha(cid, wid, Float(alpha))
-        }
     }
 
     // MARK: - Config

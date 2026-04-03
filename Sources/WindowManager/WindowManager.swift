@@ -934,6 +934,13 @@ public final class WindowManager: @unchecked Sendable {
         }
         stripController.finishBatch()
 
+        // Apply rule opacities for tiled windows on new space
+        for (_, window) in stripController.windowMap {
+            if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
+                stripController.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
+            }
+        }
+
         // Reapply floating window opacities — macOS may reset compositing alpha on space switch
         for (wid, alpha) in floatingWindowOpacities {
             ZenDimmer.setWindowAlpha(wid, Float(alpha))
