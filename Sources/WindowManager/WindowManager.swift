@@ -63,6 +63,14 @@ public final class WindowManager: @unchecked Sendable {
     /// Windows that were user-toggled to always-on-top (via hotkey/IPC).
     private var userToggledPinned: Set<CGWindowID> = []
 
+    /// Recently adopted windows — grace period prevents immediate removal on next health check.
+    /// Fixes thrashing when tab-based apps (e.g. Fork) rapidly swap windows during tab switch.
+    private var recentlyAdoptedWindows: [CGWindowID: Date] = [:]
+
+    /// Position of most recently removed window per PID, for same-PID tab-switch detection.
+    /// When a new window from the same PID appears shortly after, it inherits this position
+    /// instead of looking up its own (potentially different) saved position.
+    private var recentRemovalsByPID: [pid_t: (position: SavedPosition, date: Date)] = [:]
 
     public init() {
         // Load config first
@@ -1200,6 +1208,12 @@ public final class WindowManager: @unchecked Sendable {
     private func checkWindowHealth() {
         guard !isPaused else { return }
 
+        let now = Date()
+
+        // Expire stale tracking entries (> 2s old)
+        recentlyAdoptedWindows = recentlyAdoptedWindows.filter { now.timeIntervalSince($0.value) < 2.0 }
+        recentRemovalsByPID = recentRemovalsByPID.filter { now.timeIntervalSince($0.value.date) < 2.0 }
+
         // Get all currently on-screen window IDs from the window server
         let onScreenWindows = getAllWindowInfo()
         let onScreenIDs = Set(onScreenWindows.map(\.windowID))
@@ -1209,6 +1223,45 @@ public final class WindowManager: @unchecked Sendable {
         for (tileID, window) in stripController.windowMap {
             // Method 1: Check if the window is still in CGWindowList
             if !onScreenIDs.contains(window.windowID) {
+                // Fix B: Skip recently adopted windows — gives tab-based apps time
+                // to stabilize after a tab switch before we declare the window dead.
+                if let adoptedAt = recentlyAdoptedWindows[window.windowID],
+                   now.timeIntervalSince(adoptedAt) < 2.0 {
+                    #if DEBUG
+                        print("[HealthCheck] Skipping recently adopted window wid=\(window.windowID)")
+                        fflush(stdout)
+                    #endif
+                    continue
+                }
+
+                // Fix D: Capture position before removal for same-PID tab-switch detection.
+                // If another window from this PID appears soon, it inherits this column.
+                if let colIndex = stripController.strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
+                    let col = stripController.strip.columns[colIndex]
+                    let colData = stripController.strip.columnData[colIndex]
+                    let width: ColumnWidth = col.width == .auto ? .fixed(colData.cachedWidth) : col.width
+
+                    let neighborBefore: String? = if colIndex > 0,
+                        let tile = stripController.strip.columns[colIndex - 1].activeTile,
+                        let win = stripController.windowMap[tile],
+                        let app = tracker.apps[win.pid] { app.bundleIdentifier } else { nil }
+                    let neighborAfter: String? = if colIndex < stripController.strip.columns.count - 1,
+                        let tile = stripController.strip.columns[colIndex + 1].activeTile,
+                        let win = stripController.windowMap[tile],
+                        let app = tracker.apps[win.pid] { app.bundleIdentifier } else { nil }
+
+                    recentRemovalsByPID[window.pid] = (
+                        position: SavedPosition(
+                            columnIndex: colIndex,
+                            neighborBefore: neighborBefore,
+                            neighborAfter: neighborAfter,
+                            width: width,
+                            presetIndex: col.presetIndex,
+                            isFullWidth: col.isFullWidth,
+                            lastSeen: now),
+                        date: now)
+                }
+
                 #if DEBUG
                     print("[HealthCheck] Removing dead window wid=\(window.windowID) tileID=\(tileID.rawValue)")
                     fflush(stdout)
@@ -1217,6 +1270,7 @@ public final class WindowManager: @unchecked Sendable {
                 tracker.untrackWindow(window.windowID)
                 pinnedWindows.remove(window.windowID)
                 userToggledPinned.remove(window.windowID)
+                recentlyAdoptedWindows.removeValue(forKey: window.windowID)
                 changed = true
                 continue
             }
@@ -1281,8 +1335,27 @@ public final class WindowManager: @unchecked Sendable {
                     app.observeWindow(window.element)
                 }
                 let (displayID, targetSC) = stripControllerEntryForWindow(window)
-                let saved = lookupSavedPosition(for: window, on: targetSC, displayID: displayID)
+
+                // Fix D: If a window from this PID was recently removed (tab switch),
+                // inherit its position instead of looking up this window's own saved position.
+                let saved: SavedPosition?
+                if let recent = recentRemovalsByPID[pid],
+                   Date().timeIntervalSince(recent.date) < 2.0 {
+                    saved = recent.position
+                    recentRemovalsByPID.removeValue(forKey: pid)
+                    #if DEBUG
+                        print("[HealthCheck] Using same-PID position for wid=\(window.windowID) pid=\(pid) col=\(recent.position.columnIndex)")
+                        fflush(stdout)
+                    #endif
+                } else {
+                    saved = lookupSavedPosition(for: window, on: targetSC, displayID: displayID)
+                }
+
                 targetSC.addWindow(window, app: app, restoredPosition: saved)
+
+                // Fix B: Track adoption time for grace period
+                recentlyAdoptedWindows[window.windowID] = Date()
+
                 if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
                     targetSC.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
                 }
