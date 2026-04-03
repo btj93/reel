@@ -162,31 +162,32 @@ public class PositionMemory {
             }
         }
 
-        // Step 2: Match ignoring space (bundleID, title, displayID)
+        // Step 2: Match ignoring title (bundleID, displayID, spaceFingerprint) — lowest columnIndex
+        // Same display + same space is a stronger signal than same title + different space.
+        let step2Matches = semanticEntries.filter {
+            $0.key.bundleID == bundleID && $0.key.displayID == displayID
+                && $0.key.spaceFingerprint == spaceFingerprint
+        }
+        if let best = step2Matches.min(by: { $0.value.columnIndex < $1.value.columnIndex }) {
+            #if DEBUG
+                print("[PositionMemory] hit step=2 (ignore title) col=\(best.value.columnIndex)")
+                fflush(stdout)
+            #endif
+            return (best.key, best.value)
+        }
+
+        // Step 3: Match ignoring space (bundleID, title, displayID)
         if !isOrderBased, let title = windowTitle {
             if let match = semanticEntries.first(where: {
                 $0.key.bundleID == bundleID && $0.key.windowTitle == title
                     && $0.key.displayID == displayID
             }) {
                 #if DEBUG
-                    print("[PositionMemory] hit step=2 (ignore space) col=\(match.value.columnIndex)")
+                    print("[PositionMemory] hit step=3 (ignore space) col=\(match.value.columnIndex)")
                     fflush(stdout)
                 #endif
                 return (match.key, match.value)
             }
-        }
-
-        // Step 3: Match ignoring title (bundleID, displayID, spaceFingerprint) — lowest columnIndex
-        let step3Matches = semanticEntries.filter {
-            $0.key.bundleID == bundleID && $0.key.displayID == displayID
-                && $0.key.spaceFingerprint == spaceFingerprint
-        }
-        if let best = step3Matches.min(by: { $0.value.columnIndex < $1.value.columnIndex }) {
-            #if DEBUG
-                print("[PositionMemory] hit step=3 (ignore title) col=\(best.value.columnIndex)")
-                fflush(stdout)
-            #endif
-            return (best.key, best.value)
         }
 
         // Step 4: Match ignoring title and space (bundleID, displayID) — lowest columnIndex

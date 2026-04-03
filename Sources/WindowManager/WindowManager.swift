@@ -881,7 +881,20 @@ public final class WindowManager: @unchecked Sendable {
         case .toggleFullWidth:
             stripController.toggleFullWidth()
         case .toggleFloating:
-            if let window = stripController.toggleFloating() {
+            // Check if the macOS-focused window is already floating → unfloat it
+            if let focusedWID = getFocusedWindowID(),
+               tracker.floatingWindows.contains(focusedWID),
+               let window = tracker.windows[focusedWID],
+               let app = tracker.apps[window.pid]
+            {
+                tracker.unmarkFloating(focusedWID)
+                let (_, targetSC) = stripControllerEntryForWindow(window)
+                targetSC.unfloatWindow(window, app: app)
+                #if DEBUG
+                    print("[WM] Window \(focusedWID) is now tiled (unfloated)")
+                    fflush(stdout)
+                #endif
+            } else if let window = stripController.toggleFloating() {
                 // Window is now floating — register with tracker so it won't be re-adopted
                 tracker.markFloating(window.windowID)
                 #if DEBUG
@@ -894,6 +907,21 @@ public final class WindowManager: @unchecked Sendable {
         case .workspace:
             break  // TODO: Phase 3
         }
+    }
+
+    // MARK: - Focused Window Query
+
+    /// Get the CGWindowID of the macOS-focused window via Accessibility API.
+    private func getFocusedWindowID() -> CGWindowID? {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+        var value: AnyObject?
+        let err = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value)
+        guard err == .success, let value else { return nil }
+        // value is AnyObject; AXUIElement is a CFTypeRef alias that always succeeds as? cast,
+        // so we rely on the err == .success check above for validity.
+        let element = value as! AXUIElement
+        return windowID(for: element)
     }
 
     // MARK: - Window Health Check
@@ -1096,7 +1124,15 @@ public final class WindowManager: @unchecked Sendable {
             stripController.toggleFullWidth()
             return ScrollWMResponse(success: true)
         case .toggleFloating:
-            if let window = stripController.toggleFloating() {
+            if let focusedWID = getFocusedWindowID(),
+               tracker.floatingWindows.contains(focusedWID),
+               let window = tracker.windows[focusedWID],
+               let app = tracker.apps[window.pid]
+            {
+                tracker.unmarkFloating(focusedWID)
+                let (_, targetSC) = stripControllerEntryForWindow(window)
+                targetSC.unfloatWindow(window, app: app)
+            } else if let window = stripController.toggleFloating() {
                 tracker.markFloating(window.windowID)
             }
             return ScrollWMResponse(success: true)
