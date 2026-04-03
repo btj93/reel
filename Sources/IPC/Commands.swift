@@ -14,6 +14,7 @@ public enum ScrollWMCommand: String, Codable, CaseIterable, Sendable {
     case getLayout = "get-layout"
     case listPositions = "list-positions"
     case clearPositions = "clear-positions"
+    case toggleAlwaysOnTop = "toggle-always-on-top"
     case recover = "recover"
     case quit = "quit"
 }

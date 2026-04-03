@@ -38,6 +38,7 @@ public struct ScrollWMConfig: Sendable {
         "toggle_full_width": "alt-f",
         "toggle_floating": "alt-space",
         "close_window": "alt-w",
+        "toggle_always_on_top": "alt-t",
     ]
 
     // MARK: - Gesture
@@ -91,13 +92,15 @@ public struct WindowRuleConfig: Sendable {
     public var titleRegex: String?
     public var floating: Bool = false
     public var opacity: Double? = nil
+    public var alwaysOnTop: Bool? = nil
 
-    public init(appID: String? = nil, appIDRegex: String? = nil, titleRegex: String? = nil, floating: Bool = false, opacity: Double? = nil) {
+    public init(appID: String? = nil, appIDRegex: String? = nil, titleRegex: String? = nil, floating: Bool = false, opacity: Double? = nil, alwaysOnTop: Bool? = nil) {
         self.appID = appID
         self.appIDRegex = appIDRegex
         self.titleRegex = titleRegex
         self.floating = floating
         self.opacity = opacity
+        self.alwaysOnTop = alwaysOnTop
     }
 }
 
@@ -321,6 +324,7 @@ extension ScrollWMConfig {
                     rc.titleRegex = readString(rule["title_regex"])
                     if let v = readBool(rule["floating"]) { rc.floating = v }
                     if let v = readDouble(rule["opacity"]) { rc.opacity = max(0.0, min(1.0, v)) }
+                    if let v = readBool(rule["always_on_top"]) { rc.alwaysOnTop = v }
                     config.rules.append(rc)
                 }
             }

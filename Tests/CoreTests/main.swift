@@ -1108,6 +1108,28 @@ do {
     assertClose(rule.opacity!, 0.7, tolerance: 0.001, "opacity preserved")
 }
 
+// ═══════════════════════════════════════
+print()
+print("▶ Always On Top Config Parsing")
+
+section("default rule alwaysOnTop is nil")
+do {
+    let rule = WindowRuleConfig()
+    check(rule.alwaysOnTop == nil, "default alwaysOnTop should be nil")
+}
+
+section("WindowRule carries alwaysOnTop")
+do {
+    let rule = WindowRule(appID: "com.test", classification: .tile, alwaysOnTop: true)
+    check(rule.alwaysOnTop == true, "alwaysOnTop preserved")
+}
+
+section("WindowRule alwaysOnTop nil by default")
+do {
+    let rule = WindowRule(appID: "com.test", classification: .tile)
+    check(rule.alwaysOnTop == nil, "alwaysOnTop nil by default")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

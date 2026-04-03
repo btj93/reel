@@ -15,6 +15,10 @@ private func CGSDefaultConnectionForThread() -> CGSConnectionID
 @discardableResult
 private func CGSSetWindowAlpha(_ cid: CGSConnectionID, _ wid: CGWindowID, _ alpha: Float) -> CGError
 
+@_silgen_name("CGSSetWindowLevel")
+@discardableResult
+private func CGSSetWindowLevel(_ cid: CGSConnectionID, _ wid: CGWindowID, _ level: Int32) -> CGError
+
 // MARK: - ZenDimmer
 
 /// Dims unfocused tiled windows using CGSSetWindowAlpha.
@@ -51,6 +55,12 @@ public final class ZenDimmer: @unchecked Sendable {
     public static func setWindowAlpha(_ wid: CGWindowID, _ alpha: Float) {
         let cid = CGSDefaultConnectionForThread()
         CGSSetWindowAlpha(cid, wid, alpha)
+    }
+
+    /// Set a window's compositing level directly. Main-thread only.
+    public static func setWindowLevel(_ wid: CGWindowID, _ level: Int32) {
+        let cid = CGSDefaultConnectionForThread()
+        CGSSetWindowLevel(cid, wid, level)
     }
 
     /// Register a rule-based opacity for a window. Immediately applies via CGS.

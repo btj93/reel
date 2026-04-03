@@ -12,6 +12,7 @@ public enum HotkeyAction: Sendable {
     case toggleFullWidth
     case toggleFloating
     case closeWindow
+    case toggleAlwaysOnTop
     case workspace(Int)
 }
 
@@ -61,6 +62,7 @@ public final class HotkeyManager: @unchecked Sendable {
             "toggle_full_width": .toggleFullWidth,
             "toggle_floating": .toggleFloating,
             "close_window": .closeWindow,
+            "toggle_always_on_top": .toggleAlwaysOnTop,
         ]
 
         for (actionName, keyString) in keybindingMap {

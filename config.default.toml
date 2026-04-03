@@ -41,6 +41,7 @@ cycle_width = "alt-r"
 toggle_full_width = "alt-f"
 toggle_floating = "alt-space"
 close_window = "alt-w"
+toggle_always_on_top = "alt-t"
 
 [gesture]
 modifier = "fn"  # Hold this key + trackpad scroll to pan the strip
@@ -71,6 +72,10 @@ snap = true  # Set to false to let gestures move freely without snapping to colu
 # [[rules]]
 # app_id = "com.example.app"
 # opacity = 0.9            # override zen mode and floating opacity for this app
+
+# [[rules]]
+# app_id = "com.apple.calculator"
+# always_on_top = true                # keep this app above all others
 
 # Per-app matching strategy for position memory
 # [[position_memory_rules]]

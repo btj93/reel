@@ -1003,6 +1003,8 @@ public final class WindowManager: @unchecked Sendable {
             }
         case .closeWindow:
             stripController.closeActiveWindow()
+        case .toggleAlwaysOnTop:
+            break  // TODO: implemented in Task 2
         case .workspace:
             break  // TODO: Phase 3
         }
@@ -1281,6 +1283,8 @@ public final class WindowManager: @unchecked Sendable {
         case .closeWindow:
             stripController.closeActiveWindow()
             return ScrollWMResponse(success: true)
+        case .toggleAlwaysOnTop:
+            return ScrollWMResponse(success: true)  // TODO: implemented in Task 2
         case .listWindows:
             let windows = stripController.windowMap.map { (tileID, window) -> [String: Any] in
                 ["id": tileID.rawValue, "pid": window.pid, "title": window.getTitle() ?? ""]
