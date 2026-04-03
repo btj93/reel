@@ -933,10 +933,13 @@ public final class WindowManager: @unchecked Sendable {
                 #endif
             }
 
-            // Re-apply rule opacities for all tiled windows on restored space
+            // Re-apply rule opacities and always-on-top for all tiled windows on restored space
             for (_, window) in stripController.windowMap {
                 if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
                     stripController.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
+                }
+                if resolveAlwaysOnTop(for: window) == true {
+                    applyPinState(windowID: window.windowID, pinned: true)
                 }
             }
 
@@ -1408,7 +1411,8 @@ public final class WindowManager: @unchecked Sendable {
             guard let focusedWID = getFocusedWindowID() else {
                 return ScrollWMResponse(success: false, message: "No focused window")
             }
-            if pinnedWindows.contains(focusedWID) {
+            let wasPinned = pinnedWindows.contains(focusedWID)
+            if wasPinned {
                 applyPinState(windowID: focusedWID, pinned: false)
                 userToggledPinned.remove(focusedWID)
             } else {
@@ -1416,7 +1420,7 @@ public final class WindowManager: @unchecked Sendable {
                 userToggledPinned.insert(focusedWID)
             }
             return ScrollWMResponse(success: true,
-                message: pinnedWindows.contains(focusedWID) ? "Pinned" : "Unpinned")
+                message: wasPinned ? "Unpinned" : "Pinned")
         case .listWindows:
             let windows = stripController.windowMap.map { (tileID, window) -> [String: Any] in
                 ["id": tileID.rawValue, "pid": window.pid, "title": window.getTitle() ?? ""]
