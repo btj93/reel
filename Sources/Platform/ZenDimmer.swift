@@ -39,10 +39,44 @@ public final class ZenDimmer: @unchecked Sendable {
     /// The currently focused window's CGWindowID.
     private var focusedWindowID: CGWindowID?
 
+    /// Per-window rule-based opacity overrides. These take priority over zen dimming.
+    private var ruleOpacities: [CGWindowID: Double] = [:]
+
     /// True when any fade animation is in flight. Used by StripController.isFullySettled.
     public var isAnimating: Bool { !fadeAnimations.isEmpty }
 
     public init() {}
+
+    /// Set a window's compositing alpha directly. Main-thread only.
+    public static func setWindowAlpha(_ wid: CGWindowID, _ alpha: Float) {
+        let cid = CGSDefaultConnectionForThread()
+        CGSSetWindowAlpha(cid, wid, alpha)
+    }
+
+    /// Register a rule-based opacity for a window. Immediately applies via CGS.
+    /// Invariant: callers MUST NOT pass opacity >= 1.0 — use clearRuleOpacity instead.
+    public func setRuleOpacity(for wid: CGWindowID, opacity: Double) {
+        ruleOpacities[wid] = opacity
+        fadeAnimations.removeValue(forKey: wid)
+        currentAlphas[wid] = opacity
+        let cid = CGSDefaultConnectionForThread()
+        CGSSetWindowAlpha(cid, wid, Float(opacity))
+    }
+
+    /// Remove a rule opacity override and restore the window to 1.0.
+    public func clearRuleOpacity(for wid: CGWindowID) {
+        ruleOpacities.removeValue(forKey: wid)
+        let cid = CGSDefaultConnectionForThread()
+        CGSSetWindowAlpha(cid, wid, 1.0)
+    }
+
+    /// Reapply all rule opacities via CGS. Used after space switches.
+    public func reapplyRuleOpacities() {
+        let cid = CGSDefaultConnectionForThread()
+        for (wid, alpha) in ruleOpacities {
+            CGSSetWindowAlpha(cid, wid, Float(alpha))
+        }
+    }
 
     // MARK: - Config
 
@@ -55,7 +89,7 @@ public final class ZenDimmer: @unchecked Sendable {
         fadeDuration = config.fadeDuration
 
         if wasEnabled && !enabled {
-            restoreAll()
+            restoreAll(preserveRuleOpacities: true)
         }
     }
 
@@ -79,6 +113,7 @@ public final class ZenDimmer: @unchecked Sendable {
 
         for tileID in allTileIDs {
             let wid = tileID.rawValue
+            if ruleOpacities[wid] != nil { continue }
             let targetAlpha = (wid == newFocusedWID) ? 1.0 : dimAlpha
             let currentAlpha = currentAlphaFor(wid, at: time)
 
@@ -125,14 +160,34 @@ public final class ZenDimmer: @unchecked Sendable {
 
     // MARK: - Restore
 
-    /// Restore all tracked windows to full alpha. Clears all state.
-    public func restoreAll() {
+    /// Restore all tracked windows. Clears all state.
+    /// When preserveRuleOpacities is true (zen-disable), rule-opacity windows keep their rule value.
+    /// When false (shutdown/rebuild), everything goes to 1.0.
+    public func restoreAll(preserveRuleOpacities: Bool = false) {
         let cid = CGSDefaultConnectionForThread()
+        // Pass 1: restore windows in currentAlphas
         for wid in currentAlphas.keys {
-            CGSSetWindowAlpha(cid, wid, 1.0)
+            let restoreAlpha: Float
+            if preserveRuleOpacities, let ruleAlpha = ruleOpacities[wid] {
+                restoreAlpha = Float(ruleAlpha)
+            } else {
+                restoreAlpha = 1.0
+            }
+            CGSSetWindowAlpha(cid, wid, restoreAlpha)
+        }
+        // Pass 2: ensure rule-opacity windows get their value applied even if not in currentAlphas
+        if preserveRuleOpacities {
+            for (wid, ruleAlpha) in ruleOpacities where currentAlphas[wid] == nil {
+                CGSSetWindowAlpha(cid, wid, Float(ruleAlpha))
+            }
         }
         fadeAnimations.removeAll()
-        currentAlphas.removeAll()
+        if preserveRuleOpacities {
+            currentAlphas = ruleOpacities
+        } else {
+            currentAlphas.removeAll()
+            ruleOpacities.removeAll()
+        }
         focusedWindowID = nil
     }
 
@@ -150,6 +205,7 @@ public final class ZenDimmer: @unchecked Sendable {
         // Best-effort — compositing layer may already be torn down
         let cid = CGSDefaultConnectionForThread()
         CGSSetWindowAlpha(cid, wid, 1.0)
+        ruleOpacities.removeValue(forKey: wid)
     }
 
     // MARK: - Private
