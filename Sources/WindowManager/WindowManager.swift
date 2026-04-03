@@ -51,6 +51,12 @@ public final class WindowManager: @unchecked Sendable {
     /// Pending external focus scroll — debounced to avoid visual flash during space transitions.
     private var pendingFocusScroll: DispatchWorkItem?
 
+    /// Opacity applied to floating windows, keyed by CGWindowID.
+    private var floatingWindowOpacities: [CGWindowID: Double] = [:]
+
+    /// Windows that were user-toggled to floating (via alt-space / toggle-floating).
+    private var userToggledFloats: Set<CGWindowID> = []
+
 
     public init() {
         // Load config first
@@ -611,22 +617,40 @@ public final class WindowManager: @unchecked Sendable {
 
         switch event {
         case .windowAdded(let window, let classification):
-            guard classification == .tile else { return }
-            if let app = tracker.apps[window.pid] {
-                let (displayID, sc) = stripControllerEntryForWindow(window)
-                let saved = lookupSavedPosition(for: window, on: sc, displayID: displayID)
-                #if DEBUG
-                    print("[WM] windowAdded wid=\(window.windowID) pid=\(window.pid) restored=\(saved != nil)")
-                    fflush(stdout)
-                #endif
-                sc.addWindow(window, app: app, restoredPosition: saved)
+            switch classification {
+            case .tile:
+                if let app = tracker.apps[window.pid] {
+                    let (displayID, sc) = stripControllerEntryForWindow(window)
+                    let saved = lookupSavedPosition(for: window, on: sc, displayID: displayID)
+                    #if DEBUG
+                        print("[WM] windowAdded wid=\(window.windowID) pid=\(window.pid) restored=\(saved != nil)")
+                        fflush(stdout)
+                    #endif
+                    sc.addWindow(window, app: app, restoredPosition: saved)
+                    if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
+                        sc.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
+                    }
+                }
+            case .float:
+                // Apply rule opacity to auto-classified floating windows (NOT config.floatingOpacity,
+                // which is for user-toggled floats only). Track in floatingWindowOpacities for
+                // space-switch reapplication.
+                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
+                    floatingWindowOpacities[window.windowID] = ruleAlpha
+                    ZenDimmer.setWindowAlpha(window.windowID, Float(ruleAlpha))
+                }
+            case .ignore:
+                break
             }
 
-        case .windowRemoved(_, let tileID):
+        case .windowRemoved(let windowID, let tileID):
             #if DEBUG
                 print("[WM] windowRemoved tileID=\(tileID.rawValue)")
                 fflush(stdout)
             #endif
+            if floatingWindowOpacities.removeValue(forKey: windowID) != nil {
+                ZenDimmer.setWindowAlpha(windowID, 1.0)
+            }
             // Remove from whichever strip has it
             for (_, sc) in stripControllers {
                 if sc.windowMap[tileID] != nil {
@@ -721,6 +745,9 @@ public final class WindowManager: @unchecked Sendable {
                 let (displayID, sc) = stripControllerEntryForWindow(window)
                 let saved = lookupSavedPosition(for: window, on: sc, displayID: displayID)
                 sc.addWindow(window, app: app, restoredPosition: saved)
+                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
+                    sc.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
+                }
             }
 
         case .windowResized(let windowID):
@@ -923,6 +950,40 @@ public final class WindowManager: @unchecked Sendable {
         // so we rely on the err == .success check above for validity.
         let element = value as! AXUIElement
         return windowID(for: element)
+    }
+
+    /// Find the opacity rule that matches a window, if any.
+    private func resolveRuleOpacity(for window: AXWindow) -> Double? {
+        let bundleID = tracker.apps[window.pid]?.bundleIdentifier
+        let title = window.getTitle()
+        var props = WindowProperties()
+        props.bundleIdentifier = bundleID
+        props.title = title
+        return tracker.rules.first(where: {
+            $0.opacity != nil
+            && $0.matches(props)
+            && ($0.appIDRegex == nil || bundleID != nil)
+            && ($0.titleRegex == nil || title != nil)
+        })?.opacity
+    }
+
+    /// Apply opacity to a user-toggled floating window and track it.
+    private func applyFloatingOpacity(windowID: CGWindowID, window: AXWindow) {
+        let ruleOpacity = resolveRuleOpacity(for: window)
+        let alpha = ruleOpacity ?? config.floatingOpacity
+        if alpha < 1.0 {
+            floatingWindowOpacities[windowID] = alpha
+            ZenDimmer.setWindowAlpha(windowID, Float(alpha))
+        } else {
+            floatingWindowOpacities.removeValue(forKey: windowID)
+            ZenDimmer.setWindowAlpha(windowID, 1.0)
+        }
+    }
+
+    /// Restore a floating window to full opacity and remove from tracking.
+    private func restoreFloatingOpacity(windowID: CGWindowID) {
+        floatingWindowOpacities.removeValue(forKey: windowID)
+        ZenDimmer.setWindowAlpha(windowID, 1.0)
     }
 
     // MARK: - Window Health Check
