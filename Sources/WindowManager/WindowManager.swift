@@ -145,7 +145,8 @@ public final class WindowManager: @unchecked Sendable {
                 appID: rule.appID,
                 appIDRegex: rule.appIDRegex,
                 titleRegex: rule.titleRegex,
-                classification: rule.floating ? .float : .tile
+                classification: rule.floating ? .float : .tile,
+                opacity: rule.opacity
             )
         }
 
