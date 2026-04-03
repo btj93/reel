@@ -72,6 +72,10 @@ public final class WindowManager: @unchecked Sendable {
     /// instead of looking up its own (potentially different) saved position.
     private var recentRemovalsByPID: [pid_t: (position: SavedPosition, date: Date)] = [:]
 
+    /// On-screen window IDs at startup. Used to filter initial discovery so windows on
+    /// other Spaces aren't added to the current strip. Cleared after initial batch finishes.
+    private var startupOnScreenIDs: Set<UInt32>?
+
     public init() {
         // Load config first
         let (loadedConfig, configError) = ScrollWMConfig.load()
@@ -247,7 +251,10 @@ public final class WindowManager: @unchecked Sendable {
             positionMemory?.loadFromDisk()
         }
 
-        // Start subsystems — batch window discovery to avoid N layout passes
+        // Start subsystems — batch window discovery to avoid N layout passes.
+        // Store on-screen IDs so .windowAdded filters out windows on other Spaces
+        // (AX returns ALL windows of an app regardless of Space).
+        startupOnScreenIDs = initialFingerprint
         for (_, sc) in stripControllers { sc.beginBatch() }
         #if DEBUG
             print("[WM] tracking windows...")
@@ -259,6 +266,7 @@ public final class WindowManager: @unchecked Sendable {
             fflush(stdout)
         #endif
         for (_, sc) in stripControllers { sc.finishBatch() }
+        startupOnScreenIDs = nil
         #if DEBUG
             print("[WM] batch finished, strip has \(stripController.strip.columns.count) cols")
             fflush(stdout)
@@ -711,6 +719,16 @@ public final class WindowManager: @unchecked Sendable {
 
         switch event {
         case .windowAdded(let window, let classification):
+            // During startup, skip windows on other Spaces — AX returns all windows
+            // regardless of Space, but we should only manage the current one.
+            if let onScreen = startupOnScreenIDs, !onScreen.contains(window.windowID) {
+                #if DEBUG
+                    print("[WM] windowAdded SKIP (off-space) wid=\(window.windowID) pid=\(window.pid)")
+                    fflush(stdout)
+                #endif
+                break
+            }
+
             switch classification {
             case .tile:
                 if let app = tracker.apps[window.pid] {
