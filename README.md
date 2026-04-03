@@ -87,6 +87,7 @@ ScrollWM reads `~/.config/scrollwm/config.toml`, created on first launch with de
 gap = 16                           # Gap between columns in points
 snap = ["middle"]                  # Column snap positions: "left", "middle", "right"
 animation_enabled = true
+# floating_opacity = 1.0           # Opacity for user-toggled floating windows (0.0–1.0)
 # width_presets = [0.33, 0.5, 0.67]  # Proportions for cycle_width
 # default_width = { proportion = 0.5 }
 # position_memory = true
@@ -154,7 +155,7 @@ fade_duration = 0.15  # Fade animation duration in seconds
 
 ### Window Rules
 
-Float specific apps or match by regex:
+Float specific apps, match by regex, or set per-window opacity:
 
 ```toml
 [[rules]]
@@ -164,7 +165,13 @@ floating = true
 [[rules]]
 app_id_regex = "com\\.apple\\.systempreferences"
 floating = true
+
+[[rules]]
+app_id = "com.example.app"
+opacity = 0.9    # Override zen mode and floating opacity (0.0–1.0)
 ```
+
+Rule `opacity` takes priority over both zen mode dimming and `floating_opacity`. A window matching a rule with `opacity = 0.5` will always appear at 50% opacity regardless of focus state or floating status.
 
 ### Position Memory Rules
 

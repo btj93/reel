@@ -66,6 +66,7 @@ public final class ZenDimmer: @unchecked Sendable {
     /// Remove a rule opacity override and restore the window to 1.0.
     public func clearRuleOpacity(for wid: CGWindowID) {
         ruleOpacities.removeValue(forKey: wid)
+        currentAlphas[wid] = 1.0
         let cid = CGSDefaultConnectionForThread()
         CGSSetWindowAlpha(cid, wid, 1.0)
     }

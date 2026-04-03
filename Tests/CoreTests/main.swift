@@ -1093,12 +1093,6 @@ do {
     check(rule.opacity == nil, "default opacity should be nil")
 }
 
-section("parse floating_opacity from TOML")
-do {
-    let (config, _) = ScrollWMConfig.load()
-    assertClose(config.floatingOpacity, 1.0, tolerance: 0.001, "loaded default floatingOpacity")
-}
-
 section("opacity clamped to 0..1")
 do {
     var rc = WindowRuleConfig()

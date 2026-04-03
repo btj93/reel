@@ -691,6 +691,7 @@ public final class WindowManager: @unchecked Sendable {
             if floatingWindowOpacities.removeValue(forKey: windowID) != nil {
                 ZenDimmer.setWindowAlpha(windowID, 1.0)
             }
+            userToggledFloats.remove(windowID)
             // Remove from whichever strip has it
             for (_, sc) in stripControllers {
                 if sc.windowMap[tileID] != nil {
