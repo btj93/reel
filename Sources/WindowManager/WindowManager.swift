@@ -457,6 +457,12 @@ public final class WindowManager: @unchecked Sendable {
             sc.zenDimmer.restoreAll()
         }
 
+        // Restore floating window opacities
+        for (wid, _) in floatingWindowOpacities {
+            ZenDimmer.setWindowAlpha(wid, 1.0)
+        }
+        floatingWindowOpacities.removeAll()
+
         // Persist final state
         persistState()
         positionMemory?.persistToDisk()
@@ -512,6 +518,40 @@ public final class WindowManager: @unchecked Sendable {
 
         // Apply shared config fields (strip layout, hotkeys, rules, gesture modifier)
         applyConfig(newConfig)
+
+        // Re-evaluate rule opacities for all tiled windows
+        for (_, sc) in stripControllers {
+            for (_, window) in sc.windowMap {
+                let ruleAlpha = resolveRuleOpacity(for: window)
+                if let alpha = ruleAlpha, alpha < 1.0 {
+                    sc.zenDimmer.setRuleOpacity(for: window.windowID, opacity: alpha)
+                } else {
+                    sc.zenDimmer.clearRuleOpacity(for: window.windowID)
+                }
+            }
+        }
+
+        // Re-evaluate floating window opacities
+        var updatedFloatingOpacities: [CGWindowID: Double] = [:]
+        for wid in tracker.floatingWindows {
+            guard let window = tracker.windows[wid] else { continue }
+            let ruleAlpha = resolveRuleOpacity(for: window)
+            if let ruleAlpha, ruleAlpha < 1.0 {
+                updatedFloatingOpacities[wid] = ruleAlpha
+                ZenDimmer.setWindowAlpha(wid, Float(ruleAlpha))
+            } else if userToggledFloats.contains(wid) {
+                let alpha = config.floatingOpacity
+                if alpha < 1.0 {
+                    updatedFloatingOpacities[wid] = alpha
+                    ZenDimmer.setWindowAlpha(wid, Float(alpha))
+                } else {
+                    ZenDimmer.setWindowAlpha(wid, 1.0)
+                }
+            } else if floatingWindowOpacities[wid] != nil {
+                ZenDimmer.setWindowAlpha(wid, 1.0)
+            }
+        }
+        floatingWindowOpacities = updatedFloatingOpacities
 
         // Position memory (reload-specific: may create or update)
         if config.positionMemory {
@@ -834,6 +874,13 @@ public final class WindowManager: @unchecked Sendable {
                 #endif
             }
 
+            // Re-apply rule opacities for all tiled windows on restored space
+            for (_, window) in stripController.windowMap {
+                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
+                    stripController.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
+                }
+            }
+
             // Restore focus to the window the user had active before leaving.
             // Use TileID (not numeric index) so column insertions/removals don't
             // cause us to focus the wrong window.
@@ -853,6 +900,11 @@ public final class WindowManager: @unchecked Sendable {
             #if DEBUG
                 fflush(stdout)
             #endif
+
+            // Reapply floating window opacities — macOS may reset compositing alpha on space switch
+            for (wid, alpha) in floatingWindowOpacities {
+                ZenDimmer.setWindowAlpha(wid, Float(alpha))
+            }
             return
         }
 
@@ -880,6 +932,11 @@ public final class WindowManager: @unchecked Sendable {
             }
         }
         stripController.finishBatch()
+
+        // Reapply floating window opacities — macOS may reset compositing alpha on space switch
+        for (wid, alpha) in floatingWindowOpacities {
+            ZenDimmer.setWindowAlpha(wid, Float(alpha))
+        }
 
         #if DEBUG
             print(
@@ -1081,6 +1138,9 @@ public final class WindowManager: @unchecked Sendable {
                 let (displayID, targetSC) = stripControllerEntryForWindow(window)
                 let saved = lookupSavedPosition(for: window, on: targetSC, displayID: displayID)
                 targetSC.addWindow(window, app: app, restoredPosition: saved)
+                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
+                    targetSC.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
+                }
                 adopted = true
                 #if DEBUG
                     print(
