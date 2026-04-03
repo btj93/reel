@@ -14,6 +14,7 @@ public struct ScrollWMConfig: Sendable {
     public var struts: StrutsConfig = StrutsConfig()
     public var animationEnabled: Bool = true
     public var floatingOpacity: Double = 1.0
+    public var floatingAlwaysOnTop: Bool = false
 
     // MARK: - Animation
 
@@ -289,6 +290,7 @@ extension ScrollWMConfig {
             if let v = readBool(layout["position_memory"]) { config.positionMemory = v }
             if let v = readDouble(layout["saved_position_limit"]) { config.savedPositionLimit = Int(v) }
             if let v = readDouble(layout["floating_opacity"]) { config.floatingOpacity = max(0.0, min(1.0, v)) }
+            if let v = readBool(layout["floating_always_on_top"]) { config.floatingAlwaysOnTop = v }
         }
 
         // [animation]

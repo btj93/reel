@@ -585,6 +585,8 @@ public final class WindowManager: @unchecked Sendable {
             guard let window = tracker.windows[wid] else { continue }
             if resolveAlwaysOnTop(for: window) == true {
                 newPinned.insert(wid)
+            } else if userToggledFloats.contains(wid) && config.floatingAlwaysOnTop {
+                newPinned.insert(wid)
             }
         }
         // Restore level for dropped windows
@@ -1062,9 +1064,17 @@ public final class WindowManager: @unchecked Sendable {
                 // Restore to 1.0 before unfloating — prevents visual jump
                 // when ZenDimmer assumes currentAlpha is 1.0
                 restoreFloatingOpacity(windowID: focusedWID)
+                // Remove auto-pin from floating (keep if user explicitly toggled pin)
+                if pinnedWindows.contains(focusedWID) && !userToggledPinned.contains(focusedWID) {
+                    applyPinState(windowID: focusedWID, pinned: false)
+                }
                 stripController.unfloatWindow(window, app: app)
                 if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
                     stripController.zenDimmer.setRuleOpacity(for: focusedWID, opacity: ruleAlpha)
+                }
+                // Re-apply rule-based pin if matched (now as tiled window)
+                if resolveAlwaysOnTop(for: window) == true {
+                    applyPinState(windowID: focusedWID, pinned: true)
                 }
                 #if DEBUG
                     print("[WM] Window \(focusedWID) is now tiled (unfloated)")
@@ -1074,6 +1084,10 @@ public final class WindowManager: @unchecked Sendable {
                 tracker.markFloating(window.windowID)
                 userToggledFloats.insert(window.windowID)
                 applyFloatingOpacity(windowID: window.windowID, window: window)
+                // Auto-pin if floatingAlwaysOnTop or rule matches
+                if resolveAlwaysOnTop(for: window) == true || config.floatingAlwaysOnTop {
+                    applyPinState(windowID: window.windowID, pinned: true)
+                }
                 #if DEBUG
                     print("[WM] Window \(window.tileID.rawValue) is now floating")
                     fflush(stdout)
@@ -1394,14 +1408,23 @@ public final class WindowManager: @unchecked Sendable {
                 tracker.unmarkFloating(focusedWID)
                 userToggledFloats.remove(focusedWID)
                 restoreFloatingOpacity(windowID: focusedWID)
+                if pinnedWindows.contains(focusedWID) && !userToggledPinned.contains(focusedWID) {
+                    applyPinState(windowID: focusedWID, pinned: false)
+                }
                 stripController.unfloatWindow(window, app: app)
                 if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
                     stripController.zenDimmer.setRuleOpacity(for: focusedWID, opacity: ruleAlpha)
+                }
+                if resolveAlwaysOnTop(for: window) == true {
+                    applyPinState(windowID: focusedWID, pinned: true)
                 }
             } else if let window = stripController.toggleFloating() {
                 tracker.markFloating(window.windowID)
                 userToggledFloats.insert(window.windowID)
                 applyFloatingOpacity(windowID: window.windowID, window: window)
+                if resolveAlwaysOnTop(for: window) == true || config.floatingAlwaysOnTop {
+                    applyPinState(windowID: window.windowID, pinned: true)
+                }
             }
             return ScrollWMResponse(success: true)
         case .closeWindow:

@@ -81,7 +81,7 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 Location: `~/.config/scrollwm/config.toml` (created on first launch). Reload via menu bar "Reload Config" button.
 
-Key sections: `[layout]` (gap, focus_mode, struts, floating_opacity), `[animation]` (stiffness, damping), `[keybindings]` (action = "modifier-key"), `[[rules]]` (app_id/floating/opacity/always_on_top), `[terminal]` (app path).
+Key sections: `[layout]` (gap, focus_mode, struts, floating_opacity, floating_always_on_top), `[animation]` (stiffness, damping), `[keybindings]` (action = "modifier-key"), `[[rules]]` (app_id/floating/opacity/always_on_top), `[terminal]` (app path).
 
 **Window opacity**: Per-window opacity via `[[rules]]` with `opacity = 0.0–1.0`. Rule opacity overrides zen mode dimming. `floating_opacity` in `[layout]` applies to user-toggled floating windows (alt-space). Priority: rule opacity > floating opacity > zen dim > 1.0.
 

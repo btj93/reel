@@ -423,9 +423,17 @@ public final class StripController: @unchecked Sendable {
     public func handleUserResize(windowID: CGWindowID) {
         let tileID = TileID(windowID)
         guard let window = windowMap[tileID],
-              let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
+              let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else {
+            print("[Strip] handleUserResize SKIP: window not found wid=\(windowID)")
+            fflush(stdout)
+            return
+        }
 
-        guard case .success(let currentFrame) = window.getFrame() else { return }
+        guard case .success(let currentFrame) = window.getFrame() else {
+            print("[Strip] handleUserResize SKIP: getFrame failed wid=\(windowID)")
+            fflush(stdout)
+            return
+        }
 
         let maxWidth = strip.workingArea.width
         let maxHeight = strip.workingArea.height
@@ -458,11 +466,16 @@ public final class StripController: @unchecked Sendable {
         let oldWidth = strip.columnData[colIndex].cachedWidth
 
         // Only update strip model if width changed significantly
-        guard abs(newWidth - oldWidth) > 2 else { return }
+        guard abs(newWidth - oldWidth) > 2 else {
+            print("[Strip] handleUserResize SKIP: delta too small wid=\(windowID) new=\(newWidth) old=\(oldWidth) delta=\(abs(newWidth - oldWidth))")
+            fflush(stdout)
+            return
+        }
 
-        // Skip if the column width was set by cycleWidthPreset — late AX resize
-        // notifications can arrive after echo suppression expires.
-        guard strip.columns[colIndex].presetIndex == nil else { return }
+        // User drag-resize overrides any active width preset.
+        // The width threshold above already filters late AX echo notifications
+        // (by the time they arrive, getFrame() returns the preset width → delta ≈ 0).
+        strip.columns[colIndex].presetIndex = nil
 
         #if DEBUG
         print("[Strip] handleUserResize wid=\(windowID) oldWidth=\(oldWidth) newWidth=\(newWidth)")
@@ -488,7 +501,6 @@ public final class StripController: @unchecked Sendable {
         }
 
         strip.columns[colIndex].width = .fixed(newWidth)
-        strip.columns[colIndex].presetIndex = nil
         strip.columnData[colIndex].widthAnimation = nil
         strip.columnData[colIndex].cachedWidth = newWidth
 
@@ -497,13 +509,25 @@ public final class StripController: @unchecked Sendable {
 
         // Debounce recenter: wait for drag to settle before animating back to center
         resizeRecenterWork?.cancel()
+        let colWidth = newWidth
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             let time = TimeUtil.now()
+            let curOffset = self.strip.viewOffset.current(at: time)
+            print("[Strip] recenter fired: colWidth=\(colWidth) viewOffset=\(curOffset) cols=\(self.strip.columns.count) anim=\(self.animationEnabled)")
+            fflush(stdout)
             if self.animationEnabled {
-                if let _ = self.strip.recenterActiveColumnAnimated(at: time) {
+                if let anim = self.strip.recenterActiveColumnAnimated(at: time) {
+                    print("[Strip] recenter: animation created from=\(anim.from) to=\(anim.to)")
+                    fflush(stdout)
                     self.scrollWidthSettled = false
                     self.frameLoop?.resume()
+                } else {
+                    print("[Strip] recenter: no animation needed, applying layout")
+                    fflush(stdout)
+                    // Already near target — viewOffset was snapped but layout
+                    // still needs applying so the window and indicator update.
+                    self.applyLayout()
                 }
             } else {
                 self.strip.recenterActiveColumn(at: time)

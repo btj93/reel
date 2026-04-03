@@ -90,6 +90,7 @@ gap = 16                           # Gap between columns in points
 snap = ["middle"]                  # Column snap positions: "left", "middle", "right"
 animation_enabled = true
 # floating_opacity = 1.0           # Opacity for user-toggled floating windows (0.0–1.0)
+# floating_always_on_top = false   # Auto-pin user-toggled floating windows above all others
 # width_presets = [0.33, 0.5, 0.67]  # Proportions for cycle_width
 # default_width = { proportion = 0.5 }
 # position_memory = true
