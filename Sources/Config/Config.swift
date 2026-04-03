@@ -13,6 +13,7 @@ public struct ScrollWMConfig: Sendable {
     public var snapPoints: [SnapPoint] = [.middle]
     public var struts: StrutsConfig = StrutsConfig()
     public var animationEnabled: Bool = true
+    public var floatingOpacity: Double = 1.0
 
     // MARK: - Animation
 
@@ -89,12 +90,14 @@ public struct WindowRuleConfig: Sendable {
     public var appIDRegex: String?
     public var titleRegex: String?
     public var floating: Bool = false
+    public var opacity: Double? = nil
 
-    public init(appID: String? = nil, appIDRegex: String? = nil, titleRegex: String? = nil, floating: Bool = false) {
+    public init(appID: String? = nil, appIDRegex: String? = nil, titleRegex: String? = nil, floating: Bool = false, opacity: Double? = nil) {
         self.appID = appID
         self.appIDRegex = appIDRegex
         self.titleRegex = titleRegex
         self.floating = floating
+        self.opacity = opacity
     }
 }
 
@@ -282,6 +285,7 @@ extension ScrollWMConfig {
             }
             if let v = readBool(layout["position_memory"]) { config.positionMemory = v }
             if let v = readDouble(layout["saved_position_limit"]) { config.savedPositionLimit = Int(v) }
+            if let v = readDouble(layout["floating_opacity"]) { config.floatingOpacity = max(0.0, min(1.0, v)) }
         }
 
         // [animation]
@@ -316,6 +320,7 @@ extension ScrollWMConfig {
                     rc.appIDRegex = readString(rule["app_id_regex"])
                     rc.titleRegex = readString(rule["title_regex"])
                     if let v = readBool(rule["floating"]) { rc.floating = v }
+                    if let v = readDouble(rule["opacity"]) { rc.opacity = max(0.0, min(1.0, v)) }
                     config.rules.append(rc)
                 }
             }

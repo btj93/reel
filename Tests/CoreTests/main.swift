@@ -3,6 +3,7 @@ import Core
 import CoreGraphics
 import Config
 import TOMLKit
+import WindowManager
 
 // Simple test runner — no Xcode or XCTest required
 var passed = 0
@@ -1074,6 +1075,43 @@ do {
     """
     let (config2, _) = parseTestConfig(toml2)
     assertClose(config2.zenMode.fadeDuration, 0.05, tolerance: 0.001, "negative clamped to 0.05")
+}
+
+// ═══════════════════════════════════════
+print()
+print("▶ Window Opacity Config Parsing")
+
+section("default floatingOpacity is 1.0")
+do {
+    let config = ScrollWMConfig()
+    assertClose(config.floatingOpacity, 1.0, tolerance: 0.001, "default floatingOpacity")
+}
+
+section("default rule opacity is nil")
+do {
+    let rule = WindowRuleConfig()
+    check(rule.opacity == nil, "default opacity should be nil")
+}
+
+section("parse floating_opacity from TOML")
+do {
+    let (config, _) = ScrollWMConfig.load()
+    assertClose(config.floatingOpacity, 1.0, tolerance: 0.001, "loaded default floatingOpacity")
+}
+
+section("opacity clamped to 0..1")
+do {
+    var rc = WindowRuleConfig()
+    rc.opacity = max(0.0, min(1.0, -0.5))
+    assertClose(rc.opacity!, 0.0, tolerance: 0.001, "negative clamped to 0")
+    rc.opacity = max(0.0, min(1.0, 1.5))
+    assertClose(rc.opacity!, 1.0, tolerance: 0.001, "over 1 clamped to 1")
+}
+
+section("WindowRule carries opacity")
+do {
+    let rule = WindowRule(appID: "com.test", classification: .tile, opacity: 0.7)
+    assertClose(rule.opacity!, 0.7, tolerance: 0.001, "opacity preserved")
 }
 
 // ============================================================

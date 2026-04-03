@@ -326,12 +326,14 @@ public struct WindowRule: Sendable {
     public var appIDRegex: String?   // Bundle identifier regex
     public var titleRegex: String?   // Window title regex
     public var classification: WindowClassification
+    public var opacity: Double? = nil
 
-    public init(appID: String? = nil, appIDRegex: String? = nil, titleRegex: String? = nil, classification: WindowClassification) {
+    public init(appID: String? = nil, appIDRegex: String? = nil, titleRegex: String? = nil, classification: WindowClassification, opacity: Double? = nil) {
         self.appID = appID
         self.appIDRegex = appIDRegex
         self.titleRegex = titleRegex
         self.classification = classification
+        self.opacity = opacity
     }
 
     public func matches(_ props: WindowProperties) -> Bool {
