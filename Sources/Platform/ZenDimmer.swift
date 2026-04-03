@@ -49,16 +49,25 @@ public final class ZenDimmer: @unchecked Sendable {
     /// True when any fade animation is in flight. Used by StripController.isFullySettled.
     public var isAnimating: Bool { !fadeAnimations.isEmpty }
 
+    /// True when CGS private APIs work (macOS ≤15). False on macOS 26+ (Tahoe) where they're no-ops.
+    public static let cgsAvailable: Bool = {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26
+    }()
+
     public init() {}
 
     /// Set a window's compositing alpha directly. Main-thread only.
+    /// No-op on macOS 26+ where CGSSetWindowAlpha is broken.
     public static func setWindowAlpha(_ wid: CGWindowID, _ alpha: Float) {
+        guard cgsAvailable else { return }
         let cid = CGSDefaultConnectionForThread()
         CGSSetWindowAlpha(cid, wid, alpha)
     }
 
     /// Set a window's compositing level directly. Main-thread only.
+    /// No-op on macOS 26+ where CGSSetWindowLevel is broken.
     public static func setWindowLevel(_ wid: CGWindowID, _ level: Int32) {
+        guard cgsAvailable else { return }
         let cid = CGSDefaultConnectionForThread()
         CGSSetWindowLevel(cid, wid, level)
     }
@@ -69,8 +78,10 @@ public final class ZenDimmer: @unchecked Sendable {
         ruleOpacities[wid] = opacity
         fadeAnimations.removeValue(forKey: wid)
         currentAlphas[wid] = opacity
-        let cid = CGSDefaultConnectionForThread()
-        CGSSetWindowAlpha(cid, wid, Float(opacity))
+        if Self.cgsAvailable {
+            let cid = CGSDefaultConnectionForThread()
+            CGSSetWindowAlpha(cid, wid, Float(opacity))
+        }
     }
 
     /// Remove a rule opacity override and restore the window to 1.0.
@@ -78,8 +89,10 @@ public final class ZenDimmer: @unchecked Sendable {
     public func clearRuleOpacity(for wid: CGWindowID) {
         guard ruleOpacities.removeValue(forKey: wid) != nil else { return }
         currentAlphas[wid] = 1.0
-        let cid = CGSDefaultConnectionForThread()
-        CGSSetWindowAlpha(cid, wid, 1.0)
+        if Self.cgsAvailable {
+            let cid = CGSDefaultConnectionForThread()
+            CGSSetWindowAlpha(cid, wid, 1.0)
+        }
     }
 
     // MARK: - Config
@@ -104,7 +117,7 @@ public final class ZenDimmer: @unchecked Sendable {
     /// No-ops if disabled, or if focus hasn't changed and force is false.
     @discardableResult
     public func setFocusedWindow(_ focusedID: TileID, allTileIDs: [TileID], at time: Double, force: Bool = false) -> Bool {
-        guard enabled else { return false }
+        guard enabled, Self.cgsAvailable else { return false }
 
         let newFocusedWID = focusedID.rawValue
 
@@ -144,6 +157,10 @@ public final class ZenDimmer: @unchecked Sendable {
 
     /// Evaluate all in-flight fade animations. Call from handleFrameTick.
     public func tick(time: Double) {
+        guard Self.cgsAvailable else {
+            fadeAnimations.removeAll()
+            return
+        }
         let cid = CGSDefaultConnectionForThread()
         var completed: [CGWindowID] = []
 
@@ -168,21 +185,23 @@ public final class ZenDimmer: @unchecked Sendable {
     /// When preserveRuleOpacities is true (zen-disable), rule-opacity windows keep their rule value.
     /// When false (shutdown/rebuild), everything goes to 1.0.
     public func restoreAll(preserveRuleOpacities: Bool = false) {
-        let cid = CGSDefaultConnectionForThread()
-        // Pass 1: restore windows in currentAlphas
-        for wid in currentAlphas.keys {
-            let restoreAlpha: Float
-            if preserveRuleOpacities, let ruleAlpha = ruleOpacities[wid] {
-                restoreAlpha = Float(ruleAlpha)
-            } else {
-                restoreAlpha = 1.0
+        if Self.cgsAvailable {
+            let cid = CGSDefaultConnectionForThread()
+            // Pass 1: restore windows in currentAlphas
+            for wid in currentAlphas.keys {
+                let restoreAlpha: Float
+                if preserveRuleOpacities, let ruleAlpha = ruleOpacities[wid] {
+                    restoreAlpha = Float(ruleAlpha)
+                } else {
+                    restoreAlpha = 1.0
+                }
+                CGSSetWindowAlpha(cid, wid, restoreAlpha)
             }
-            CGSSetWindowAlpha(cid, wid, restoreAlpha)
-        }
-        // Pass 2: ensure rule-opacity windows get their value applied even if not in currentAlphas
-        if preserveRuleOpacities {
-            for (wid, ruleAlpha) in ruleOpacities where currentAlphas[wid] == nil {
-                CGSSetWindowAlpha(cid, wid, Float(ruleAlpha))
+            // Pass 2: ensure rule-opacity windows get their value applied even if not in currentAlphas
+            if preserveRuleOpacities {
+                for (wid, ruleAlpha) in ruleOpacities where currentAlphas[wid] == nil {
+                    CGSSetWindowAlpha(cid, wid, Float(ruleAlpha))
+                }
             }
         }
         fadeAnimations.removeAll()
@@ -207,8 +226,10 @@ public final class ZenDimmer: @unchecked Sendable {
         }
 
         // Best-effort — compositing layer may already be torn down
-        let cid = CGSDefaultConnectionForThread()
-        CGSSetWindowAlpha(cid, wid, 1.0)
+        if Self.cgsAvailable {
+            let cid = CGSDefaultConnectionForThread()
+            CGSSetWindowAlpha(cid, wid, 1.0)
+        }
         ruleOpacities.removeValue(forKey: wid)
     }
 

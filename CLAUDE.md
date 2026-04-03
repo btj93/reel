@@ -69,7 +69,7 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 **Rubber-band bounce**: at strip edges, creates underdamped spring (ratio=0.6) with kick velocity that overshoots then bounces back.
 
-**Private APIs**: Three private APIs are used (none require SIP disable): `_AXUIElementGetWindow` (AXUIElement→CGWindowID mapping), `CGSSetWindowAlpha` (per-window opacity for zen mode), and `CGSSetWindowLevel` (per-window level for always-on-top). All are validated by AeroSpace/Amethyst across macOS 10.12–15.
+**Private APIs**: Three private APIs are used (none require SIP disable): `_AXUIElementGetWindow` (AXUIElement→CGWindowID mapping), `CGSSetWindowAlpha` (per-window opacity for zen mode), and `CGSSetWindowLevel` (per-window level for always-on-top). Validated by AeroSpace/Amethyst across macOS 10.12–15. **macOS 26+ (Tahoe)**: `CGSSetWindowAlpha` and `CGSSetWindowLevel` return success but are visual no-ops due to the Liquid Glass compositor rework. Guarded by `ZenDimmer.cgsAvailable` runtime check. Zen mode, opacity rules, floating opacity, and always-on-top silently no-op on Tahoe.
 
 **Threading**: CGS calls (`CGSSetWindowAlpha`) must run on main thread. AX calls are dispatched to per-app background threads via `AXApp`. Layout computation and `computeTargetFrames` run on main thread during frame ticks.
 
