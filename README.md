@@ -17,6 +17,7 @@ Instead of cramming every window into visible screen space, ScrollWM arranges th
 - **Zen mode** — dims unfocused windows to highlight what you're working on.
 - **Focus indicator** — ring, raise, or flash style highlight for the active window.
 - **Floating windows** — toggle any window out of the strip. Rules can auto-float by app.
+- **Always on top** — pin any window above all others via hotkey or rules.
 - **IPC** — control ScrollWM from scripts via a Unix socket CLI.
 
 ## Requirements
@@ -70,6 +71,7 @@ The bundle script ad-hoc signs with a stable identifier so macOS doesn't revoke 
 | Cycle width | `Alt-R` | Cycle through width presets (33% / 50% / 67%) |
 | Full width | `Alt-F` | Toggle focused window to full screen width |
 | Toggle floating | `Alt-Space` | Float/unfloat the focused window |
+| Always on top | `Alt-T` | Pin/unpin the focused window above all others |
 | Close window | `Alt-W` | Close the focused window |
 
 **Note:** `Alt` (Option) key bindings consume special character input (e.g., `Alt-H` produces `˙`). Rebind if this conflicts with your workflow.
@@ -155,7 +157,7 @@ fade_duration = 0.15  # Fade animation duration in seconds
 
 ### Window Rules
 
-Float specific apps, match by regex, or set per-window opacity:
+Float specific apps, match by regex, set per-window opacity, or pin windows on top:
 
 ```toml
 [[rules]]
@@ -169,6 +171,10 @@ floating = true
 [[rules]]
 app_id = "com.example.app"
 opacity = 0.9    # Override zen mode and floating opacity (0.0–1.0)
+
+[[rules]]
+app_id = "com.apple.calculator"
+always_on_top = true    # Keep this app above all others
 ```
 
 Rule `opacity` takes priority over both zen mode dimming and `floating_opacity`. A window matching a rule with `opacity = 0.5` will always appear at 50% opacity regardless of focus state or floating status.
@@ -198,7 +204,7 @@ swift build
 .build/debug/scrollwm-msg toggle-floating
 ```
 
-Available commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
+Available commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `toggle-always-on-top`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
 
 ## Architecture
 

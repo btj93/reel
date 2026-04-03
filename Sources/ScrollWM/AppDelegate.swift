@@ -96,6 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 ("toggle_full_width","Toggle Full Width",  6),
                 ("toggle_floating",  "Toggle Floating",   7),
                 ("close_window",     "Close Window",      8),
+                ("toggle_always_on_top", "Toggle Always On Top", 9),
             ]
             for entry in actions {
                 let keyString = keybindings[entry.action] ?? ""
@@ -183,6 +184,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             6: .toggleFullWidth,
             7: .toggleFloating,
             8: .closeWindow,
+            9: .toggleAlwaysOnTop,
         ]
         if let action = actionMap[sender.tag] {
             windowManager?.performAction(action)

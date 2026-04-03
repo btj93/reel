@@ -55,7 +55,7 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 **Config** — `~/.config/scrollwm/config.toml` via TOMLKit. Reload via menu bar button.
 
-**IPC** — Unix socket at `/tmp/scrollwm_{uid}.sock`. `SocketServer` + `ScrollWMCLI`. Available commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
+**IPC** — Unix socket at `/tmp/scrollwm_{uid}.sock`. `SocketServer` + `ScrollWMCLI`. Available commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `toggle-always-on-top`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
 
 ## Key Patterns
 
@@ -69,7 +69,7 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 **Rubber-band bounce**: at strip edges, creates underdamped spring (ratio=0.6) with kick velocity that overshoots then bounces back.
 
-**Private APIs**: Two private APIs are used (neither requires SIP disable): `_AXUIElementGetWindow` (AXUIElement→CGWindowID mapping) and `CGSSetWindowAlpha` (per-window opacity for zen mode). Both are validated by AeroSpace/Amethyst across macOS 10.12–15.
+**Private APIs**: Three private APIs are used (none require SIP disable): `_AXUIElementGetWindow` (AXUIElement→CGWindowID mapping), `CGSSetWindowAlpha` (per-window opacity for zen mode), and `CGSSetWindowLevel` (per-window level for always-on-top). All are validated by AeroSpace/Amethyst across macOS 10.12–15.
 
 **Threading**: CGS calls (`CGSSetWindowAlpha`) must run on main thread. AX calls are dispatched to per-app background threads via `AXApp`. Layout computation and `computeTargetFrames` run on main thread during frame ticks.
 
@@ -81,6 +81,8 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 Location: `~/.config/scrollwm/config.toml` (created on first launch). Reload via menu bar "Reload Config" button.
 
-Key sections: `[layout]` (gap, focus_mode, struts, floating_opacity), `[animation]` (stiffness, damping), `[keybindings]` (action = "modifier-key"), `[[rules]]` (app_id/floating/opacity), `[terminal]` (app path).
+Key sections: `[layout]` (gap, focus_mode, struts, floating_opacity), `[animation]` (stiffness, damping), `[keybindings]` (action = "modifier-key"), `[[rules]]` (app_id/floating/opacity/always_on_top), `[terminal]` (app path).
 
 **Window opacity**: Per-window opacity via `[[rules]]` with `opacity = 0.0–1.0`. Rule opacity overrides zen mode dimming. `floating_opacity` in `[layout]` applies to user-toggled floating windows (alt-space). Priority: rule opacity > floating opacity > zen dim > 1.0.
+
+**Always on top**: Pin any window above all others via `alt-t` hotkey or `[[rules]]` with `always_on_top = true`. Uses private `CGSSetWindowLevel` API (no SIP required). Independent of floating/opacity/zen mode.
