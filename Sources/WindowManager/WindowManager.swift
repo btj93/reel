@@ -57,6 +57,12 @@ public final class WindowManager: @unchecked Sendable {
     /// Windows that were user-toggled to floating (via alt-space / toggle-floating).
     private var userToggledFloats: Set<CGWindowID> = []
 
+    /// Windows currently pinned (always-on-top), keyed by CGWindowID.
+    private var pinnedWindows: Set<CGWindowID> = []
+
+    /// Windows that were user-toggled to always-on-top (via hotkey/IPC).
+    private var userToggledPinned: Set<CGWindowID> = []
+
 
     public init() {
         // Load config first
@@ -152,7 +158,8 @@ public final class WindowManager: @unchecked Sendable {
                 appIDRegex: rule.appIDRegex,
                 titleRegex: rule.titleRegex,
                 classification: rule.floating ? .float : .tile,
-                opacity: rule.opacity
+                opacity: rule.opacity,
+                alwaysOnTop: rule.alwaysOnTop
             )
         }
 
@@ -463,6 +470,13 @@ public final class WindowManager: @unchecked Sendable {
         }
         floatingWindowOpacities.removeAll()
 
+        // Restore all pinned windows to normal level
+        for wid in pinnedWindows {
+            ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.normalWindow))
+        }
+        pinnedWindows.removeAll()
+        userToggledPinned.removeAll()
+
         // Persist final state
         persistState()
         positionMemory?.persistToDisk()
@@ -501,6 +515,10 @@ public final class WindowManager: @unchecked Sendable {
             for (_, sc) in stripControllers {
                 sc.clearCommittedFrames()
                 sc.applyLayout()
+            }
+            // Re-apply always-on-top levels
+            for wid in pinnedWindows {
+                ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.floatingWindow))
             }
         }
     }
@@ -552,6 +570,32 @@ public final class WindowManager: @unchecked Sendable {
             }
         }
         floatingWindowOpacities = updatedFloatingOpacities
+
+        // Re-evaluate always-on-top rules
+        let oldPinned = pinnedWindows
+        var newPinned = userToggledPinned
+        for (_, sc) in stripControllers {
+            for (_, window) in sc.windowMap {
+                if resolveAlwaysOnTop(for: window) == true {
+                    newPinned.insert(window.windowID)
+                }
+            }
+        }
+        for wid in tracker.floatingWindows {
+            guard let window = tracker.windows[wid] else { continue }
+            if resolveAlwaysOnTop(for: window) == true {
+                newPinned.insert(wid)
+            }
+        }
+        // Restore level for dropped windows
+        for wid in oldPinned.subtracting(newPinned) {
+            ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.normalWindow))
+        }
+        pinnedWindows = newPinned
+        // Re-apply level for all pinned windows
+        for wid in pinnedWindows {
+            ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.floatingWindow))
+        }
 
         // Position memory (reload-specific: may create or update)
         if config.positionMemory {
@@ -670,6 +714,9 @@ public final class WindowManager: @unchecked Sendable {
                     if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
                         sc.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
                     }
+                    if resolveAlwaysOnTop(for: window) == true {
+                        applyPinState(windowID: window.windowID, pinned: true)
+                    }
                 }
             case .float:
                 // Apply rule opacity to auto-classified floating windows (NOT config.floatingOpacity,
@@ -678,6 +725,9 @@ public final class WindowManager: @unchecked Sendable {
                 if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
                     floatingWindowOpacities[window.windowID] = ruleAlpha
                     ZenDimmer.setWindowAlpha(window.windowID, Float(ruleAlpha))
+                }
+                if resolveAlwaysOnTop(for: window) == true {
+                    applyPinState(windowID: window.windowID, pinned: true)
                 }
             case .ignore:
                 break
@@ -692,6 +742,9 @@ public final class WindowManager: @unchecked Sendable {
                 ZenDimmer.setWindowAlpha(windowID, 1.0)
             }
             userToggledFloats.remove(windowID)
+            pinnedWindows.remove(windowID)
+            userToggledPinned.remove(windowID)
+            ZenDimmer.setWindowLevel(windowID, CGWindowLevelForKey(.normalWindow))
             // Remove from whichever strip has it
             for (_, sc) in stripControllers {
                 if sc.windowMap[tileID] != nil {
@@ -789,6 +842,9 @@ public final class WindowManager: @unchecked Sendable {
                 if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
                     sc.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
                 }
+                if pinnedWindows.contains(windowID) || resolveAlwaysOnTop(for: window) == true {
+                    applyPinState(windowID: windowID, pinned: true)
+                }
             }
 
         case .windowResized(let windowID):
@@ -834,6 +890,8 @@ public final class WindowManager: @unchecked Sendable {
             let goneIDs = managedIDs.subtracting(onScreenIDs)
             for goneID in goneIDs {
                 stripController.removeWindow(tileID: TileID(goneID))
+                pinnedWindows.remove(goneID)
+                userToggledPinned.remove(goneID)
             }
 
             // Add new windows that weren't in the saved state
@@ -906,6 +964,11 @@ public final class WindowManager: @unchecked Sendable {
             for (wid, alpha) in floatingWindowOpacities {
                 ZenDimmer.setWindowAlpha(wid, Float(alpha))
             }
+
+            // Re-apply always-on-top levels
+            for wid in pinnedWindows {
+                ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.floatingWindow))
+            }
             return
         }
 
@@ -944,6 +1007,18 @@ public final class WindowManager: @unchecked Sendable {
         // Reapply floating window opacities — macOS may reset compositing alpha on space switch
         for (wid, alpha) in floatingWindowOpacities {
             ZenDimmer.setWindowAlpha(wid, Float(alpha))
+        }
+
+        // Evaluate rules for new-space tiled windows
+        for (_, window) in stripController.windowMap {
+            if resolveAlwaysOnTop(for: window) == true {
+                applyPinState(windowID: window.windowID, pinned: true)
+            }
+        }
+
+        // Re-apply always-on-top levels for pre-existing pinned windows
+        for wid in pinnedWindows {
+            ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.floatingWindow))
         }
 
         #if DEBUG
@@ -1004,7 +1079,22 @@ public final class WindowManager: @unchecked Sendable {
         case .closeWindow:
             stripController.closeActiveWindow()
         case .toggleAlwaysOnTop:
-            break  // TODO: implemented in Task 2
+            guard let focusedWID = getFocusedWindowID() else { break }
+            if pinnedWindows.contains(focusedWID) {
+                applyPinState(windowID: focusedWID, pinned: false)
+                userToggledPinned.remove(focusedWID)
+                #if DEBUG
+                    print("[WM] Window \(focusedWID) unpinned")
+                    fflush(stdout)
+                #endif
+            } else {
+                applyPinState(windowID: focusedWID, pinned: true)
+                userToggledPinned.insert(focusedWID)
+                #if DEBUG
+                    print("[WM] Window \(focusedWID) pinned (always-on-top)")
+                    fflush(stdout)
+                #endif
+            }
         case .workspace:
             break  // TODO: Phase 3
         }
@@ -1059,6 +1149,32 @@ public final class WindowManager: @unchecked Sendable {
         ZenDimmer.setWindowAlpha(windowID, 1.0)
     }
 
+    /// Find whether a window matches an always_on_top rule.
+    private func resolveAlwaysOnTop(for window: AXWindow) -> Bool? {
+        let bundleID = tracker.apps[window.pid]?.bundleIdentifier
+        let title = window.getTitle()
+        var props = WindowProperties()
+        props.bundleIdentifier = bundleID
+        props.title = title
+        return tracker.rules.first(where: {
+            $0.alwaysOnTop != nil
+            && $0.matches(props)
+            && ($0.appIDRegex == nil || bundleID != nil)
+            && ($0.titleRegex == nil || title != nil)
+        })?.alwaysOnTop
+    }
+
+    /// Apply or remove always-on-top for a window.
+    private func applyPinState(windowID: CGWindowID, pinned: Bool) {
+        let level: Int32 = pinned ? CGWindowLevelForKey(.floatingWindow) : CGWindowLevelForKey(.normalWindow)
+        ZenDimmer.setWindowLevel(windowID, level)
+        if pinned {
+            pinnedWindows.insert(windowID)
+        } else {
+            pinnedWindows.remove(windowID)
+        }
+    }
+
     // MARK: - Window Health Check
 
     /// Periodically verify all tracked windows still exist.
@@ -1082,6 +1198,8 @@ public final class WindowManager: @unchecked Sendable {
                 #endif
                 stripController.removeWindow(tileID: tileID)
                 tracker.untrackWindow(window.windowID)
+                pinnedWindows.remove(window.windowID)
+                userToggledPinned.remove(window.windowID)
                 changed = true
                 continue
             }
@@ -1150,6 +1268,9 @@ public final class WindowManager: @unchecked Sendable {
                 targetSC.addWindow(window, app: app, restoredPosition: saved)
                 if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
                     targetSC.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
+                }
+                if resolveAlwaysOnTop(for: window) == true {
+                    applyPinState(windowID: window.windowID, pinned: true)
                 }
                 adopted = true
                 #if DEBUG
@@ -1284,7 +1405,18 @@ public final class WindowManager: @unchecked Sendable {
             stripController.closeActiveWindow()
             return ScrollWMResponse(success: true)
         case .toggleAlwaysOnTop:
-            return ScrollWMResponse(success: true)  // TODO: implemented in Task 2
+            guard let focusedWID = getFocusedWindowID() else {
+                return ScrollWMResponse(success: false, message: "No focused window")
+            }
+            if pinnedWindows.contains(focusedWID) {
+                applyPinState(windowID: focusedWID, pinned: false)
+                userToggledPinned.remove(focusedWID)
+            } else {
+                applyPinState(windowID: focusedWID, pinned: true)
+                userToggledPinned.insert(focusedWID)
+            }
+            return ScrollWMResponse(success: true,
+                message: pinnedWindows.contains(focusedWID) ? "Pinned" : "Unpinned")
         case .listWindows:
             let windows = stripController.windowMap.map { (tileID, window) -> [String: Any] in
                 ["id": tileID.rawValue, "pid": window.pid, "title": window.getTitle() ?? ""]
