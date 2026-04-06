@@ -337,24 +337,58 @@ public final class WindowManager: @unchecked Sendable {
         titleBar.onDragBegin = { [weak self] columnIndex in
             self?.stripController.enterMinimapMode(draggedColumnIndex: columnIndex)
         }
-        titleBar.onDragUpdate = { [weak self] (_: CGPoint) in
-            // Cursor position tracked for minimap layout — future frame ticks use this
+        titleBar.onDragUpdate = { [weak self] (cgPoint: CGPoint) in
+            self?.stripController.updateMinimapCursor(cgPoint)
         }
-        titleBar.onDragEnd = { [weak self] (_: Int) in
-            // For now, cancel instead of commit (insertion index computation deferred)
-            self?.stripController.cancelMinimapMode()
+        titleBar.onDragEnd = { [weak self] (sourceIndex: Int) in
+            guard let sc = self?.stripController else { return }
+            let insertionIndex = sc.minimapInsertionIndex
+            if sourceIndex != insertionIndex {
+                sc.commitMinimapReorder(from: sourceIndex, to: insertionIndex)
+            } else {
+                sc.cancelMinimapMode()
+            }
         }
         titleBar.onDragCancel = { [weak self] in
             self?.stripController.cancelMinimapMode()
         }
-        titleBar.onMenuShow = { [weak self] (_: Int, _: CGRect) in
-            // Pill bar display — wired in a future task
+        titleBar.onMenuShow = { [weak self] (columnIndex: Int, _: CGRect) in
+            guard let self = self else { return }
+            let sc = self.stripController
+            let pills = sc.buildPillItems(for: columnIndex)
+            // Get the window frame for anchor positioning (in AppKit coords for overlay)
+            let titleBarFrame: CGRect
+            if let tileID = sc.strip.columns[columnIndex].activeTile,
+               let cgFrame = sc.lastCommittedFrames[tileID] {
+                // Convert CG (top-left) to AppKit (bottom-left) for overlay positioning
+                let appKitY = sc.primaryScreenHeight - cgFrame.origin.y - cgFrame.height
+                titleBarFrame = CGRect(x: cgFrame.origin.x, y: appKitY, width: cgFrame.width, height: 28)
+            } else {
+                titleBarFrame = .zero
+            }
+            self.titleBarInteraction?.overlay.mode = .menu(
+                pills: pills, anchorFrame: titleBarFrame, selectedIndex: nil
+            )
+            self.titleBarInteraction?.overlay.show()
         }
-        titleBar.onMenuSelect = { [weak self] (_: Int) in
-            // Menu action dispatch — wired in a future task
+        titleBar.onMenuSelect = { [weak self] (actionIndex: Int) in
+            guard let self = self else { return }
+            let sc = self.stripController
+            if let action = sc.pillAction(for: actionIndex) {
+                switch action {
+                case .widthPreset(let idx):
+                    sc.setWidthPreset(index: idx)
+                case .fullWidth:
+                    sc.toggleFullWidth()
+                case .toggleFloat:
+                    // Use the same dispatch path as the hotkey
+                    self.performAction(.toggleFloating)
+                }
+            }
+            self.titleBarInteraction?.overlay.hide()
         }
         titleBar.onMenuDismiss = { [weak self] in
-            // Menu dismissed without selection
+            self?.titleBarInteraction?.overlay.hide()
         }
 
         let titleBarOk = titleBar.start()

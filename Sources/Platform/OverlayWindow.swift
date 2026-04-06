@@ -1,27 +1,33 @@
 import AppKit
 import CoreGraphics
 
-enum OverlayMode {
+public enum OverlayMode {
     case hidden
     case minimap(insertionX: CGFloat, dimAlpha: CGFloat)
     case menu(pills: [PillItem], anchorFrame: CGRect, selectedIndex: Int?)
 }
 
-struct PillItem {
-    let label: String
-    let isActive: Bool
-    let isEnabled: Bool
+public struct PillItem: Sendable {
+    public let label: String
+    public let isActive: Bool
+    public let isEnabled: Bool
+
+    public init(label: String, isActive: Bool, isEnabled: Bool) {
+        self.label = label
+        self.isActive = isActive
+        self.isEnabled = isEnabled
+    }
 }
 
-class OverlayWindow {
+public class OverlayWindow {
     private var panel: NSPanel?
     private var overlayView: OverlayView?
-    var mode: OverlayMode = .hidden {
+    public var mode: OverlayMode = .hidden {
         didSet { updateDisplay() }
     }
-    var accentColor: NSColor = .systemBlue
+    public var accentColor: NSColor = .systemBlue
 
-    func ensurePanel(for screen: NSScreen) {
+    public func ensurePanel(for screen: NSScreen) {
         if panel == nil {
             let p = NSPanel(
                 contentRect: screen.frame,
@@ -42,22 +48,22 @@ class OverlayWindow {
         panel?.setFrame(screen.frame, display: false)
     }
 
-    func show() {
+    public func show() {
         panel?.orderFront(nil)
     }
 
-    func hide() {
+    public func hide() {
         mode = .hidden
         panel?.orderOut(nil)
     }
 
-    func destroy() {
+    public func destroy() {
         panel?.orderOut(nil)
         panel = nil
         overlayView = nil
     }
 
-    func setMousePassthrough(_ passthrough: Bool) {
+    public func setMousePassthrough(_ passthrough: Bool) {
         panel?.ignoresMouseEvents = passthrough
     }
 
@@ -67,12 +73,12 @@ class OverlayWindow {
         overlayView?.needsDisplay = true
     }
 
-    func pillIndexAt(point: NSPoint) -> Int? {
+    public func pillIndexAt(point: NSPoint) -> Int? {
         guard case .menu(let pills, let anchorFrame, _) = mode else { return nil }
         return overlayView?.pillIndexAt(screenPoint: point, pills: pills, anchorFrame: anchorFrame)
     }
 
-    func highlightPill(at index: Int?) {
+    public func highlightPill(at index: Int?) {
         if case .menu(let pills, let frame, _) = mode {
             mode = .menu(pills: pills, anchorFrame: frame, selectedIndex: index)
         }

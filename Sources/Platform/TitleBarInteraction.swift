@@ -37,7 +37,7 @@ public final class TitleBarInteraction: @unchecked Sendable {
     private var escapeRunLoopSource: CFRunLoopSource?
 
     // Overlay
-    let overlay = OverlayWindow()
+    public let overlay = OverlayWindow()
 
     public init() {}
 
@@ -177,6 +177,8 @@ public final class TitleBarInteraction: @unchecked Sendable {
                     y: info.primaryScreenHeight - location.y
                 )
                 onDragUpdate?(cgPoint)
+                // Update overlay insertion indicator (AppKit coords for overlay)
+                overlay.mode = .minimap(insertionX: location.x, dimAlpha: 0.4)
             }
             return nil
 
@@ -243,13 +245,21 @@ public final class TitleBarInteraction: @unchecked Sendable {
     private func transitionToDragging(columnIndex: Int, tileID: TileID) {
         state = .dragging(columnIndex: columnIndex, tileID: tileID)
         setupEscapeTap()
+        if let screen = NSScreen.main {
+            overlay.ensurePanel(for: screen)
+        }
         overlay.setMousePassthrough(true)
+        overlay.mode = .minimap(insertionX: 0, dimAlpha: 0.4)
+        overlay.show()
         onDragBegin?(columnIndex)
     }
 
     private func transitionToMenu(columnIndex: Int, tileID: TileID) {
         state = .menu(columnIndex: columnIndex, tileID: tileID)
         setupEscapeTap()
+        if let screen = NSScreen.main {
+            overlay.ensurePanel(for: screen)
+        }
         overlay.setMousePassthrough(false)
         onMenuShow?(columnIndex, .zero)
     }

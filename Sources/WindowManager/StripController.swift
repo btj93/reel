@@ -403,12 +403,43 @@ public final class StripController: @unchecked Sendable {
     // MARK: - Minimap Reorder
 
     private var preMinimapWidths: [Double]?
+    private(set) var minimapDraggedIndex: Int?
+    private(set) var minimapCursorPosition: CGPoint = .zero
+    private(set) var minimapInsertionIndex: Int = 0
     var isMinimapActive: Bool { preMinimapWidths != nil }
 
+    /// Thumbnail width for minimap mode.
+    var minimapThumbnailWidth: Double = 120
+
     func enterMinimapMode(draggedColumnIndex: Int) {
+        let time = TimeUtil.now()
         preMinimapWidths = strip.columnData.map { $0.cachedWidth }
+        minimapDraggedIndex = draggedColumnIndex
+        minimapInsertionIndex = draggedColumnIndex
+        minimapCursorPosition = CGPoint(
+            x: strip.workingArea.midX,
+            y: strip.workingArea.midY
+        )
+
+        // Compress columns to thumbnail width
+        let params = widthSpringParams
+        for i in 0..<strip.columnData.count {
+            let currentWidth = strip.columnData[i].currentWidth(at: time)
+            let thumbWidth = max(minimapThumbnailWidth, 80)
+            strip.columnData[i].widthAnimation = nil
+            strip.columnData[i].widthAnimation = SpringAnimation(
+                from: currentWidth, to: thumbWidth, startTime: time, params: params
+            )
+            strip.columnData[i].cachedWidth = thumbWidth
+        }
+
         focusIndicator.hide()
         frameLoop?.resume()
+    }
+
+    func updateMinimapCursor(_ position: CGPoint) {
+        minimapCursorPosition = position
+        minimapInsertionIndex = computeInsertionIndex(cursorX: position.x)
     }
 
     func cancelMinimapMode() {
@@ -416,6 +447,8 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         restoreWidths(savedWidths, at: time)
         preMinimapWidths = nil
+        minimapDraggedIndex = nil
+        let _ = focusIndicator.snapTo(frame: .zero)
         frameLoop?.resume()
     }
 
@@ -423,17 +456,67 @@ public final class StripController: @unchecked Sendable {
         guard let savedWidths = preMinimapWidths else { return }
         let time = TimeUtil.now()
 
-        strip.moveColumn(from: sourceIndex, to: destIndex, at: time)
+        let actualDest = min(max(destIndex, 0), strip.columns.count - 1)
+        strip.moveColumn(from: sourceIndex, to: actualDest, at: time)
         let _ = strip.recenterActiveColumnAnimated(at: time)
 
         // Adjust saved widths array to match new column order
         var reorderedWidths = savedWidths
         let movedWidth = reorderedWidths.remove(at: sourceIndex)
-        reorderedWidths.insert(movedWidth, at: destIndex)
+        reorderedWidths.insert(movedWidth, at: actualDest)
 
         restoreWidths(reorderedWidths, at: time)
         preMinimapWidths = nil
+        minimapDraggedIndex = nil
+        focusActiveWindow()
         frameLoop?.resume()
+    }
+
+    /// Compute insertion index from cursor X position relative to thumbnail midpoints.
+    private func computeInsertionIndex(cursorX: Double) -> Int {
+        guard let draggedIdx = minimapDraggedIndex else { return 0 }
+        let time = TimeUtil.now()
+        let wa = strip.workingArea
+
+        // Compute thumbnail positions (excluding dragged column)
+        var thumbnails: [(index: Int, midX: Double)] = []
+        var totalWidth: Double = 0
+        for i in 0..<strip.columns.count where i != draggedIdx {
+            totalWidth += strip.columnData[i].currentWidth(at: time) + strip.gap
+        }
+        totalWidth -= strip.gap  // remove trailing gap
+
+        var x = wa.minX + (wa.width - totalWidth) / 2
+        for i in 0..<strip.columns.count where i != draggedIdx {
+            let w = strip.columnData[i].currentWidth(at: time)
+            thumbnails.append((index: i, midX: x + w / 2))
+            x += w + strip.gap
+        }
+
+        // Find insertion point based on cursor X
+        var insertAt = thumbnails.count  // default: after last
+        for (j, thumb) in thumbnails.enumerated() {
+            if cursorX < thumb.midX {
+                insertAt = j
+                break
+            }
+        }
+
+        // Map back to original column index space
+        // insertAt is position in the non-dragged array
+        // Convert to the full array index
+        var realIndex = 0
+        var count = 0
+        for i in 0...strip.columns.count {
+            if i == draggedIdx { continue }
+            if count == insertAt {
+                realIndex = i
+                break
+            }
+            count += 1
+            realIndex = i + 1
+        }
+        return min(realIndex, strip.columns.count - 1)
     }
 
     private func restoreWidths(_ targetWidths: [Double], at time: Double) {
@@ -446,6 +529,66 @@ public final class StripController: @unchecked Sendable {
             )
             strip.columnData[i].cachedWidth = targetWidths[i]
         }
+    }
+
+    // MARK: - Pill Bar Menu
+
+    /// Build pill items for the active column's current state.
+    func buildPillItems(for columnIndex: Int) -> [PillItem] {
+        guard columnIndex >= 0, columnIndex < strip.columns.count else { return [] }
+        let col = strip.columns[columnIndex]
+        let isFloating = false  // floating windows are not in the strip
+
+        var pills: [PillItem] = []
+        for (i, preset) in strip.widthPresets.enumerated() {
+            let label: String
+            switch preset {
+            case .proportion(let p):
+                if p <= 0.34 { label = "Third" }
+                else if p <= 0.51 { label = "Half" }
+                else if p <= 0.68 { label = "Two-Thirds" }
+                else { label = "\(Int(p * 100))%" }
+            case .fixed(let w): label = "\(Int(w))px"
+            case .auto: label = "Auto"
+            }
+            pills.append(PillItem(
+                label: label,
+                isActive: col.presetIndex == i,
+                isEnabled: !isFloating
+            ))
+        }
+        // Full width pill
+        pills.append(PillItem(
+            label: "Full",
+            isActive: col.isFullWidth,
+            isEnabled: !isFloating
+        ))
+        // Float toggle
+        pills.append(PillItem(
+            label: "Float",
+            isActive: false,
+            isEnabled: true
+        ))
+        return pills
+    }
+
+    /// Dispatch a pill bar action. Returns the action for WindowManager to handle (for float toggle).
+    enum PillAction {
+        case widthPreset(Int)
+        case fullWidth
+        case toggleFloat
+    }
+
+    func pillAction(for index: Int) -> PillAction? {
+        let presetCount = strip.widthPresets.count
+        if index < presetCount {
+            return .widthPreset(index)
+        } else if index == presetCount {
+            return .fullWidth
+        } else if index == presetCount + 1 {
+            return .toggleFloat
+        }
+        return nil
     }
 
     // MARK: - User Move/Resize Handling
@@ -617,7 +760,17 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         lastLayoutTime = time
 
-        let frames = computeTargetFrames(strip: strip, time: time)
+        let layoutMode: LayoutMode
+        if let dragIdx = minimapDraggedIndex {
+            layoutMode = .minimap(
+                draggedColumnIndex: dragIdx,
+                insertionIndex: minimapInsertionIndex,
+                cursorPosition: minimapCursorPosition
+            )
+        } else {
+            layoutMode = .normal
+        }
+        let frames = computeTargetFrames(strip: strip, time: time, mode: layoutMode)
 
         // Hot-path logging removed — fires at 120Hz during animation
 
@@ -740,7 +893,17 @@ public final class StripController: @unchecked Sendable {
         scrollWidthSettled = false
 
         // Compute frames with animation evaluated at this timestamp
-        let frames = computeTargetFrames(strip: strip, time: time)
+        let tickLayoutMode: LayoutMode
+        if let dragIdx = minimapDraggedIndex {
+            tickLayoutMode = .minimap(
+                draggedColumnIndex: dragIdx,
+                insertionIndex: minimapInsertionIndex,
+                cursorPosition: minimapCursorPosition
+            )
+        } else {
+            tickLayoutMode = .normal
+        }
+        let frames = computeTargetFrames(strip: strip, time: time, mode: tickLayoutMode)
 
         // Dispatch position updates to per-app threads IN PARALLEL.
         // This prevents a slow Electron app from blocking a fast native app.
