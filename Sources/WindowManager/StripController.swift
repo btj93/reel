@@ -278,12 +278,16 @@ public final class StripController: @unchecked Sendable {
         if animationEnabled {
             let clampedVelocity = max(-5000, min(5000, velocity))
             if let _ = strip.navigateLeft(at: time, velocity: clampedVelocity) {
+                scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
             strip.navigateLeftInstant(at: time)
             applyLayout()
         }
+        userActiveTileID = strip.activeColumn?.activeTile
+        _confirmedUserActiveTileID = userActiveTileID
+        focusActiveWindow()
     }
 
     func focusRightAnimated(velocity: Double) {
@@ -291,12 +295,16 @@ public final class StripController: @unchecked Sendable {
         if animationEnabled {
             let clampedVelocity = max(-5000, min(5000, velocity))
             if let _ = strip.navigateRight(at: time, velocity: clampedVelocity) {
+                scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
             strip.navigateRightInstant(at: time)
             applyLayout()
         }
+        userActiveTileID = strip.activeColumn?.activeTile
+        _confirmedUserActiveTileID = userActiveTileID
+        focusActiveWindow()
     }
 
     public func moveColumnLeft() {
@@ -340,8 +348,12 @@ public final class StripController: @unchecked Sendable {
             params: animationEnabled ? widthSpringParams : nil
         )
         if animationEnabled {
+            let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
+            let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth)
+            scrollWidthSettled = false
             frameLoop?.resume()
         } else {
+            strip.recenterActiveColumn(at: time)
             applyLayout()
         }
     }

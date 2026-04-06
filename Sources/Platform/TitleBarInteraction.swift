@@ -339,6 +339,12 @@ private func escapeCallback(
     _ userInfo: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        if let userInfo = userInfo {
+            let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
+            if let tap = handler.escapeEventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+        }
         return Unmanaged.passRetained(event)
     }
 
