@@ -203,6 +203,8 @@ public final class StripController: @unchecked Sendable {
 
     /// Remove a window from the strip.
     public func removeWindow(tileID: TileID) {
+        // Cancel minimap if active — column indices become stale after removal
+        if isMinimapActive { cancelMinimapMode() }
 
         if let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
             strip.removeColumn(at: colIndex, at: TimeUtil.now())

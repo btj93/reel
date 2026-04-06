@@ -173,6 +173,9 @@ public final class WindowManager: @unchecked Sendable {
             tb.longPressDelayMs = config.trackpad.longPressDelayMs
             tb.dragThresholdPx = config.trackpad.dragThresholdPx
         }
+        for (_, sc) in stripControllers {
+            sc.minimapThumbnailWidth = config.trackpad.thumbnailWidth
+        }
 
         // Terminal path is read directly from config when spawning
 
@@ -318,6 +321,7 @@ public final class WindowManager: @unchecked Sendable {
         let titleBar = TitleBarInteraction()
         titleBar.longPressDelayMs = config.trackpad.longPressDelayMs
         titleBar.dragThresholdPx = config.trackpad.dragThresholdPx
+        stripController.minimapThumbnailWidth = config.trackpad.thumbnailWidth
 
         titleBar.onNeedsManagedFrames = { [weak self] () -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat) in
             guard let sc = self?.stripController else {
