@@ -440,6 +440,7 @@ public final class StripController: @unchecked Sendable {
     func updateMinimapCursor(_ position: CGPoint) {
         minimapCursorPosition = position
         minimapInsertionIndex = computeInsertionIndex(cursorX: position.x)
+        applyLayout()
     }
 
     func cancelMinimapMode() {
@@ -456,14 +457,18 @@ public final class StripController: @unchecked Sendable {
         guard let savedWidths = preMinimapWidths else { return }
         let time = TimeUtil.now()
 
-        let actualDest = min(max(destIndex, 0), strip.columns.count - 1)
-        strip.moveColumn(from: sourceIndex, to: actualDest, at: time)
+        // destIndex is in "full array" space. moveColumn does remove(at:source) then
+        // insert(at:dest), so dest is in "post-removal" space. Adjust when dest > source.
+        var adjustedDest = destIndex
+        if adjustedDest > sourceIndex { adjustedDest -= 1 }
+        adjustedDest = min(max(adjustedDest, 0), strip.columns.count - 1)
+        strip.moveColumn(from: sourceIndex, to: adjustedDest, at: time)
         let _ = strip.recenterActiveColumnAnimated(at: time)
 
         // Adjust saved widths array to match new column order
         var reorderedWidths = savedWidths
         let movedWidth = reorderedWidths.remove(at: sourceIndex)
-        reorderedWidths.insert(movedWidth, at: actualDest)
+        reorderedWidths.insert(movedWidth, at: adjustedDest)
 
         restoreWidths(reorderedWidths, at: time)
         preMinimapWidths = nil
@@ -753,6 +758,18 @@ public final class StripController: @unchecked Sendable {
 
     // MARK: - Layout Application
 
+    /// Current layout mode — minimap during drag-to-reorder, normal otherwise.
+    private var currentLayoutMode: LayoutMode {
+        if let dragIdx = minimapDraggedIndex {
+            return .minimap(
+                draggedColumnIndex: dragIdx,
+                insertionIndex: minimapInsertionIndex,
+                cursorPosition: minimapCursorPosition
+            )
+        }
+        return .normal
+    }
+
     /// Compute target frames and apply to real windows.
     /// This is the Phase 1 "instant" mode.
     public func applyLayout() {
@@ -760,17 +777,7 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         lastLayoutTime = time
 
-        let layoutMode: LayoutMode
-        if let dragIdx = minimapDraggedIndex {
-            layoutMode = .minimap(
-                draggedColumnIndex: dragIdx,
-                insertionIndex: minimapInsertionIndex,
-                cursorPosition: minimapCursorPosition
-            )
-        } else {
-            layoutMode = .normal
-        }
-        let frames = computeTargetFrames(strip: strip, time: time, mode: layoutMode)
+        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode)
 
         // Hot-path logging removed — fires at 120Hz during animation
 
@@ -893,17 +900,7 @@ public final class StripController: @unchecked Sendable {
         scrollWidthSettled = false
 
         // Compute frames with animation evaluated at this timestamp
-        let tickLayoutMode: LayoutMode
-        if let dragIdx = minimapDraggedIndex {
-            tickLayoutMode = .minimap(
-                draggedColumnIndex: dragIdx,
-                insertionIndex: minimapInsertionIndex,
-                cursorPosition: minimapCursorPosition
-            )
-        } else {
-            tickLayoutMode = .normal
-        }
-        let frames = computeTargetFrames(strip: strip, time: time, mode: tickLayoutMode)
+        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode)
 
         // Dispatch position updates to per-app threads IN PARALLEL.
         // This prevents a slow Electron app from blocking a fast native app.

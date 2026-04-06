@@ -141,9 +141,8 @@ public final class TitleBarInteraction: @unchecked Sendable {
         guard let info = onNeedsManagedFrames?() else { return event }
 
         guard let (columnIndex, tileID) = hitTestTitleBar(
-            appKitPoint: location,
-            frames: info.frames,
-            primaryScreenHeight: info.primaryScreenHeight
+            cgPoint: location,
+            frames: info.frames
         ) else { return event }
 
         let timer = DispatchWorkItem { [weak self] in
@@ -171,19 +170,24 @@ public final class TitleBarInteraction: @unchecked Sendable {
             return nil
 
         case .dragging:
+            // CGEvent.location is CG coordinates (top-left origin) — pass directly
+            onDragUpdate?(location)
+            // Overlay uses AppKit coords — convert for insertion indicator
             if let info = onNeedsManagedFrames?() {
-                let cgPoint = CGPoint(
-                    x: location.x,
-                    y: info.primaryScreenHeight - location.y
-                )
-                onDragUpdate?(cgPoint)
-                // Update overlay insertion indicator (AppKit coords for overlay)
-                overlay.mode = .minimap(insertionX: location.x, dimAlpha: 0.4)
+                let appKitX = location.x
+                overlay.mode = .minimap(insertionX: appKitX, dimAlpha: 0.4)
             }
             return nil
 
         case .menu:
-            if let index = overlay.pillIndexAt(point: location) {
+            // Convert CG to AppKit screen coords for NSView hit-testing
+            let appKitPoint: NSPoint
+            if let info = onNeedsManagedFrames?() {
+                appKitPoint = NSPoint(x: location.x, y: info.primaryScreenHeight - location.y)
+            } else {
+                appKitPoint = NSPoint(x: location.x, y: location.y)
+            }
+            if let index = overlay.pillIndexAt(point: appKitPoint) {
                 overlay.highlightPill(at: index)
             } else {
                 overlay.highlightPill(at: nil)
@@ -205,13 +209,21 @@ public final class TitleBarInteraction: @unchecked Sendable {
 
         case .dragging(let columnIndex, _):
             teardownEscapeTap()
+            overlay.hide()
             onDragEnd?(columnIndex)
             state = .idle
             return nil
 
         case .menu:
             teardownEscapeTap()
-            if let index = overlay.pillIndexAt(point: location) {
+            // Convert CG to AppKit for pill hit-testing
+            let appKitPoint: NSPoint
+            if let info = onNeedsManagedFrames?() {
+                appKitPoint = NSPoint(x: location.x, y: info.primaryScreenHeight - location.y)
+            } else {
+                appKitPoint = NSPoint(x: location.x, y: location.y)
+            }
+            if let index = overlay.pillIndexAt(point: appKitPoint) {
                 onMenuSelect?(index)
             } else {
                 onMenuDismiss?()
@@ -267,12 +279,9 @@ public final class TitleBarInteraction: @unchecked Sendable {
     // MARK: - Helpers
 
     private func hitTestTitleBar(
-        appKitPoint: CGPoint,
-        frames: [TileID: CGRect],
-        primaryScreenHeight: CGFloat
+        cgPoint: CGPoint,
+        frames: [TileID: CGRect]
     ) -> (columnIndex: Int, tileID: TileID)? {
-        let cgY = primaryScreenHeight - appKitPoint.y
-        let cgPoint = CGPoint(x: appKitPoint.x, y: cgY)
 
         for (tileID, frame) in frames {
             let titleBarRect = CGRect(
