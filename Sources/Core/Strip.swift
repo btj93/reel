@@ -604,6 +604,29 @@ public struct Strip: Sendable {
         columnData[i].cachedWidth = newWidth
     }
 
+    /// Set the active column's width to a specific preset index.
+    /// Follows the same pattern as cycleWidthPreset: nils widthAnimation, sets cachedWidth.
+    public mutating func setWidthPreset(index presetIndex: Int, at time: Double, params: SpringParams?) {
+        guard !columns.isEmpty, presetIndex >= 0, presetIndex < widthPresets.count else { return }
+        let i = activeColumnIndex
+        let newWidth = widthPresets[presetIndex]
+            .resolve(workingAreaWidth: workingArea.width, gap: gap)
+
+        columns[i].width = widthPresets[presetIndex]
+        columns[i].presetIndex = presetIndex
+        columns[i].isFullWidth = false
+
+        if let params = params {
+            let oldWidth = columnData[i].currentWidth(at: time)
+            columnData[i].widthAnimation = SpringAnimation(
+                from: oldWidth, to: newWidth, startTime: time, params: params
+            )
+        } else {
+            columnData[i].widthAnimation = nil
+        }
+        columnData[i].cachedWidth = newWidth
+    }
+
     /// Toggle the active column to/from full-width mode.
     public mutating func toggleFullWidth() {
         guard !columns.isEmpty else { return }

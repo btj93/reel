@@ -1401,6 +1401,32 @@ do {
     assertEq(strip.snapIndices[0], 1, "snap advanced from right to middle")
 }
 
+// MARK: - setWidthPreset
+print()
+print("setWidthPreset Tests")
+
+section("setWidthPreset — direct selection")
+do {
+    var strip = makeStrip(columnCount: 2)
+    strip.widthPresets = [.proportion(0.25), .proportion(0.5), .proportion(0.67)]
+    strip.setWidthPreset(index: 2, at: 0, params: nil)
+    assertEq(strip.columns[0].presetIndex, 2, "preset index set")
+    let expectedWidth = strip.widthPresets[2].resolve(
+        workingAreaWidth: strip.workingArea.width, gap: strip.gap
+    )
+    assertClose(strip.columnData[0].cachedWidth, expectedWidth, tolerance: 1, "width resolved")
+    check(strip.columnData[0].widthAnimation == nil, "no animation when params is nil")
+}
+
+section("setWidthPreset — animated")
+do {
+    var strip = makeStrip(columnCount: 2)
+    strip.widthPresets = [.proportion(0.25), .proportion(0.5), .proportion(0.67)]
+    strip.setWidthPreset(index: 0, at: 0, params: .horizontalScroll)
+    assertEq(strip.columns[0].presetIndex, 0, "preset index set")
+    check(strip.columnData[0].widthAnimation != nil, "animation created with params")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
