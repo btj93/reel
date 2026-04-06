@@ -521,7 +521,7 @@ public final class StripController: @unchecked Sendable {
             count += 1
             realIndex = i + 1
         }
-        return min(realIndex, strip.columns.count - 1)
+        return min(realIndex, strip.columns.count)
     }
 
     private func restoreWidths(_ targetWidths: [Double], at time: Double) {

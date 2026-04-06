@@ -360,8 +360,10 @@ public final class WindowManager: @unchecked Sendable {
             let titleBarFrame: CGRect
             if let tileID = sc.strip.columns[columnIndex].activeTile,
                let cgFrame = sc.lastCommittedFrames[tileID] {
-                // Convert CG (top-left) to AppKit (bottom-left) for overlay positioning
-                let appKitY = sc.primaryScreenHeight - cgFrame.origin.y - cgFrame.height
+                // Convert CG title bar to AppKit coords for overlay positioning
+                // CG: origin.y is window top. Title bar is [origin.y, origin.y+28].
+                // AppKit Y of title bar bottom = primaryScreenHeight - (origin.y + 28)
+                let appKitY = sc.primaryScreenHeight - cgFrame.origin.y - 28
                 titleBarFrame = CGRect(x: cgFrame.origin.x, y: appKitY, width: cgFrame.width, height: 28)
             } else {
                 titleBarFrame = .zero
