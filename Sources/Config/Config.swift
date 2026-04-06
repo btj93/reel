@@ -44,6 +44,10 @@ public struct ReelConfig: Sendable {
     public var gestureModifier: String = "fn"
     public var gestureSnap: Bool = true
 
+    // MARK: - Trackpad
+
+    public var trackpad = TrackpadConfig()
+
     // MARK: - Window Rules
 
     public var rules: [WindowRuleConfig] = []
@@ -95,6 +99,20 @@ public struct StrutsConfig: Sendable {
         self.top = top
         self.bottom = bottom
     }
+}
+
+/// Configuration for trackpad interactions.
+public struct TrackpadConfig: Sendable {
+    /// Milliseconds to hold before showing action menu (vs starting drag).
+    public var longPressDelayMs: Int = 300
+    /// Pixels of movement to disambiguate drag from long-press.
+    public var dragThresholdPx: Double = 5.0
+    /// Minimum 3-finger swipe distance to trigger focus switch.
+    public var swipeThresholdPx: Double = 50.0
+    /// Base thumbnail width in minimap reorder mode.
+    public var thumbnailWidth: Double = 120.0
+
+    public init() {}
 }
 
 /// Focus indicator configuration.
@@ -157,6 +175,15 @@ extension ReelConfig {
     }
 
     // MARK: - Helpers for reading TOML values
+
+    /// Read an integer from a TOML value.
+    private static func readInt(_ value: TOMLValueConvertible?) -> Int? {
+        if let v = value {
+            if let i = v as? Int { return i }
+            if let i = v.int { return i }
+        }
+        return nil
+    }
 
     /// Read a number from a TOML value (handles both Int and Double in TOML).
     private static func readDouble(_ value: TOMLValueConvertible?) -> Double? {
@@ -280,6 +307,14 @@ extension ReelConfig {
         if let gesture = readTable(table["gesture"]) {
             if let v = readString(gesture["modifier"]) { config.gestureModifier = v }
             if let v = readBool(gesture["snap"]) { config.gestureSnap = v }
+        }
+
+        // [trackpad]
+        if let trackpad = readTable(table["trackpad"]) {
+            if let v = readInt(trackpad["long_press_delay_ms"]) { config.trackpad.longPressDelayMs = v }
+            if let v = readDouble(trackpad["drag_threshold_px"]) { config.trackpad.dragThresholdPx = v }
+            if let v = readDouble(trackpad["swipe_threshold_px"]) { config.trackpad.swipeThresholdPx = v }
+            if let v = readDouble(trackpad["thumbnail_width"]) { config.trackpad.thumbnailWidth = v }
         }
 
         // [[rules]]

@@ -1427,6 +1427,17 @@ do {
     check(strip.columnData[0].widthAnimation != nil, "animation created with params")
 }
 
+// MARK: - TrackpadConfig
+
+section("TrackpadConfig — defaults")
+do {
+    let config = TrackpadConfig()
+    assertEq(config.longPressDelayMs, 300, "default long press delay")
+    assertClose(config.dragThresholdPx, 5.0, tolerance: 0.01, "default drag threshold")
+    assertClose(config.swipeThresholdPx, 50.0, tolerance: 0.01, "default swipe threshold")
+    assertClose(config.thumbnailWidth, 120.0, tolerance: 0.01, "default thumbnail width")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
