@@ -1316,6 +1316,43 @@ do {
     }
 }
 
+// MARK: - moveColumn(from:to:)
+
+section("moveColumn — move forward")
+do {
+    var strip = makeStrip(columnCount: 4)
+    strip.activeColumnIndex = 1
+    strip.moveColumn(from: 1, to: 3, at: 0)
+    assertEq(strip.columns[0].tiles[0], TileID(1), "col 0")
+    assertEq(strip.columns[1].tiles[0], TileID(3), "col 1")
+    assertEq(strip.columns[2].tiles[0], TileID(4), "col 2")
+    assertEq(strip.columns[3].tiles[0], TileID(2), "col 3")
+    assertEq(strip.activeColumnIndex, 3, "active tracks moved column")
+}
+
+section("moveColumn — move backward")
+do {
+    var strip = makeStrip(columnCount: 4)
+    strip.activeColumnIndex = 3
+    strip.moveColumn(from: 3, to: 0, at: 0)
+    assertEq(strip.columns[0].tiles[0], TileID(4), "col 0")
+    assertEq(strip.columns[1].tiles[0], TileID(1), "col 1")
+    assertEq(strip.columns[2].tiles[0], TileID(2), "col 2")
+    assertEq(strip.columns[3].tiles[0], TileID(3), "col 3")
+    assertEq(strip.activeColumnIndex, 0, "active tracks moved column")
+}
+
+section("moveColumn — same position is no-op")
+do {
+    var strip = makeStrip(columnCount: 3)
+    strip.activeColumnIndex = 1
+    strip.moveColumn(from: 1, to: 1, at: 0)
+    assertEq(strip.columns[0].tiles[0], TileID(1), "unchanged")
+    assertEq(strip.columns[1].tiles[0], TileID(2), "unchanged")
+    assertEq(strip.columns[2].tiles[0], TileID(3), "unchanged")
+    assertEq(strip.activeColumnIndex, 1, "active unchanged")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

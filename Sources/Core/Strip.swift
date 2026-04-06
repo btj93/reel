@@ -443,6 +443,36 @@ public struct Strip: Sendable {
         activeColumnIndex += 1
     }
 
+    /// Move a column from one index to another (for drag-to-reorder).
+    /// Uses remove/insert to handle arbitrary distances.
+    /// Updates activeColumnIndex to track the moved column.
+    /// Caller must call recenterActiveColumnAnimated(at:) after to fix viewOffset.
+    public mutating func moveColumn(from sourceIndex: Int, to destIndex: Int, at time: Double) {
+        guard sourceIndex != destIndex,
+              sourceIndex >= 0, sourceIndex < columns.count,
+              destIndex >= 0, destIndex < columns.count else { return }
+
+        let col = columns.remove(at: sourceIndex)
+        let data = columnData.remove(at: sourceIndex)
+        let snap = snapIndices.remove(at: sourceIndex)
+
+        columns.insert(col, at: destIndex)
+        columnData.insert(data, at: destIndex)
+        snapIndices.insert(snap, at: destIndex)
+
+        if activeColumnIndex == sourceIndex {
+            activeColumnIndex = destIndex
+        } else if sourceIndex < destIndex {
+            if activeColumnIndex > sourceIndex && activeColumnIndex <= destIndex {
+                activeColumnIndex -= 1
+            }
+        } else {
+            if activeColumnIndex >= destIndex && activeColumnIndex < sourceIndex {
+                activeColumnIndex += 1
+            }
+        }
+    }
+
     // MARK: - Width Management
 
     /// Cycle the active column's width through presets.
