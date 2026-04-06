@@ -6,3 +6,5 @@ DerivedData/
 xcuserdata/
 .worktrees/
 .DS_Store
+.superpowers/
+docs/
