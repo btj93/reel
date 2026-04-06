@@ -350,6 +350,7 @@ public final class StripController: @unchecked Sendable {
         if animationEnabled {
             let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
             let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth)
+            applyLayout()
             scrollWidthSettled = false
             frameLoop?.resume()
         } else {

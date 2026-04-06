@@ -165,6 +165,13 @@ public final class WindowManager: @unchecked Sendable {
             case "cmd", "command": gc.requiredModifier = .maskCommand
             default: gc.requiredModifier = .maskSecondaryFn
             }
+            gc.swipeThresholdPx = config.trackpad.swipeThresholdPx
+        }
+
+        // Trackpad config
+        if let tb = titleBarInteraction {
+            tb.longPressDelayMs = config.trackpad.longPressDelayMs
+            tb.dragThresholdPx = config.trackpad.dragThresholdPx
         }
 
         // Terminal path is read directly from config when spawning
