@@ -15,6 +15,22 @@ public final class GestureCapture: @unchecked Sendable {
     public var onGestureEnd: ((Double) -> Void)?         // timestamp
     public var onGestureCancel: (() -> Void)?
 
+    /// Gesture mode: locked at gesture begin based on finger count.
+    enum GestureMode {
+        case pan
+        case focusSwitch
+    }
+
+    private var gestureMode: GestureMode?
+    private var focusSwipeTracker = SwipeTracker()
+    private var focusCumulativeDelta: Double = 0
+
+    /// Called on 3-finger gesture end with velocity.
+    public var onFocusSwipe: ((Double) -> Void)?
+
+    /// Minimum swipe distance to trigger focus switch.
+    public var swipeThresholdPx: Double = 50
+
     /// Modifier that must be held for gesture capture (default: fn key).
     public var requiredModifier: CGEventFlags = .maskSecondaryFn
 
@@ -118,20 +134,48 @@ public final class GestureCapture: @unchecked Sendable {
         switch phase {
         case 1:  // kCGScrollPhaseBegan
             isGesturing = true
-            onGestureBegin?(timestamp)
+            let fingerCount = event.getIntegerValueField(CGEventField(rawValue: 111)!)
+            if fingerCount >= 3 {
+                gestureMode = .focusSwitch
+                focusSwipeTracker.reset()
+                focusCumulativeDelta = 0
+            } else {
+                gestureMode = .pan
+                onGestureBegin?(timestamp)
+            }
 
         case 2:  // kCGScrollPhaseChanged
             if isGesturing {
-                // Negate delta: trackpad scroll right/down = content moves left = negative offset change
-                onGestureUpdate?(-delta, timestamp)
+                if gestureMode == .focusSwitch {
+                    focusCumulativeDelta += delta
+                    focusSwipeTracker.push(delta: delta, timestamp: timestamp)
+                } else {
+                    // Negate delta: trackpad scroll right/down = content moves left = negative offset change
+                    onGestureUpdate?(-delta, timestamp)
+                }
             }
 
         case 4:  // kCGScrollPhaseEnded
-            endGesture(event)
+            if gestureMode == .focusSwitch {
+                if abs(focusCumulativeDelta) > swipeThresholdPx {
+                    onFocusSwipe?(focusSwipeTracker.velocity())
+                }
+                isGesturing = false
+                gestureMode = nil
+                focusCumulativeDelta = 0
+            } else {
+                endGesture(event)
+                gestureMode = nil
+            }
 
         case 8:  // kCGScrollPhaseCancelled
+            let wasFocusSwitch = gestureMode == .focusSwitch
             isGesturing = false
-            onGestureCancel?()
+            gestureMode = nil
+            focusCumulativeDelta = 0
+            if !wasFocusSwitch {
+                onGestureCancel?()
+            }
 
         default:
             break
