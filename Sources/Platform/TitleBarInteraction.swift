@@ -2,7 +2,7 @@ import AppKit
 import CoreGraphics
 import Core
 
-class TitleBarInteraction {
+public final class TitleBarInteraction: @unchecked Sendable {
     static let reelSentinel: Int64 = 0x5245454C
 
     enum State {
@@ -15,20 +15,20 @@ class TitleBarInteraction {
     private(set) var state: State = .idle
 
     // Config
-    var longPressDelayMs: Int = 300
-    var dragThresholdPx: Double = 5.0
-    var titleBarHeight: Double = 28.0
+    public var longPressDelayMs: Int = 300
+    public var dragThresholdPx: Double = 5.0
+    public var titleBarHeight: Double = 28.0
 
     // Callbacks
-    var onNeedsManagedFrames: (() -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat))?
-    var onNeedsTileColumnIndex: ((TileID) -> Int?)?
-    var onDragBegin: ((Int) -> Void)?
-    var onDragUpdate: ((CGPoint) -> Void)?
-    var onDragEnd: ((Int) -> Void)?
-    var onDragCancel: (() -> Void)?
-    var onMenuShow: ((Int, CGRect) -> Void)?
-    var onMenuSelect: ((Int) -> Void)?
-    var onMenuDismiss: (() -> Void)?
+    public var onNeedsManagedFrames: (() -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat))?
+    public var onNeedsTileColumnIndex: ((TileID) -> Int?)?
+    public var onDragBegin: ((Int) -> Void)?
+    public var onDragUpdate: ((CGPoint) -> Void)?
+    public var onDragEnd: ((Int) -> Void)?
+    public var onDragCancel: (() -> Void)?
+    public var onMenuShow: ((Int, CGRect) -> Void)?
+    public var onMenuSelect: ((Int) -> Void)?
+    public var onMenuDismiss: (() -> Void)?
 
     // Event taps
     var eventTap: CFMachPort?
@@ -39,10 +39,12 @@ class TitleBarInteraction {
     // Overlay
     let overlay = OverlayWindow()
 
+    public init() {}
+
     // MARK: - Start / Stop
 
     @discardableResult
-    func start() -> Bool {
+    public func start() -> Bool {
         let mask: CGEventMask = (1 << CGEventType.leftMouseDown.rawValue)
             | (1 << CGEventType.leftMouseDragged.rawValue)
             | (1 << CGEventType.leftMouseUp.rawValue)
@@ -66,7 +68,7 @@ class TitleBarInteraction {
         return true
     }
 
-    func stop() {
+    public func stop() {
         teardownEscapeTap()
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
@@ -289,7 +291,7 @@ class TitleBarInteraction {
         event.post(tap: .cghidEventTap)
     }
 
-    func cancelIfActive() {
+    public func cancelIfActive() {
         switch state {
         case .dragging, .menu:
             handleEscapeKey()

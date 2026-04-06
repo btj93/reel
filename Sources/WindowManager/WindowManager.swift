@@ -38,6 +38,9 @@ public final class WindowManager: @unchecked Sendable {
     /// Gesture capture for trackpad scrolling.
     private var gestureCapture: GestureCapture?
 
+    /// Title bar interaction (long-press, drag-to-reorder, context menu).
+    private var titleBarInteraction: TitleBarInteraction?
+
     /// IPC socket server.
     private var ipcServer: SocketServer?
 
@@ -292,8 +295,67 @@ public final class WindowManager: @unchecked Sendable {
         gestureCapture.onGestureCancel = { [weak self] in
             self?.stripController.handleGestureCancel()
         }
+        gestureCapture.swipeThresholdPx = config.trackpad.swipeThresholdPx
+        gestureCapture.onFocusSwipe = { [weak self] velocity in
+            guard let sc = self?.stripController else { return }
+            if velocity < 0 {
+                sc.focusLeftAnimated(velocity: velocity)
+            } else {
+                sc.focusRightAnimated(velocity: velocity)
+            }
+        }
         let gestureOk = gestureCapture.start()
         self.gestureCapture = gestureCapture
+
+        // Title bar interaction setup
+        let titleBar = TitleBarInteraction()
+        titleBar.longPressDelayMs = config.trackpad.longPressDelayMs
+        titleBar.dragThresholdPx = config.trackpad.dragThresholdPx
+
+        titleBar.onNeedsManagedFrames = { [weak self] () -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat) in
+            guard let sc = self?.stripController else {
+                return (frames: [:], primaryScreenHeight: 0)
+            }
+            return (frames: sc.lastCommittedFrames, primaryScreenHeight: sc.primaryScreenHeight)
+        }
+
+        titleBar.onNeedsTileColumnIndex = { [weak self] (tileID: TileID) -> Int? in
+            guard let sc = self?.stripController else { return nil }
+            for (i, col) in sc.strip.columns.enumerated() {
+                if col.tiles.contains(tileID) { return i }
+            }
+            return nil
+        }
+
+        titleBar.onDragBegin = { [weak self] columnIndex in
+            self?.stripController.enterMinimapMode(draggedColumnIndex: columnIndex)
+        }
+        titleBar.onDragUpdate = { [weak self] (_: CGPoint) in
+            // Cursor position tracked for minimap layout — future frame ticks use this
+        }
+        titleBar.onDragEnd = { [weak self] (_: Int) in
+            // For now, cancel instead of commit (insertion index computation deferred)
+            self?.stripController.cancelMinimapMode()
+        }
+        titleBar.onDragCancel = { [weak self] in
+            self?.stripController.cancelMinimapMode()
+        }
+        titleBar.onMenuShow = { [weak self] (_: Int, _: CGRect) in
+            // Pill bar display — wired in a future task
+        }
+        titleBar.onMenuSelect = { [weak self] (_: Int) in
+            // Menu action dispatch — wired in a future task
+        }
+        titleBar.onMenuDismiss = { [weak self] in
+            // Menu dismissed without selection
+        }
+
+        let titleBarOk = titleBar.start()
+        self.titleBarInteraction = titleBar
+        #if DEBUG
+            print("[WM] title bar interaction: \(titleBarOk)")
+            fflush(stdout)
+        #endif
         #if DEBUG
             print("[WM] gesture capture: \(gestureOk)")
             fflush(stdout)
@@ -426,6 +488,8 @@ public final class WindowManager: @unchecked Sendable {
             sc.frameLoop?.stop()
             sc.focusIndicator.hide()
         }
+        titleBarInteraction?.stop()
+        titleBarInteraction = nil
         gestureCapture?.stop()
         hotkeyManager.stop()
         tracker.stopObserving()
@@ -718,6 +782,9 @@ public final class WindowManager: @unchecked Sendable {
 
     private func handleSpaceChange() {
         guard !isPaused else { return }
+
+        // Cancel any in-progress title bar drag/menu — space transition invalidates context.
+        titleBarInteraction?.cancelIfActive()
 
         // Cancel any pending external focus scroll — it was a space-transition artifact.
         pendingFocusScroll?.cancel()
