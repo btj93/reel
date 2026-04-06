@@ -1369,6 +1369,38 @@ do {
     assertClose(anim.initialVelocity, 200, tolerance: 1, "custom kick")
 }
 
+// MARK: - Velocity-seeded navigation
+print()
+print("Velocity-Seeded Navigation Tests")
+
+section("navigateRight with velocity — focus change uses velocity")
+do {
+    var strip = makeStrip(columnCount: 3, snapPoints: [.middle])
+    let anim = strip.navigateRight(at: 0, velocity: 1500)
+    check(anim != nil, "animation created")
+    assertEq(strip.activeColumnIndex, 1, "moved to col 1")
+    assertClose(anim!.initialVelocity, 1500, tolerance: 1, "uses provided velocity")
+}
+
+section("navigateLeft with velocity — edge bounce uses kickVelocity")
+do {
+    var strip = makeStrip(columnCount: 3, snapPoints: [.middle])
+    let anim = strip.navigateLeft(at: 0, velocity: 800)
+    check(anim != nil, "animation created")
+    assertClose(anim!.from, anim!.to, tolerance: 1, "rubber-band from==to")
+}
+
+section("navigateRight with velocity — snap point advance uses velocity")
+do {
+    var strip = makeStrip(columnCount: 2, snapPoints: [.left, .middle, .right])
+    // Set to right snap (index 2); navigateRight decrements to middle (index 1)
+    // Current viewOffset=0 (left), target will be -360 (middle) — distinct, so animation fires
+    strip.snapIndices[0] = 2
+    let anim = strip.navigateRight(at: 0, velocity: 500)
+    check(anim != nil, "animation created")
+    assertEq(strip.snapIndices[0], 1, "snap advanced from right to middle")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

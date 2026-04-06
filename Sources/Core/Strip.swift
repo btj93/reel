@@ -252,6 +252,32 @@ public struct Strip: Sendable {
         return anim
     }
 
+    /// Create a spring animation with explicit velocity (trackpad path).
+    /// Does NOT compound with in-flight animation velocity.
+    private mutating func createVelocityAnimation(
+        from startOffset: Double? = nil,
+        to targetOffset: Double,
+        velocity: Double,
+        at time: Double
+    ) -> SpringAnimation? {
+        let fromPos = startOffset ?? viewOffset.current(at: time)
+        if abs(fromPos - targetOffset) < 1.0 {
+            viewOffset = .static(targetOffset)
+            return nil
+        }
+
+        let anim = SpringAnimation(
+            from: fromPos,
+            to: targetOffset,
+            initialVelocity: velocity,
+            startTime: time,
+            params: .horizontalScroll
+        )
+
+        viewOffset = .animation(anim)
+        return anim
+    }
+
     /// Create a scroll animation from an explicit start position (used after focus changes
     /// where activeColumnIndex has shifted, making viewOffset.current stale).
     private mutating func createFocusChangeAnimation(from startOffset: Double, to targetOffset: Double, at time: Double) -> SpringAnimation? {
@@ -350,6 +376,78 @@ public struct Strip: Sendable {
         } else {
             // At leftmost column + rightmost snap — rubber-band bounce
             return createRubberBandAnimation(direction: -1, at: time)
+        }
+    }
+
+    // MARK: - Velocity-Seeded Navigation (Trackpad)
+
+    /// Navigate right with trackpad-supplied velocity.
+    @discardableResult
+    public mutating func navigateRight(at time: Double, velocity: Double) -> SpringAnimation? {
+        guard !columns.isEmpty else { return nil }
+        let currentSnap = snapIndices[activeColumnIndex]
+
+        if currentSnap > 0 {
+            snapIndices[activeColumnIndex] -= 1
+            let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let targetOffset = computeSnapOffset(
+                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+                columnWidth: colWidth,
+                workingAreaWidth: workingArea.width
+            )
+            return createVelocityAnimation(to: targetOffset, velocity: velocity, at: time)
+        } else if activeColumnIndex < columns.count - 1 {
+            let currentOffset = viewOffset.current(at: time)
+            let oldColX = columnX(at: activeColumnIndex, time: time)
+            activeColumnIndex += 1
+            let newColX = columnX(at: activeColumnIndex, time: time)
+            let adjustedOffset = currentOffset + oldColX - newColX
+            let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let (snapIdx, targetOffset) = nextSnapMilestoneLeft(
+                currentOffset: adjustedOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            snapIndices[activeColumnIndex] = snapIdx
+            return createVelocityAnimation(from: adjustedOffset, to: targetOffset, velocity: velocity, at: time)
+        } else {
+            return createRubberBandAnimation(direction: 1, kickVelocity: abs(velocity), at: time)
+        }
+    }
+
+    /// Navigate left with trackpad-supplied velocity.
+    @discardableResult
+    public mutating func navigateLeft(at time: Double, velocity: Double) -> SpringAnimation? {
+        guard !columns.isEmpty else { return nil }
+        let currentSnap = snapIndices[activeColumnIndex]
+
+        if currentSnap < snapPoints.count - 1 {
+            snapIndices[activeColumnIndex] += 1
+            let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let targetOffset = computeSnapOffset(
+                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
+                columnWidth: colWidth,
+                workingAreaWidth: workingArea.width
+            )
+            return createVelocityAnimation(to: targetOffset, velocity: velocity, at: time)
+        } else if activeColumnIndex > 0 {
+            let currentOffset = viewOffset.current(at: time)
+            let oldColX = columnX(at: activeColumnIndex, time: time)
+            activeColumnIndex -= 1
+            let newColX = columnX(at: activeColumnIndex, time: time)
+            let adjustedOffset = currentOffset + oldColX - newColX
+            let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let (snapIdx, targetOffset) = nextSnapMilestoneRight(
+                currentOffset: adjustedOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+            snapIndices[activeColumnIndex] = snapIdx
+            return createVelocityAnimation(from: adjustedOffset, to: targetOffset, velocity: velocity, at: time)
+        } else {
+            return createRubberBandAnimation(direction: -1, kickVelocity: -abs(velocity), at: time)
         }
     }
 
