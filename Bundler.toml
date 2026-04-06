@@ -1,11 +1,12 @@
-[apps.ScrollWM]
-product = "ScrollWM"
+[apps.Reel]
+product = "Reel"
 version = "0.1.0"
+icon = "Resources/Reel.icns"
 
-[apps.ScrollWM.plist]
+[apps.Reel.plist]
 # Hide from Dock (menu bar only app)
 LSUIElement = true
-CFBundleIdentifier = "dev.scrollwm.ScrollWM"
-CFBundleName = "ScrollWM"
-CFBundleDisplayName = "ScrollWM"
+CFBundleIdentifier = "dev.reel.Reel"
+CFBundleName = "Reel"
+CFBundleDisplayName = "Reel"
 NSHighResolutionCapable = true

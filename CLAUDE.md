@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-ScrollWM — a macOS scrollable tiling window manager inspired by niri. Windows live on an infinite horizontal strip per display; you scroll left/right to navigate. Swift, Accessibility API, no SIP required.
+Reel — a macOS scrollable tiling window manager inspired by niri. Windows live on an infinite horizontal strip per display; you scroll left/right to navigate. Swift, Accessibility API, no SIP required.
 
 ## Build & Run
 
 ```bash
 swift build                              # Build all targets
 swift run RunTests                       # Run tests (custom runner, not XCTest — no Xcode needed)
-swift build && .build/debug/ScrollWM &   # Build and run (grant AX permission once to this path)
-.build/debug/scrollwm-msg list-windows   # CLI: send IPC command to running instance
+swift build && .build/debug/Reel &       # Build and run (grant AX permission once to this path)
+.build/debug/reel-msg list-windows       # CLI: send IPC command to running instance
 bash scripts/bundle.sh                   # Create .app bundle (for distribution only, not dev)
 make run-debug                           # Kill existing, bundle, run with stderr visible
 make run                                 # Kill existing, bundle, open .app
@@ -20,14 +20,14 @@ make run                                 # Kill existing, bundle, open .app
 
 **macOS 14+ (Sonoma)** minimum — required for `CADisplayLink` on macOS.
 
-**Accessibility permission** persists at `.build/debug/ScrollWM` across rebuilds. Don't use the .app bundle during development — it re-prompts every time.
+**Accessibility permission** persists at `.build/debug/Reel` across rebuilds. Don't use the .app bundle during development — it re-prompts every time.
 
 ## Architecture
 
 Five library modules with strict layering:
 
 ```
-ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
+Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
                               │                         ↑
                               ├──→ Config (TOMLKit) ────┘
                               └──→ IPC ─────────────────┘
@@ -45,7 +45,6 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 - `FrameLoop`: CADisplayLink, pauses when idle, resumes on animation start.
 - `DisplayManager`: converts NSScreen (AppKit bottom-left coords) to CG (top-left coords) via `primaryScreenHeight - visibleFrame.maxY`.
 - `HotkeyManager`: CGEventTap + key string parser (`"hyper-h"` → modifiers + keyCode).
-- `ZenDimmer`: dims unfocused windows via private `CGSSetWindowAlpha`. **Main-thread only** — `CGSDefaultConnectionForThread()` returns per-thread connection.
 - `FocusIndicator`: visual highlight for active window (ring/raise/flash styles).
 
 **WindowManager** — Orchestration, main thread.
@@ -53,9 +52,9 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 - `StripController`: two modes — `applyLayout()` (instant) and `handleFrameTick(time:)` (animated). `animationEnabled` toggles between them.
 - `WindowTracker`: AX observers + NSWorkspace notifications. Periodic 1s health check catches missed `kAXUIElementDestroyedNotification`.
 
-**Config** — `~/.config/scrollwm/config.toml` via TOMLKit. Reload via menu bar button.
+**Config** — `~/.config/reel/config.toml` via TOMLKit. Reload via menu bar button.
 
-**IPC** — Unix socket at `/tmp/scrollwm_{uid}.sock`. `SocketServer` + `ScrollWMCLI`. Available commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `toggle-always-on-top`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
+**IPC** — Unix socket at `/tmp/reel_{uid}.sock`. `SocketServer` + `ReelCLI`. Available commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
 
 ## Key Patterns
 
@@ -69,9 +68,9 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 **Rubber-band bounce**: at strip edges, creates underdamped spring (ratio=0.6) with kick velocity that overshoots then bounces back.
 
-**Private APIs**: Three private APIs are used (none require SIP disable): `_AXUIElementGetWindow` (AXUIElement→CGWindowID mapping), `CGSSetWindowAlpha` (per-window opacity for zen mode), and `CGSSetWindowLevel` (per-window level for always-on-top). Validated by AeroSpace/Amethyst across macOS 10.12–15. **macOS 26+ (Tahoe)**: `CGSSetWindowAlpha` and `CGSSetWindowLevel` return success but are visual no-ops due to the Liquid Glass compositor rework. Guarded by `ZenDimmer.cgsAvailable` runtime check. Zen mode, opacity rules, floating opacity, and always-on-top silently no-op on Tahoe.
+**Private API**: One private API is used (no SIP required): `_AXUIElementGetWindow` (AXUIElement→CGWindowID mapping). Validated stable across macOS 10.12–15 by AeroSpace/Amethyst.
 
-**Threading**: CGS calls (`CGSSetWindowAlpha`) must run on main thread. AX calls are dispatched to per-app background threads via `AXApp`. Layout computation and `computeTargetFrames` run on main thread during frame ticks.
+**Threading**: AX calls are dispatched to per-app background threads via `AXApp`. Layout computation and `computeTargetFrames` run on main thread during frame ticks.
 
 ## Testing
 
@@ -79,10 +78,6 @@ ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 ## Config
 
-Location: `~/.config/scrollwm/config.toml` (created on first launch). Reload via menu bar "Reload Config" button.
+Location: `~/.config/reel/config.toml` (created on first launch). Reload via menu bar "Reload Config" button.
 
-Key sections: `[layout]` (gap, focus_mode, struts, floating_opacity, floating_always_on_top), `[animation]` (stiffness, damping), `[keybindings]` (action = "modifier-key"), `[[rules]]` (app_id/floating/opacity/always_on_top), `[terminal]` (app path).
-
-**Window opacity**: Per-window opacity via `[[rules]]` with `opacity = 0.0–1.0`. Rule opacity overrides zen mode dimming. `floating_opacity` in `[layout]` applies to user-toggled floating windows (alt-space). Priority: rule opacity > floating opacity > zen dim > 1.0.
-
-**Always on top**: Pin any window above all others via `alt-t` hotkey or `[[rules]]` with `always_on_top = true`. Uses private `CGSSetWindowLevel` API (no SIP required). Independent of floating/opacity/zen mode.
+Key sections: `[layout]` (gap, struts), `[animation]` (stiffness, damping), `[keybindings]` (action = "modifier-key"), `[[rules]]` (app_id/floating), `[focus_indicator]` (style/color/width).

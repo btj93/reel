@@ -3,11 +3,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "ScrollWM",
+    name: "Reel",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "ScrollWM", targets: ["ScrollWM"]),
-        .executable(name: "scrollwm-msg", targets: ["ScrollWMCLI"]),
+        .executable(name: "Reel", targets: ["Reel"]),
+        .executable(name: "reel-msg", targets: ["ReelCLI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0"),
@@ -15,16 +15,16 @@ let package = Package(
     targets: [
         // Main app
         .executableTarget(
-            name: "ScrollWM",
+            name: "Reel",
             dependencies: ["Core", "Platform", "WindowManager", "Config", "IPC"],
-            path: "Sources/ScrollWM"
+            path: "Sources/Reel"
         ),
 
         // CLI client
         .executableTarget(
-            name: "ScrollWMCLI",
+            name: "ReelCLI",
             dependencies: ["IPC"],
-            path: "Sources/ScrollWMCLI"
+            path: "Sources/ReelCLI"
         ),
 
         // Core: pure layout logic (Foundation only, no AppKit)

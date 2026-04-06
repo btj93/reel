@@ -2,7 +2,7 @@
 # Manual app bundling script (backup for swift-bundler)
 set -euo pipefail
 
-PRODUCT="ScrollWM"
+PRODUCT="Reel"
 BUILD_DIR=".build/debug"
 BUNDLE_DIR=".build/bundled/${PRODUCT}.app"
 
@@ -22,11 +22,11 @@ if [ ! -d "${BUNDLE_DIR}/Contents/MacOS" ]; then
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>dev.scrollwm.ScrollWM</string>
+    <string>dev.reel.Reel</string>
     <key>CFBundleName</key>
-    <string>ScrollWM</string>
+    <string>Reel</string>
     <key>CFBundleDisplayName</key>
-    <string>ScrollWM</string>
+    <string>Reel</string>
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
     <key>CFBundleShortVersionString</key>
@@ -34,7 +34,9 @@ if [ ! -d "${BUNDLE_DIR}/Contents/MacOS" ]; then
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>ScrollWM</string>
+    <string>Reel</string>
+    <key>CFBundleIconFile</key>
+    <string>Reel</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
@@ -47,11 +49,18 @@ fi
 # Only replace the binary — preserves macOS permissions on the .app bundle
 cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
 
+# Copy icon
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ICON_SRC="${SCRIPT_DIR}/../Resources/Reel.icns"
+if [ -f "${ICON_SRC}" ]; then
+    cp "${ICON_SRC}" "${BUNDLE_DIR}/Contents/Resources/"
+fi
+
 # Ad-hoc code sign with a stable identifier.
 # macOS TCC tracks permissions by code signature hash — without signing,
 # every rebuild produces a different hash and macOS revokes permission.
 # Ad-hoc signing (-s -) with a fixed identifier keeps it stable.
-codesign -fs - --identifier "dev.scrollwm.ScrollWM" "${BUNDLE_DIR}"
+codesign -fs - --identifier "dev.reel.Reel" "${BUNDLE_DIR}"
 
 echo "Bundle updated at: ${BUNDLE_DIR}"
 echo "Run with: open ${BUNDLE_DIR}"

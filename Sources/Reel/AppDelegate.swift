@@ -11,7 +11,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
-        print("[ScrollWM] applicationDidFinishLaunching")
+        print("[Reel] applicationDidFinishLaunching")
         fflush(stdout)
         #endif
 
@@ -22,13 +22,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Prevent App Nap from throttling us
         ProcessInfo.processInfo.beginActivity(
             options: [.userInitiated, .idleDisplaySleepDisabled],
-            reason: "ScrollWM window management"
+            reason: "Reel window management"
         )
 
         // Check Accessibility permission
         let trusted = AXIsProcessTrusted()
         #if DEBUG
-        print("[ScrollWM] AXIsProcessTrusted = \(trusted)")
+        print("[Reel] AXIsProcessTrusted = \(trusted)")
         fflush(stdout)
         #endif
 
@@ -68,8 +68,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let button = statusItem.button {
-            button.title = "⊞"
-            button.font = NSFont.systemFont(ofSize: 14)
+            button.image = makeMenuBarIcon()
         }
 
         let menu = NSMenu()
@@ -82,7 +81,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         } else {
             let isPaused = windowManager?.isPaused ?? false
-            menu.addItem(NSMenuItem(title: "ScrollWM v0.1.0", action: nil, keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Reel v0.1.0", action: nil, keyEquivalent: ""))
             menu.addItem(NSMenuItem.separator())
 
             // Keybinding actions
@@ -96,7 +95,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 ("toggle_full_width","Toggle Full Width",  6),
                 ("toggle_floating",  "Toggle Floating",   7),
                 ("close_window",     "Close Window",      8),
-                ("toggle_always_on_top", "Toggle Always On Top", 9),
             ]
             for entry in actions {
                 let keyString = keybindings[entry.action] ?? ""
@@ -130,7 +128,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         windowManager = wm
         applyLoginItem(enabled: wm.config.startAtLogin)
         #if DEBUG
-        print("[ScrollWM] Ready")
+        print("[Reel] Ready")
         fflush(stdout)
         #endif
     }
@@ -139,7 +137,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard Bundle.main.bundleIdentifier != nil else {
             if enabled {
                 #if DEBUG
-                print("[ScrollWM] start_at_login requires running as .app bundle — ignoring")
+                print("[Reel] start_at_login requires running as .app bundle — ignoring")
                 fflush(stdout)
                 #endif
             }
@@ -150,19 +148,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if enabled && service.status != .enabled {
                 try service.register()
                 #if DEBUG
-                print("[ScrollWM] Registered as login item")
+                print("[Reel] Registered as login item")
                 fflush(stdout)
                 #endif
             } else if !enabled && service.status == .enabled {
                 try service.unregister()
                 #if DEBUG
-                print("[ScrollWM] Unregistered login item")
+                print("[Reel] Unregistered login item")
                 fflush(stdout)
                 #endif
             }
         } catch {
             #if DEBUG
-            print("[ScrollWM] Login item error: \(error)")
+            print("[Reel] Login item error: \(error)")
             fflush(stdout)
             #endif
         }
@@ -184,7 +182,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             6: .toggleFullWidth,
             7: .toggleFloating,
             8: .closeWindow,
-            9: .toggleAlwaysOnTop,
         ]
         if let action = actionMap[sender.tag] {
             windowManager?.performAction(action)
@@ -205,10 +202,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func clearPositions() {
-        windowManager?.positionMemory?.clearAll()
-        windowManager?.positionMemory?.persistToDisk()
+        windowManager?.snapshotStore?.clearAll()
+        windowManager?.snapshotStore?.persistToDisk()
         #if DEBUG
-        print("[ScrollWM] Cleared all saved positions")
+        print("[Reel] Cleared all saved positions")
         fflush(stdout)
         #endif
     }
@@ -260,5 +257,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return (key, modifiers)
+    }
+
+    // MARK: - Menu Bar Icon
+
+    /// Draw a menu bar template icon: three window columns on a strip.
+    /// Center column is taller (focused). Thin horizontal rails connect them.
+    private func makeMenuBarIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 16)
+        let image = NSImage(size: size, flipped: false) { _ in
+            let color = NSColor.black
+
+            // Three columns: left, center (focused/taller), right
+            // Heights: side columns shorter, center taller
+            let gap: CGFloat = 1.5
+            let colW: CGFloat = 4.5
+            let sideH: CGFloat = 10
+            let centerH: CGFloat = 14
+            let r: CGFloat = 1.5
+
+            let totalW = colW * 3 + gap * 2  // 16.5
+            let x0 = (size.width - totalW) / 2
+
+            // Side columns — slightly transparent
+            color.withAlphaComponent(0.45).setFill()
+            let sideY = (size.height - sideH) / 2
+            NSBezierPath(roundedRect: NSRect(x: x0, y: sideY, width: colW, height: sideH), xRadius: r, yRadius: r).fill()
+            NSBezierPath(roundedRect: NSRect(x: x0 + colW * 2 + gap * 2, y: sideY, width: colW, height: sideH), xRadius: r, yRadius: r).fill()
+
+            // Center column — full opacity, taller
+            color.setFill()
+            let centerY = (size.height - centerH) / 2
+            NSBezierPath(roundedRect: NSRect(x: x0 + colW + gap, y: centerY, width: colW, height: centerH), xRadius: r, yRadius: r).fill()
+
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 }

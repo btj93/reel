@@ -1,7 +1,7 @@
 import Foundation
 
 /// Unix domain socket server for IPC.
-/// Listens on /tmp/scrollwm_{uid}.sock for JSON-encoded commands.
+/// Listens on /tmp/reel_{uid}.sock for JSON-encoded commands.
 public final class SocketServer: @unchecked Sendable {
     private let socketPath: String
     private var listenerFD: Int32 = -1
@@ -12,12 +12,12 @@ public final class SocketServer: @unchecked Sendable {
     private static let jsonEncoder = JSONEncoder()
 
     /// Called when a command is received. Returns a response.
-    public var onCommand: ((ScrollWMCommand) -> ScrollWMResponse)?
+    public var onCommand: ((ReelCommand) -> ReelResponse)?
 
-    public var onMessage: ((IPCMessage) -> ScrollWMResponse)?
+    public var onMessage: ((IPCMessage) -> ReelResponse)?
 
     public init() {
-        self.socketPath = scrollWMSocketPath()
+        self.socketPath = reelSocketPath()
     }
 
     deinit { stop() }
@@ -125,23 +125,23 @@ public final class SocketServer: @unchecked Sendable {
         let data = Data(buffer[0..<bytesRead])
 
         // Parse command
-        let response: ScrollWMResponse
+        let response: ReelResponse
         if let rawStr = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
             // Try JSON protocol first
             if let jsonData = rawStr.data(using: .utf8),
                let message = try? Self.jsonDecoder.decode(IPCMessage.self, from: jsonData) {
                 response = onMessage?(message) ?? onCommand.flatMap { handler in
-                    ScrollWMCommand(rawValue: message.command).map { handler($0) }
-                } ?? ScrollWMResponse(success: false, message: "No handler")
+                    ReelCommand(rawValue: message.command).map { handler($0) }
+                } ?? ReelResponse(success: false, message: "No handler")
             }
             // Fall back to raw string for backward compatibility
-            else if let command = ScrollWMCommand(rawValue: rawStr) {
-                response = onCommand?(command) ?? ScrollWMResponse(success: false, message: "No handler")
+            else if let command = ReelCommand(rawValue: rawStr) {
+                response = onCommand?(command) ?? ReelResponse(success: false, message: "No handler")
             } else {
-                response = ScrollWMResponse(success: false, message: "Unknown command: \(rawStr)")
+                response = ReelResponse(success: false, message: "Unknown command: \(rawStr)")
             }
         } else {
-            response = ScrollWMResponse(success: false, message: "Invalid data")
+            response = ReelResponse(success: false, message: "Invalid data")
         }
 
         // Send response

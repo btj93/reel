@@ -1,15 +1,13 @@
-# ScrollWM Configuration
+# Reel Configuration
 # Edit this file and save — changes apply automatically.
 
-# Start ScrollWM automatically when you log in (requires .app bundle)
+# Start Reel automatically when you log in (requires .app bundle)
 # start_at_login = false
 
 [layout]
 gap = 16
 snap = ["middle"]  # any combination of: "left", "middle", "right"
 animation_enabled = true
-# floating_opacity = 1.0  # opacity for user-toggled floating windows (0.0–1.0)
-# floating_always_on_top = false  # auto-pin user-toggled floating windows above all others
 # width_presets = [0.33, 0.5, 0.67]  # proportions of screen width for cycle_width
 
 # default_width = { proportion = 0.5 }
@@ -42,7 +40,6 @@ cycle_width = "alt-r"
 toggle_full_width = "alt-f"
 toggle_floating = "alt-space"
 close_window = "alt-w"
-toggle_always_on_top = "alt-t"
 
 [gesture]
 modifier = "fn"  # Hold this key + trackpad scroll to pan the strip
@@ -55,12 +52,6 @@ snap = true  # Set to false to let gestures move freely without snapping to colu
 # width = 3             # border width in points (ring mode only)
 # corner_radius = 10    # corner radius in points (ring mode only)
 
-# Zen mode: dim unfocused tiled windows to highlight the focused one
-# [zen_mode]
-# enabled = false
-# dim_alpha = 0.3
-# fade_duration = 0.15
-
 # Window rules: match by app bundle ID or title regex
 # [[rules]]
 # app_id = "us.zoom.xos"
@@ -70,16 +61,7 @@ snap = true  # Set to false to let gestures move freely without snapping to colu
 # app_id_regex = "com\\.apple\\.systempreferences"
 # floating = true
 
-# [[rules]]
-# app_id = "com.example.app"
-# opacity = 0.9            # override zen mode and floating opacity for this app
-
-# [[rules]]
-# app_id = "com.apple.calculator"
-# always_on_top = true                # keep this app above all others
-
 # Per-app matching strategy for position memory
 # [[position_memory_rules]]
 # app_id = "com.apple.finder"
 # match_by = "order"  # "title" (default) or "order"
-

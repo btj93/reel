@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1a1a2e" />
+      <stop offset="100%" stop-color="#16213e" />
+    </linearGradient>
+
+    <linearGradient id="centerGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#e94560" />
+      <stop offset="100%" stop-color="#c23152" />
+    </linearGradient>
+
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="24" result="blur" />
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+
+  <line x1="20" y1="126" x2="492" y2="126" stroke="#ffffff" stroke-width="2" opacity="0.05" />
+  <line x1="20" y1="386" x2="492" y2="386" stroke="#ffffff" stroke-width="2" opacity="0.05" />
+
+  <rect x="-40" y="166" width="70" height="180" rx="12" fill="#2a2a4a" opacity="0.3" />
+  <rect x="482" y="166" width="70" height="180" rx="12" fill="#2a2a4a" opacity="0.3" />
+
+  <rect x="50" y="146" width="106" height="220" rx="16" fill="#2a2a4a" opacity="0.6" />
+
+  <rect x="356" y="146" width="106" height="220" rx="16" fill="#2a2a4a" opacity="0.6" />
+
+  <rect x="176" y="106" width="160" height="300" rx="20" fill="#e94560" filter="url(#glow)" opacity="0.35" />
+
+  <rect x="176" y="106" width="160" height="300" rx="20" fill="url(#centerGrad)" />
+
+  <circle cx="196" cy="128" r="4" fill="#ffffff" opacity="0.3" />
+  <circle cx="210" cy="128" r="4" fill="#ffffff" opacity="0.3" />
+  <circle cx="224" cy="128" r="4" fill="#ffffff" opacity="0.3" />
+
+  <line x1="176" y1="146" x2="336" y2="146" stroke="#ffffff" stroke-width="1" opacity="0.15" />
+
+  <rect x="196" y="166" width="60" height="8" rx="4" fill="#ffffff" opacity="0.3" />
+  
+  <rect x="196" y="186" width="120" height="6" rx="3" fill="#ffffff" opacity="0.15" />
+  <rect x="196" y="202" width="110" height="6" rx="3" fill="#ffffff" opacity="0.15" />
+  <rect x="196" y="218" width="90" height="6" rx="3" fill="#ffffff" opacity="0.15" />
+
+  <rect width="512" height="512" rx="112" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.08" />
+</svg>
+

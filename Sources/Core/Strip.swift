@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-/// The horizontal strip: the central data model for ScrollWM.
+/// The horizontal strip: the central data model for Reel.
 /// Contains an ordered array of columns on an infinite horizontal strip,
 /// with a scroll state machine controlling the viewport.
 public struct Strip: Sendable {

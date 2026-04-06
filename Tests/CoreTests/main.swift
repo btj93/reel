@@ -59,28 +59,8 @@ func makeLayoutStrip(widths: [Double], activeIndex: Int = 0, viewOffset: Double 
     return Strip(columns: columns, columnData: columnData, activeColumnIndex: activeIndex, viewOffset: .static(viewOffset), snapIndices: snapIndices, gap: 16, workingArea: wa)
 }
 
-/// Parse a TOML string into a ScrollWMConfig for testing.
-func parseTestConfig(_ toml: String) -> (ScrollWMConfig, String?) {
-    do {
-        let table = try TOMLKit.TOMLTable(string: toml)
-        var config = ScrollWMConfig()
-        if let zm = table["zen_mode"]?.table {
-            if let v = zm["enabled"]?.bool { config.zenMode.enabled = v }
-            if let v = zm["dim_alpha"]?.double ?? zm["dim_alpha"]?.int.map({ Double($0) }) {
-                config.zenMode.dimAlpha = max(0.0, min(1.0, v))
-            }
-            if let v = zm["fade_duration"]?.double ?? zm["fade_duration"]?.int.map({ Double($0) }) {
-                config.zenMode.fadeDuration = max(0.05, v)
-            }
-        }
-        return (config, nil)
-    } catch {
-        return (ScrollWMConfig(), error.localizedDescription)
-    }
-}
-
 // ============================================================
-print("━━━ ScrollWM Core Tests ━━━")
+print("━━━ Reel Core Tests ━━━")
 print()
 
 // MARK: - Strip Tests
@@ -1018,116 +998,274 @@ do {
 }
 
 // ============================================================
-print("▶ ZenModeConfig Parsing")
-
-section("default values")
-do {
-    let config = ScrollWMConfig()
-    check(!config.zenMode.enabled, "zen mode disabled by default")
-    assertClose(config.zenMode.dimAlpha, 0.3, tolerance: 0.001, "default dimAlpha")
-    assertClose(config.zenMode.fadeDuration, 0.15, tolerance: 0.001, "default fadeDuration")
-}
-
-section("valid config round-trip")
-do {
-    let toml = """
-    [zen_mode]
-    enabled = true
-    dim_alpha = 0.5
-    fade_duration = 0.2
-    """
-    let (config, error) = parseTestConfig(toml)
-    check(error == nil, "no parse error: \(error ?? "")")
-    check(config.zenMode.enabled, "enabled parsed")
-    assertClose(config.zenMode.dimAlpha, 0.5, tolerance: 0.001, "dimAlpha parsed")
-    assertClose(config.zenMode.fadeDuration, 0.2, tolerance: 0.001, "fadeDuration parsed")
-}
-
-section("dim_alpha clamped to 0.0...1.0")
-do {
-    let toml1 = """
-    [zen_mode]
-    dim_alpha = -0.5
-    """
-    let (config1, _) = parseTestConfig(toml1)
-    assertClose(config1.zenMode.dimAlpha, 0.0, tolerance: 0.001, "negative clamped to 0")
-
-    let toml2 = """
-    [zen_mode]
-    dim_alpha = 2.0
-    """
-    let (config2, _) = parseTestConfig(toml2)
-    assertClose(config2.zenMode.dimAlpha, 1.0, tolerance: 0.001, "over 1 clamped to 1")
-}
-
-section("fade_duration clamped to minimum 0.05")
-do {
-    let toml1 = """
-    [zen_mode]
-    fade_duration = 0.0
-    """
-    let (config1, _) = parseTestConfig(toml1)
-    assertClose(config1.zenMode.fadeDuration, 0.05, tolerance: 0.001, "zero clamped to 0.05")
-
-    let toml2 = """
-    [zen_mode]
-    fade_duration = -1.0
-    """
-    let (config2, _) = parseTestConfig(toml2)
-    assertClose(config2.zenMode.fadeDuration, 0.05, tolerance: 0.001, "negative clamped to 0.05")
-}
-
-// ═══════════════════════════════════════
+// MARK: - Strip Snapshot Matching
+// ============================================================
 print()
-print("▶ Window Opacity Config Parsing")
+print("▶ Strip Snapshot Matching")
 
-section("default floatingOpacity is 1.0")
-do {
-    let config = ScrollWMConfig()
-    assertClose(config.floatingOpacity, 1.0, tolerance: 0.001, "default floatingOpacity")
+// Helpers for snapshot tests
+func makeSlot(
+    windowID: CGWindowID? = nil, bundleID: String, title: String? = nil,
+    width: ColumnWidth = .proportion(0.5), presetIndex: Int? = nil, isFullWidth: Bool = false,
+    vacant: Bool = false, vacatedAt: Date? = nil
+) -> SlotDescriptor {
+    SlotDescriptor(windowID: windowID, bundleID: bundleID, windowTitle: title,
+                   width: width, presetIndex: presetIndex, isFullWidth: isFullWidth,
+                   vacant: vacant, vacatedAt: vacatedAt)
 }
 
-section("default rule opacity is nil")
-do {
-    let rule = WindowRuleConfig()
-    check(rule.opacity == nil, "default opacity should be nil")
+func makeStripWindow(tileID: UInt32, windowID: CGWindowID, bundleID: String, title: String? = nil) -> StripWindowInfo {
+    StripWindowInfo(tileID: TileID(tileID), windowID: windowID, bundleID: bundleID, windowTitle: title)
 }
 
-section("opacity clamped to 0..1")
+section("WindowID fast-path match")
 do {
-    var rc = WindowRuleConfig()
-    rc.opacity = max(0.0, min(1.0, -0.5))
-    assertClose(rc.opacity!, 0.0, tolerance: 0.001, "negative clamped to 0")
-    rc.opacity = max(0.0, min(1.0, 1.5))
-    assertClose(rc.opacity!, 1.0, tolerance: 0.001, "over 1 clamped to 1")
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(windowID: 100, bundleID: "com.app.A"),
+        makeSlot(windowID: 200, bundleID: "com.app.B"),
+    ], lastUpdated: Date())
+    let result = matchWindowToSlot(windowID: 100, bundleID: "com.app.A", title: nil,
+                                    snapshot: snapshot, filledSlots: [], now: Date())
+    assertEq(result, 0, "windowID 100 matches slot 0")
 }
 
-section("WindowRule carries opacity")
+section("WindowID fast-path requires bundleID match (reuse guard)")
 do {
-    let rule = WindowRule(appID: "com.test", classification: .tile, opacity: 0.7)
-    assertClose(rule.opacity!, 0.7, tolerance: 0.001, "opacity preserved")
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(windowID: 100, bundleID: "com.app.A"),
+    ], lastUpdated: Date())
+    // Different bundleID — should NOT match even though windowID matches
+    let result = matchWindowToSlot(windowID: 100, bundleID: "com.app.DIFFERENT", title: nil,
+                                    snapshot: snapshot, filledSlots: [], now: Date())
+    check(result == nil, "windowID reuse with different bundleID should not match")
 }
 
-// ═══════════════════════════════════════
-print()
-print("▶ Always On Top Config Parsing")
-
-section("default rule alwaysOnTop is nil")
+section("Semantic match by bundleID + title")
 do {
-    let rule = WindowRuleConfig()
-    check(rule.alwaysOnTop == nil, "default alwaysOnTop should be nil")
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.app.A", title: "Doc 1"),
+        makeSlot(bundleID: "com.app.A", title: "Doc 2"),
+    ], lastUpdated: Date())
+    let result = matchWindowToSlot(windowID: 999, bundleID: "com.app.A", title: "Doc 2",
+                                    snapshot: snapshot, filledSlots: [], now: Date())
+    assertEq(result, 1, "title 'Doc 2' matches slot 1")
 }
 
-section("WindowRule carries alwaysOnTop")
+section("Semantic match bundleID only (first-unfilled tiebreaker)")
 do {
-    let rule = WindowRule(appID: "com.test", classification: .tile, alwaysOnTop: true)
-    check(rule.alwaysOnTop == true, "alwaysOnTop preserved")
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.app.X"),
+        makeSlot(bundleID: "com.app.A"),
+        makeSlot(bundleID: "com.app.A"),
+    ], lastUpdated: Date())
+    let result = matchWindowToSlot(windowID: 999, bundleID: "com.app.A", title: nil,
+                                    snapshot: snapshot, filledSlots: [], now: Date())
+    assertEq(result, 1, "first unfilled slot for bundleID")
 }
 
-section("WindowRule alwaysOnTop nil by default")
+section("Multiple windows same app different titles → correct slots")
 do {
-    let rule = WindowRule(appID: "com.test", classification: .tile)
-    check(rule.alwaysOnTop == nil, "alwaysOnTop nil by default")
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.app.A", title: "Alpha"),
+        makeSlot(bundleID: "com.app.B"),
+        makeSlot(bundleID: "com.app.A", title: "Beta"),
+    ], lastUpdated: Date())
+    let r1 = matchWindowToSlot(windowID: 1, bundleID: "com.app.A", title: "Beta",
+                                snapshot: snapshot, filledSlots: [], now: Date())
+    assertEq(r1, 2, "Beta matches slot 2")
+    let r2 = matchWindowToSlot(windowID: 2, bundleID: "com.app.A", title: "Alpha",
+                                snapshot: snapshot, filledSlots: [2], now: Date())
+    assertEq(r2, 0, "Alpha matches slot 0")
+}
+
+section("Multiple windows same app same title → assigned in order")
+do {
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.term"),
+        makeSlot(bundleID: "com.term"),
+        makeSlot(bundleID: "com.term"),
+    ], lastUpdated: Date())
+    let r1 = matchWindowToSlot(windowID: 1, bundleID: "com.term", title: nil,
+                                snapshot: snapshot, filledSlots: [], now: Date())
+    assertEq(r1, 0, "first Terminal gets slot 0")
+    let r2 = matchWindowToSlot(windowID: 2, bundleID: "com.term", title: nil,
+                                snapshot: snapshot, filledSlots: [0], now: Date())
+    assertEq(r2, 1, "second Terminal gets slot 1")
+    let r3 = matchWindowToSlot(windowID: 3, bundleID: "com.term", title: nil,
+                                snapshot: snapshot, filledSlots: [0, 1], now: Date())
+    assertEq(r3, 2, "third Terminal gets slot 2")
+}
+
+section("Already-filled slots skipped")
+do {
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.app.A"),
+        makeSlot(bundleID: "com.app.A"),
+    ], lastUpdated: Date())
+    let result = matchWindowToSlot(windowID: 99, bundleID: "com.app.A", title: nil,
+                                    snapshot: snapshot, filledSlots: [0], now: Date())
+    assertEq(result, 1, "slot 0 filled, returns slot 1")
+}
+
+section("All slots filled → nil")
+do {
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.app.A"),
+    ], lastUpdated: Date())
+    let result = matchWindowToSlot(windowID: 99, bundleID: "com.app.A", title: nil,
+                                    snapshot: snapshot, filledSlots: [0], now: Date())
+    check(result == nil, "all slots filled returns nil")
+}
+
+section("Codable round-trips for SlotDescriptor and StripSnapshot")
+do {
+    let slot = makeSlot(windowID: 42, bundleID: "com.test", title: "Hello",
+                         width: .fixed(800), presetIndex: 2, isFullWidth: true)
+    let snapshot = StripSnapshot(slots: [slot], lastUpdated: Date(timeIntervalSince1970: 1000))
+    let data = try! JSONEncoder().encode(snapshot)
+    let decoded = try! JSONDecoder().decode(StripSnapshot.self, from: data)
+    assertEq(decoded.slots.count, 1, "round-trip slot count")
+    assertEq(decoded.slots[0].bundleID, "com.test", "round-trip bundleID")
+    assertEq(decoded.slots[0].windowID, 42, "round-trip windowID")
+    assertEq(decoded.slots[0].windowTitle, "Hello", "round-trip title")
+    assertEq(decoded.slots[0].width, .fixed(800), "round-trip width")
+    assertEq(decoded.slots[0].presetIndex, 2, "round-trip presetIndex")
+    assertEq(decoded.slots[0].isFullWidth, true, "round-trip isFullWidth")
+}
+
+section("Codable round-trip with nil windowID (disk format)")
+do {
+    let slot = makeSlot(bundleID: "com.test")
+    let data = try! JSONEncoder().encode(slot)
+    let decoded = try! JSONDecoder().decode(SlotDescriptor.self, from: data)
+    check(decoded.windowID == nil, "nil windowID preserved")
+    assertEq(decoded.bundleID, "com.test", "bundleID preserved")
+}
+
+section("computeFilledSlots two-pass: windowID then semantic")
+do {
+    let slots = [
+        makeSlot(windowID: 100, bundleID: "com.app.A", title: "Doc 1"),
+        makeSlot(windowID: 200, bundleID: "com.app.B"),
+        makeSlot(bundleID: "com.app.A", title: "Doc 2"),
+    ]
+    let windows = [
+        makeStripWindow(tileID: 1, windowID: 100, bundleID: "com.app.A", title: "Doc 1"),
+        makeStripWindow(tileID: 2, windowID: 200, bundleID: "com.app.B", title: nil),
+        makeStripWindow(tileID: 3, windowID: 300, bundleID: "com.app.A", title: "Doc 2"),
+    ]
+    let filled = computeFilledSlots(slots: slots, stripWindows: windows)
+    assertEq(filled.count, 3, "all 3 slots filled")
+    check(filled.contains(0), "slot 0 filled by windowID")
+    check(filled.contains(1), "slot 1 filled by windowID")
+    check(filled.contains(2), "slot 2 filled by semantic")
+}
+
+section("computeFilledSlots: single column can't claim multiple slots")
+do {
+    // Two slots with same bundleID, one window — only first slot claimed
+    let slots = [
+        makeSlot(bundleID: "com.app.A"),
+        makeSlot(bundleID: "com.app.A"),
+    ]
+    let windows = [
+        makeStripWindow(tileID: 1, windowID: 100, bundleID: "com.app.A"),
+    ]
+    let filled = computeFilledSlots(slots: slots, stripWindows: windows)
+    assertEq(filled.count, 1, "only one slot claimed")
+    check(filled.contains(0), "first matching slot claimed")
+}
+
+section("computeFilledSlots: windowID pass requires bundleID match")
+do {
+    // Slot has windowID 100 for app A, but strip window 100 is app B (ID reuse)
+    let slots = [
+        makeSlot(windowID: 100, bundleID: "com.app.A"),
+    ]
+    let windows = [
+        makeStripWindow(tileID: 1, windowID: 100, bundleID: "com.app.B"),
+    ]
+    let filled = computeFilledSlots(slots: slots, stripWindows: windows)
+    assertEq(filled.count, 0, "windowID reuse with wrong bundleID not filled")
+}
+
+section("computeFilledSlots: ghost (vacant) slots not claimed as filled")
+do {
+    let slots = [
+        makeSlot(bundleID: "com.app.A"),
+        makeSlot(bundleID: "com.app.B", vacant: true, vacatedAt: Date()),
+        makeSlot(bundleID: "com.app.C"),
+    ]
+    // Window for com.app.B exists but ghost slot should not be marked filled
+    let windows = [
+        makeStripWindow(tileID: 1, windowID: 100, bundleID: "com.app.A"),
+        makeStripWindow(tileID: 2, windowID: 200, bundleID: "com.app.B"),
+        makeStripWindow(tileID: 3, windowID: 300, bundleID: "com.app.C"),
+    ]
+    let filled = computeFilledSlots(slots: slots, stripWindows: windows)
+    check(!filled.contains(1), "ghost slot 1 not marked as filled")
+    check(filled.contains(0), "live slot 0 filled")
+    check(filled.contains(2), "live slot 2 filled")
+}
+
+section("Ghost slot: matched on reopen")
+do {
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.app.A"),
+        makeSlot(bundleID: "com.app.B", vacant: true, vacatedAt: Date()),
+        makeSlot(bundleID: "com.app.C"),
+    ], lastUpdated: Date())
+    let result = matchWindowToSlot(windowID: 999, bundleID: "com.app.B", title: nil,
+                                    snapshot: snapshot, filledSlots: [], now: Date())
+    assertEq(result, 1, "ghost slot matched at original position")
+}
+
+section("Ghost slot expiry enforced in matchWindowToSlot")
+do {
+    let expiredDate = Date().addingTimeInterval(-700)  // 700s ago > 600s expiry
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.app.B", vacant: true, vacatedAt: expiredDate),
+    ], lastUpdated: Date())
+    let result = matchWindowToSlot(windowID: 999, bundleID: "com.app.B", title: nil,
+                                    snapshot: snapshot, filledSlots: [], now: Date())
+    check(result == nil, "expired ghost not matched")
+}
+
+section("Ghost slot not expired within window")
+do {
+    let recentDate = Date().addingTimeInterval(-300)  // 300s ago < 600s expiry
+    let snapshot = StripSnapshot(slots: [
+        makeSlot(bundleID: "com.app.B", vacant: true, vacatedAt: recentDate),
+    ], lastUpdated: Date())
+    let result = matchWindowToSlot(windowID: 999, bundleID: "com.app.B", title: nil,
+                                    snapshot: snapshot, filledSlots: [], now: Date())
+    assertEq(result, 0, "recent ghost still matched")
+}
+
+section("computeFilledSlots during simulated sequential batch-add")
+do {
+    let slots = [
+        makeSlot(windowID: 100, bundleID: "com.app.A"),
+        makeSlot(windowID: 200, bundleID: "com.app.B"),
+        makeSlot(windowID: 300, bundleID: "com.app.C"),
+    ]
+    // Simulate adding windows one at a time
+    var windows: [StripWindowInfo] = []
+
+    // Add first window
+    windows.append(makeStripWindow(tileID: 1, windowID: 100, bundleID: "com.app.A"))
+    let filled1 = computeFilledSlots(slots: slots, stripWindows: windows)
+    assertEq(filled1.count, 1, "after 1st add: 1 slot filled")
+
+    // Add second window
+    windows.append(makeStripWindow(tileID: 2, windowID: 200, bundleID: "com.app.B"))
+    let filled2 = computeFilledSlots(slots: slots, stripWindows: windows)
+    assertEq(filled2.count, 2, "after 2nd add: 2 slots filled")
+
+    // Add third window
+    windows.append(makeStripWindow(tileID: 3, windowID: 300, bundleID: "com.app.C"))
+    let filled3 = computeFilledSlots(slots: slots, stripWindows: windows)
+    assertEq(filled3.count, 3, "after 3rd add: all 3 slots filled")
 }
 
 // ============================================================

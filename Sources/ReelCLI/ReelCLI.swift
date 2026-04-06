@@ -2,10 +2,10 @@ import Foundation
 import IPC
 
 @main
-struct ScrollWMCLI {
+struct ReelCLI {
     static func printUsage() {
-        let commands = ScrollWMCommand.allCases.map(\.rawValue) + ["clear-positions-app <bundle-id>"]
-        print("Usage: scrollwm-msg <command>")
+        let commands = ReelCommand.allCases.map(\.rawValue) + ["clear-positions-app <bundle-id>"]
+        print("Usage: reel-msg <command>")
         print("Commands: \(commands.joined(separator: ", "))")
     }
 
@@ -21,21 +21,21 @@ struct ScrollWMCLI {
         let payload: String
         if commandStr == "clear-positions-app" {
             guard args.count >= 2 else {
-                print("Usage: scrollwm-msg clear-positions-app <bundle-id>")
+                print("Usage: reel-msg clear-positions-app <bundle-id>")
                 Foundation.exit(1)
             }
             let message = IPCMessage(command: commandStr, appID: args[1])
             let data = try! JSONEncoder().encode(message)
             payload = String(data: data, encoding: .utf8)!
         } else {
-            guard ScrollWMCommand(rawValue: commandStr) != nil else {
+            guard ReelCommand(rawValue: commandStr) != nil else {
                 printUsage()
                 Foundation.exit(1)
             }
             payload = commandStr
         }
 
-        let socketPath = scrollWMSocketPath()
+        let socketPath = reelSocketPath()
 
         // Connect to the Unix socket
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -61,7 +61,7 @@ struct ScrollWMCLI {
         }
 
         guard connectResult == 0 else {
-            print("Error: ScrollWM is not running (cannot connect to \(socketPath))")
+            print("Error: Reel is not running (cannot connect to \(socketPath))")
             close(fd)
             Foundation.exit(1)
         }
@@ -79,7 +79,7 @@ struct ScrollWMCLI {
 
         if bytesRead > 0 {
             let responseData = Data(buffer[0..<bytesRead])
-            if let response = try? JSONDecoder().decode(ScrollWMResponse.self, from: responseData) {
+            if let response = try? JSONDecoder().decode(ReelResponse.self, from: responseData) {
                 if let data = response.data {
                     print(data)
                 } else if let message = response.message {

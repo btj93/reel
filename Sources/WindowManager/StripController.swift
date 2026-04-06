@@ -41,15 +41,6 @@ public final class StripController: @unchecked Sendable {
     /// The fingerprint of the current Space.
     public internal(set) var currentSpaceFingerprint: Set<UInt32> = []
 
-    /// Called before a column is removed. Provides column metadata for position memory.
-    /// Parameters: tileID, column, columnData, columnIndex, neighborBefore bundleID, neighborAfter bundleID
-    public var onBeforeRemoveWindow: ((_ tileID: TileID, _ column: Column, _ columnData: ColumnData,
-                                        _ columnIndex: Int, _ neighborBefore: String?,
-                                        _ neighborAfter: String?) -> Void)?
-
-    /// Set to true to suppress position save during removeWindow (e.g., toggleFloating)
-    public var suppressPositionSave: Bool = false
-
     /// The user's intended active tile. Updated by hotkeys, addWindow, space restore,
     /// and external window focus (clicks). Used by saveCurrentSpace to persist focus.
     public var userActiveTileID: TileID?
@@ -92,9 +83,6 @@ public final class StripController: @unchecked Sendable {
     /// Focus indicator overlay.
     public let focusIndicator: FocusIndicator
 
-    /// Zen mode dimmer for unfocused windows.
-    public let zenDimmer: ZenDimmer
-
     /// Latch: true once scroll+width have settled, reset on new animation.
     private var scrollWidthSettled: Bool = false
 
@@ -114,7 +102,6 @@ public final class StripController: @unchecked Sendable {
         self.strip = Strip(workingArea: workingArea)
         self.primaryScreenHeight = primaryScreenHeight
         self.focusIndicator = FocusIndicator()
-        self.zenDimmer = ZenDimmer()
     }
 
     /// True when all animations (scroll, width, focus indicator) have settled.
@@ -122,7 +109,7 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         let scrollSettled = strip.viewOffset.isSettled(at: time)
         let widthSettled = !strip.columnData.contains(where: { $0.widthAnimation != nil })
-        return scrollSettled && widthSettled && !focusIndicator.isAnimating && !zenDimmer.isAnimating
+        return scrollSettled && widthSettled && !focusIndicator.isAnimating
     }
 
     // MARK: - Window Registration
@@ -166,39 +153,38 @@ public final class StripController: @unchecked Sendable {
         if !isBatching {
             applyLayout()
         }
-        updateZenDimmer(at: TimeUtil.now())
+
     }
 
-    /// Add a window at a specific position with saved column properties from position memory.
-    /// When restoredPosition is non-nil, inserts at the saved position with saved width.
+    /// Add a window at a specific position with saved column properties from snapshot restore.
+    /// When restoredPosition is non-nil, inserts at the saved slot with saved width.
     /// When nil, falls back to default behavior.
-    public func addWindow(_ window: AXWindow, app: AXApp, restoredPosition: SavedPosition?) {
-        guard let saved = restoredPosition else {
+    public func addWindow(_ window: AXWindow, app: AXApp, restoredPosition: RestoredSlot?) {
+        guard let restored = restoredPosition else {
             addWindow(window, app: app)
             return
         }
 
         #if DEBUG
-        print("[Strip] addWindow (restored): tileID=\(window.tileID.rawValue) pid=\(window.pid) at index=\(saved.columnIndex) width=\(saved.width)")
+        print("[Strip] addWindow (restored): tileID=\(window.tileID.rawValue) pid=\(window.pid) at index=\(restored.slotIndex) width=\(restored.width)")
         fflush(stdout)
         #endif
         windowMap[window.tileID] = window
         apps[window.pid] = app
 
-        // Determine insertion index: neighbor → columnIndex → default
-        let insertIndex = resolveInsertIndex(saved: saved)
+        let insertIndex = max(0, min(restored.slotIndex, strip.columns.count))
 
         // Normalize width: never restore .auto
         let width: ColumnWidth
-        switch saved.width {
+        switch restored.width {
         case .auto:
-            width = .fixed(saved.width.resolve(workingAreaWidth: strip.workingArea.width, gap: strip.gap))
+            width = .fixed(restored.width.resolve(workingAreaWidth: strip.workingArea.width, gap: strip.gap))
         default:
-            width = saved.width
+            width = restored.width
         }
 
         let column = Column(tiles: [window.tileID], width: width,
-                            presetIndex: saved.presetIndex, isFullWidth: saved.isFullWidth)
+                            presetIndex: restored.presetIndex, isFullWidth: restored.isFullWidth)
         strip.insertColumn(column, at: TimeUtil.now(), atIndex: insertIndex)
 
         if !isBatching {
@@ -212,57 +198,13 @@ public final class StripController: @unchecked Sendable {
             }
             applyLayout()
         }
-        updateZenDimmer(at: TimeUtil.now())
-    }
 
-    /// Resolve the best insertion index from saved position data.
-    private func resolveInsertIndex(saved: SavedPosition) -> Int {
-        // Priority 1: Insert right of neighborBefore
-        if let beforeID = saved.neighborBefore {
-            for (i, col) in strip.columns.enumerated() {
-                if let tile = col.activeTile, let win = windowMap[tile],
-                   let app = apps[win.pid], app.bundleIdentifier == beforeID {
-                    return i + 1
-                }
-            }
-        }
-
-        // Priority 2: Insert left of neighborAfter
-        if let afterID = saved.neighborAfter {
-            for (i, col) in strip.columns.enumerated() {
-                if let tile = col.activeTile, let win = windowMap[tile],
-                   let app = apps[win.pid], app.bundleIdentifier == afterID {
-                    return i
-                }
-            }
-        }
-
-        // Priority 3: Clamped columnIndex
-        return max(0, min(saved.columnIndex, strip.columns.count))
     }
 
     /// Remove a window from the strip.
     public func removeWindow(tileID: TileID) {
-        zenDimmer.restoreWindow(tileID)
+
         if let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
-            // Fire callback before removal so strip state is intact
-            if !suppressPositionSave, let callback = onBeforeRemoveWindow {
-                let column = strip.columns[colIndex]
-                let colData = strip.columnData[colIndex]
-
-                let neighborBefore: String? = if colIndex > 0,
-                    let tile = strip.columns[colIndex - 1].activeTile,
-                    let win = windowMap[tile],
-                    let app = apps[win.pid] { app.bundleIdentifier } else { nil }
-
-                let neighborAfter: String? = if colIndex < strip.columns.count - 1,
-                    let tile = strip.columns[colIndex + 1].activeTile,
-                    let win = windowMap[tile],
-                    let app = apps[win.pid] { app.bundleIdentifier } else { nil }
-
-                callback(tileID, column, colData, colIndex, neighborBefore, neighborAfter)
-            }
-
             strip.removeColumn(at: colIndex, at: TimeUtil.now())
         }
         windowMap.removeValue(forKey: tileID)
@@ -288,7 +230,7 @@ public final class StripController: @unchecked Sendable {
         apps.removeAll()
         lastCommittedFrames.removeAll()
         focusIndicator.hide()
-        zenDimmer.restoreAll()
+
         lastRaisedTileID = nil
         lastIndicatorTileID = nil
     }
@@ -309,7 +251,7 @@ public final class StripController: @unchecked Sendable {
         userActiveTileID = strip.activeColumn?.activeTile
         _confirmedUserActiveTileID = userActiveTileID
         focusActiveWindow()
-        updateZenDimmer(at: TimeUtil.now())
+
     }
 
     public func focusRight() {
@@ -326,7 +268,7 @@ public final class StripController: @unchecked Sendable {
         userActiveTileID = strip.activeColumn?.activeTile
         _confirmedUserActiveTileID = userActiveTileID
         focusActiveWindow()
-        updateZenDimmer(at: TimeUtil.now())
+
     }
 
     public func moveColumnLeft() {
@@ -394,15 +336,13 @@ public final class StripController: @unchecked Sendable {
         guard let activeTile = strip.activeColumn?.activeTile,
               let window = windowMap[activeTile] else { return nil }
 
-        suppressPositionSave = true
         removeWindow(tileID: activeTile)
-        suppressPositionSave = false
         return window
     }
 
-    /// Re-add a floating window back to the strip.
-    public func unfloatWindow(_ window: AXWindow, app: AXApp) {
-        addWindow(window, app: app)
+    /// Re-add a floating window back to the strip at a restored position.
+    public func unfloatWindow(_ window: AXWindow, app: AXApp, restoredPosition: RestoredSlot? = nil) {
+        addWindow(window, app: app, restoredPosition: restoredPosition)
     }
 
     // MARK: - User Move/Resize Handling
@@ -563,7 +503,6 @@ public final class StripController: @unchecked Sendable {
         strip.viewOffset = .static(newOffset)
 
         applyLayout()
-        updateZenDimmer(at: time)
     }
 
     // MARK: - Layout Application
@@ -654,7 +593,6 @@ public final class StripController: @unchecked Sendable {
     public func handleFrameTick(time: Double) {
         // Advance focus indicator animations first (unconditional)
         focusIndicator.tick(time: time)
-        zenDimmer.tick(time: time)
 
         // Settle any completed width animations (single pass: settle + check)
         let widthSettled = !strip.settleWidthAnimations(at: time)
@@ -688,13 +626,10 @@ public final class StripController: @unchecked Sendable {
                 // lastCommittedFrames, so applyLayout() will detect the change
                 // and dispatch the off-screen move.
                 applyLayout()
-                updateZenDimmer(at: time)
-            } else if focusIndicator.isAnimating || zenDimmer.isAnimating {
-                // Scroll and width are done but indicator/zen is still animating — keep ticking
-                if focusIndicator.isAnimating {
-                    let frames = computeTargetFrames(strip: strip, time: time)
-                    updateFocusIndicator(frames: frames)
-                }
+            } else if focusIndicator.isAnimating {
+                // Scroll and width are done but indicator is still animating — keep ticking
+                let frames = computeTargetFrames(strip: strip, time: time)
+                updateFocusIndicator(frames: frames)
             }
             return
         }
@@ -832,7 +767,6 @@ public final class StripController: @unchecked Sendable {
             strip.viewOffset = .static(adjustedOffset)
             clearCommittedFrames()
             applyLayout()
-            updateZenDimmer(at: time)
         }
     }
 
@@ -931,15 +865,6 @@ public final class StripController: @unchecked Sendable {
             // The scroll/width animations already produce smooth positions, so no
             // separate indicator springs are needed — this eliminates the double-spring lag.
             focusIndicator.trackFrame(flippedFrame)
-        }
-    }
-
-    /// Notify zen dimmer of the current focus state. Resumes FrameLoop if animations start.
-    private func updateZenDimmer(at time: Double) {
-        guard let activeTile = strip.activeColumn?.activeTile else { return }
-        let allTileIDs = strip.columns.compactMap(\.activeTile)
-        if zenDimmer.setFocusedWindow(activeTile, allTileIDs: allTileIDs, at: time) {
-            frameLoop?.resume()
         }
     }
 
@@ -1053,13 +978,6 @@ public final class StripController: @unchecked Sendable {
             lastRaisedTileID = nil
             lastIndicatorTileID = nil
             applyLayout()
-            // Re-apply zen dimming with force — macOS may reset compositing on space switch
-            if let activeTile = strip.activeColumn?.activeTile {
-                let allTileIDs = strip.columns.compactMap(\.activeTile)
-                if zenDimmer.setFocusedWindow(activeTile, allTileIDs: allTileIDs, at: TimeUtil.now(), force: true) {
-                    frameLoop?.resume()
-                }
-            }
             lastSpaceSwitchTime = TimeUtil.now()
             return true
         }
@@ -1074,7 +992,7 @@ public final class StripController: @unchecked Sendable {
         apps.removeAll()
         lastCommittedFrames.removeAll()
         focusIndicator.hide()
-        zenDimmer.restoreAll()
+
         lastRaisedTileID = nil
         lastIndicatorTileID = nil
         lastSpaceSwitchTime = TimeUtil.now()

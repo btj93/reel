@@ -7,7 +7,7 @@ import Core
 
 /// Bridge to the private _AXUIElementGetWindow function.
 /// Maps an AXUIElement to a CGWindowID.
-/// This is the only private API used by ScrollWM — no SIP required.
+/// This is the only private API used by Reel — no SIP required.
 ///
 /// Validated stable across macOS 10.12–15 by AeroSpace, Amethyst, Hammerspoon.
 @_silgen_name("_AXUIElementGetWindow")

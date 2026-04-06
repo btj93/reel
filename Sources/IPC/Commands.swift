@@ -1,7 +1,7 @@
 import Foundation
 
-/// Commands that can be sent from the CLI to the running ScrollWM instance.
-public enum ScrollWMCommand: String, Codable, CaseIterable, Sendable {
+/// Commands that can be sent from the CLI to the running Reel instance.
+public enum ReelCommand: String, Codable, CaseIterable, Sendable {
     case focusLeft = "focus-left"
     case focusRight = "focus-right"
     case moveColumnLeft = "move-column-left"
@@ -14,13 +14,12 @@ public enum ScrollWMCommand: String, Codable, CaseIterable, Sendable {
     case getLayout = "get-layout"
     case listPositions = "list-positions"
     case clearPositions = "clear-positions"
-    case toggleAlwaysOnTop = "toggle-always-on-top"
     case recover = "recover"
     case quit = "quit"
 }
 
-/// Response from the ScrollWM daemon.
-public struct ScrollWMResponse: Codable, Sendable {
+/// Response from the Reel daemon.
+public struct ReelResponse: Codable, Sendable {
     public let success: Bool
     public let message: String?
     public let data: String?  // JSON payload for queries
@@ -33,9 +32,9 @@ public struct ScrollWMResponse: Codable, Sendable {
 }
 
 /// Socket path for IPC.
-public func scrollWMSocketPath() -> String {
+public func reelSocketPath() -> String {
     let uid = getuid()
-    return "/tmp/scrollwm_\(uid).sock"
+    return "/tmp/reel_\(uid).sock"
 }
 
 public struct IPCMessage: Codable, Sendable {

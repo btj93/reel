@@ -1,101 +1,86 @@
-# ScrollWM
+# Reel
 
 A scrollable tiling window manager for macOS, inspired by [niri](https://github.com/YaLTeR/niri).
 
-Windows live on an infinite horizontal strip. New windows appear to the right without resizing existing ones. Scroll left and right to navigate. No SIP disable required.
+Instead of cramming every window into the visible screen, Reel places them on an **infinite horizontal strip**. The focused window and its neighbors stay visible; everything else is parked off-screen. Scroll left and right to navigate — like a film reel.
 
-## How It Works
+No SIP disable required. Pure Swift + Accessibility API.
 
-Instead of cramming every window into visible screen space, ScrollWM arranges them on a strip that extends beyond the screen edges. The focused window (and its neighbors) stay visible; everything else is parked off-screen. Navigate with keyboard shortcuts or trackpad gestures.
+<!-- TODO: add demo gif -->
 
-- **Infinite strip** — windows tile horizontally, one per column. Open as many as you want.
-- **Spring animations** — scrolling uses a damped harmonic oscillator for physics-based motion. Rapid keypresses compound velocity naturally.
-- **Trackpad gestures** — hold a modifier (default: `fn`) and swipe to scroll the strip.
+## Features
+
+- **Infinite horizontal strip** — windows tile left to right, one per column. No limit.
+- **Spring-based scrolling** — physics-based animation with velocity compounding. Rapid keypresses feel natural.
+- **Trackpad gestures** — hold `fn` + swipe to scroll. Snaps to columns on release.
 - **Per-display strips** — each monitor gets its own independent strip.
 - **Space-aware** — switching macOS Spaces saves and restores strip state automatically.
-- **Position memory** — windows reopen in their previous strip position.
-- **Zen mode** — dims unfocused windows to highlight what you're working on.
-- **Focus indicator** — ring, raise, or flash style highlight for the active window.
-- **Floating windows** — toggle any window out of the strip. Rules can auto-float by app.
-- **Always on top** — pin any window above all others via hotkey or rules.
-- **IPC** — control ScrollWM from scripts via a Unix socket CLI.
+- **Position memory** — windows reopen in their previous strip position across app restarts.
+- **Focus indicator** — configurable ring, raise, or flash highlight for the active window.
+- **Floating windows** — toggle any window out of the strip, or auto-float by app via rules.
+- **IPC** — script Reel via Unix socket CLI (`reel-msg`).
 
 ## Requirements
 
 - macOS 14 (Sonoma) or later
 - Accessibility permission (prompted on first launch)
-- Swift 5.10+ toolchain
+- Swift 5.10+
 
-## Install
-
-### From Source
+## Getting Started
 
 ```bash
-git clone https://github.com/user/scrollwm.git
-cd scrollwm
+git clone https://github.com/user/reel.git
+cd reel
 swift build
+.build/debug/Reel &
 ```
 
-#### Run During Development
+macOS will prompt for Accessibility permission — grant it once, and it persists across rebuilds at `.build/debug/Reel`.
 
-```bash
-swift build && .build/debug/ScrollWM &
-```
+A `⊞` icon appears in the menu bar. Open some windows — they tile automatically.
 
-Accessibility permission is granted to `.build/debug/ScrollWM` and persists across rebuilds.
-
-#### Create .app Bundle
+### .app Bundle
 
 ```bash
 bash scripts/bundle.sh
-open .build/bundled/ScrollWM.app
+open .build/bundled/Reel.app
 ```
 
-The bundle script ad-hoc signs with a stable identifier so macOS doesn't revoke Accessibility permission on each rebuild. Use the bundle for distribution or if you need an .app — for daily development, run the binary directly.
+The bundle is ad-hoc signed with a stable identifier so macOS won't revoke Accessibility permission on rebuild. Use for distribution; for development, run the binary directly.
 
-### First Launch
+## Keybindings
 
-1. Build and run ScrollWM
-2. macOS will prompt for Accessibility permission — grant it
-3. A menu bar icon appears (ScrollWM runs as a menu bar app, no Dock icon)
-4. Open some windows — they tile automatically
+| Action | Default | |
+|---|---|---|
+| Focus left | `Alt-H` | Scroll to window on the left |
+| Focus right | `Alt-L` | Scroll to window on the right |
+| Move left | `Alt-Shift-H` | Swap focused column left |
+| Move right | `Alt-Shift-L` | Swap focused column right |
+| Cycle width | `Alt-R` | Cycle 33% → 50% → 67% |
+| Full width | `Alt-F` | Toggle full screen width |
+| Float/unfloat | `Alt-Space` | Toggle window in/out of strip |
+| Close window | `Alt-W` | Close focused window |
 
-## Default Keybindings
+> **Note:** `Alt` (Option) key bindings consume special character input (e.g., `Alt-H` produces `˙`). Rebind in config if this conflicts with your workflow.
 
-| Action | Default | Description |
-|--------|---------|-------------|
-| Focus left | `Alt-H` | Scroll to the window on the left |
-| Focus right | `Alt-L` | Scroll to the window on the right |
-| Move left | `Alt-Shift-H` | Move the focused column left |
-| Move right | `Alt-Shift-L` | Move the focused column right |
-| Cycle width | `Alt-R` | Cycle through width presets (33% / 50% / 67%) |
-| Full width | `Alt-F` | Toggle focused window to full screen width |
-| Toggle floating | `Alt-Space` | Float/unfloat the focused window |
-| Always on top | `Alt-T` | Pin/unpin the focused window above all others |
-| Close window | `Alt-W` | Close the focused window |
-
-**Note:** `Alt` (Option) key bindings consume special character input (e.g., `Alt-H` produces `˙`). Rebind if this conflicts with your workflow.
-
-Trackpad: hold `fn` + swipe horizontally to scroll the strip.
+**Trackpad:** hold `fn` + swipe horizontally to scroll the strip.
 
 ## Configuration
 
-ScrollWM reads `~/.config/scrollwm/config.toml`, created on first launch with defaults. Changes apply on save — reload via the menu bar "Reload Config" button.
+Reel reads `~/.config/reel/config.toml`, created on first launch. Changes apply on save — or use the menu bar "Reload Config" button.
 
 ### Layout
 
 ```toml
 [layout]
-gap = 16                           # Gap between columns in points
-snap = ["middle"]                  # Column snap positions: "left", "middle", "right"
+gap = 16                              # pixels between columns
+snap = ["middle"]                     # "left", "middle", "right" (any combo)
 animation_enabled = true
-# floating_opacity = 1.0           # Opacity for user-toggled floating windows (0.0–1.0)
-# floating_always_on_top = false   # Auto-pin user-toggled floating windows above all others
-# width_presets = [0.33, 0.5, 0.67]  # Proportions for cycle_width
+# width_presets = [0.33, 0.5, 0.67]  # proportions for cycle_width
 # default_width = { proportion = 0.5 }
-# position_memory = true
+# position_memory = true             # restore window positions on reopen
 
-# Insets for external status bars (e.g., SketchyBar)
+# Insets for external bars (SketchyBar, etc.)
 # [layout.struts]
 # left = 0
 # right = 0
@@ -107,10 +92,10 @@ animation_enabled = true
 
 ```toml
 [animation]
-scroll_stiffness = 800          # Higher = snappier scrolling
-scroll_damping_ratio = 1.0      # 1.0 = critically damped (no overshoot)
-bounce_distance = 40            # Rubber-band distance at strip edges
-bounce_damping_ratio = 0.6      # < 1.0 = underdamped bounce
+scroll_stiffness = 800       # higher = snappier
+scroll_damping_ratio = 1.0   # 1.0 = critically damped, <1.0 = bouncy
+bounce_distance = 40         # rubber-band overshoot at strip edges
+bounce_damping_ratio = 0.6
 ```
 
 ### Keybindings
@@ -127,38 +112,29 @@ toggle_floating = "alt-space"
 close_window = "alt-w"
 ```
 
-Modifier names: `ctrl`, `shift`, `cmd`, `alt`/`opt`, `fn`, `hyper` (ctrl+shift+cmd+alt).
+Modifiers: `ctrl`, `shift`, `cmd`, `alt`/`opt`, `fn`, `hyper` (ctrl+shift+cmd+alt).
 
 ### Gestures
 
 ```toml
 [gesture]
-modifier = "fn"     # Hold this key + trackpad scroll to pan the strip
-snap = true         # Snap to columns after gesture ends
+modifier = "fn"   # hold this key + trackpad swipe to scroll
+snap = true       # snap to columns on release (false = free scroll)
 ```
 
 ### Focus Indicator
 
 ```toml
 [focus_indicator]
-style = "ring"          # "none", "ring", "raise", or "flash"
-color = "auto"          # "auto" (system accent) or hex "#RRGGBB"
-width = 3               # Border width in points (ring mode)
-corner_radius = 10      # Corner radius in points (ring mode)
-```
-
-### Zen Mode
-
-```toml
-[zen_mode]
-enabled = false
-dim_alpha = 0.3       # Opacity of unfocused windows (0.0 = invisible, 1.0 = no dim)
-fade_duration = 0.15  # Fade animation duration in seconds
+style = "ring"        # "none", "ring", "raise", "flash"
+color = "auto"        # "auto" (system accent) or "#RRGGBB"
+width = 3             # border width (ring mode)
+corner_radius = 10    # corner radius (ring mode)
 ```
 
 ### Window Rules
 
-Float specific apps, match by regex, set per-window opacity, or pin windows on top:
+Auto-float windows by bundle ID or title pattern:
 
 ```toml
 [[rules]]
@@ -170,60 +146,53 @@ app_id_regex = "com\\.apple\\.systempreferences"
 floating = true
 
 [[rules]]
-app_id = "com.example.app"
-opacity = 0.9    # Override zen mode and floating opacity (0.0–1.0)
-
-[[rules]]
-app_id = "com.apple.calculator"
-always_on_top = true    # Keep this app above all others
-```
-
-Rule `opacity` takes priority over both zen mode dimming and `floating_opacity`. A window matching a rule with `opacity = 0.5` will always appear at 50% opacity regardless of focus state or floating status.
-
-### Position Memory Rules
-
-Control how windows are matched for position restore:
-
-```toml
-[[position_memory_rules]]
-app_id = "com.apple.finder"
-match_by = "order"    # "title" (default) or "order"
+title_regex = "^Preferences$"
+floating = true
 ```
 
 ## CLI
 
-`scrollwm-msg` sends commands to the running ScrollWM instance over a Unix socket.
+`reel-msg` sends commands to the running Reel instance over a Unix socket.
 
 ```bash
-# Build the CLI
-swift build
-
-# Example commands
-.build/debug/scrollwm-msg list-windows
-.build/debug/scrollwm-msg focus-left
-.build/debug/scrollwm-msg get-layout
-.build/debug/scrollwm-msg toggle-floating
+reel-msg list-windows        # JSON list of managed windows
+reel-msg focus-left          # scroll left
+reel-msg toggle-floating     # float/unfloat focused window
+reel-msg get-layout          # JSON layout state
+reel-msg recover             # move all windows back on-screen
+reel-msg quit                # graceful shutdown
 ```
 
-Available commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `toggle-always-on-top`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
+All commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
 
 ## Architecture
 
-Five Swift modules with strict layering:
+Five Swift modules with strict dependency layering:
 
 ```
-ScrollWM (app entry) ──→ WindowManager ──→ Platform ──→ Core
-                              │                         ↑
-                              ├──→ Config (TOMLKit) ────┘
-                              └──→ IPC ─────────────────┘
+Reel (app) ──→ WindowManager ──→ Platform ──→ Core
+                    │                          ↑
+                    ├──→ Config (TOMLKit) ──────┘
+                    └──→ IPC ──────────────────┘
 ```
 
-- **Core** — Pure layout logic. Foundation + CoreGraphics only. No AppKit, no Accessibility calls. Fully unit-testable. Contains the strip model, spring animation solver, and `computeTargetFrames` (the core pure function that maps strip state to screen positions).
-- **Platform** — macOS API wrappers: Accessibility (per-app background threads), CGEventTap hotkeys, CADisplayLink frame loop, display management, focus indicator, zen dimmer, gesture capture.
-- **WindowManager** — Orchestration layer. One `StripController` per display. Handles window tracking, space switching, position memory, and bridges Core layout to real window positioning.
-- **Config** — TOML configuration via TOMLKit.
-- **IPC** — Unix socket server + CLI client.
+| Module | Role |
+|---|---|
+| **Core** | Pure layout logic. `Strip` model, spring animation solver, `computeTargetFrames`. Foundation + CoreGraphics only — fully unit-testable, no AppKit. |
+| **Platform** | macOS API wrappers: Accessibility (per-app background threads), CGEventTap hotkeys, CADisplayLink frame loop, display management, focus indicator, gesture capture. |
+| **WindowManager** | Orchestration. One `StripController` per display. Window tracking, space switching, position memory. |
+| **Config** | TOML config via TOMLKit. File watching with auto-reload. |
+| **IPC** | Unix socket server + CLI client. |
+
+## Building
+
+```bash
+swift build                    # debug build
+swift run RunTests             # run test suite (no Xcode needed)
+make run-debug                 # kill existing, bundle, run with stderr
+make run                       # kill existing, bundle, open .app
+```
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) for details.
+[Apache License 2.0](LICENSE)

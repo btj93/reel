@@ -2,8 +2,8 @@ import Foundation
 import TOMLKit
 import Core
 
-/// ScrollWM configuration, loaded from ~/.config/scrollwm/config.toml.
-public struct ScrollWMConfig: Sendable {
+/// Reel configuration, loaded from ~/.config/reel/config.toml.
+public struct ReelConfig: Sendable {
 
     // MARK: - Layout
 
@@ -13,8 +13,6 @@ public struct ScrollWMConfig: Sendable {
     public var snapPoints: [SnapPoint] = [.middle]
     public var struts: StrutsConfig = StrutsConfig()
     public var animationEnabled: Bool = true
-    public var floatingOpacity: Double = 1.0
-    public var floatingAlwaysOnTop: Bool = false
 
     // MARK: - Animation
 
@@ -39,7 +37,6 @@ public struct ScrollWMConfig: Sendable {
         "toggle_full_width": "alt-f",
         "toggle_floating": "alt-space",
         "close_window": "alt-w",
-        "toggle_always_on_top": "alt-t",
     ]
 
     // MARK: - Gesture
@@ -53,16 +50,10 @@ public struct ScrollWMConfig: Sendable {
 
     // MARK: - Position Memory
     public var positionMemory: Bool = true
-    public var savedPositionLimit: Int = 500
-    public var positionMemoryRules: [PositionMemoryRuleConfig] = []
 
     // MARK: - Focus Indicator
 
     public var focusIndicator: FocusIndicatorConfig = FocusIndicatorConfig()
-
-    // MARK: - Zen Mode
-
-    public var zenMode: ZenModeConfig = ZenModeConfig()
 
     // MARK: - Startup
 
@@ -72,18 +63,8 @@ public struct ScrollWMConfig: Sendable {
 
     // MARK: - Config Path
 
-    public static let configDir = NSHomeDirectory() + "/.config/scrollwm"
+    public static let configDir = NSHomeDirectory() + "/.config/reel"
     public static let configPath = configDir + "/config.toml"
-}
-
-public struct PositionMemoryRuleConfig: Sendable {
-    public var appID: String
-    public var matchBy: String = "title"  // "title" or "order"
-
-    public init(appID: String, matchBy: String = "title") {
-        self.appID = appID
-        self.matchBy = matchBy
-    }
 }
 
 /// Window rule from config.
@@ -92,16 +73,12 @@ public struct WindowRuleConfig: Sendable {
     public var appIDRegex: String?
     public var titleRegex: String?
     public var floating: Bool = false
-    public var opacity: Double? = nil
-    public var alwaysOnTop: Bool? = nil
 
-    public init(appID: String? = nil, appIDRegex: String? = nil, titleRegex: String? = nil, floating: Bool = false, opacity: Double? = nil, alwaysOnTop: Bool? = nil) {
+    public init(appID: String? = nil, appIDRegex: String? = nil, titleRegex: String? = nil, floating: Bool = false) {
         self.appID = appID
         self.appIDRegex = appIDRegex
         self.titleRegex = titleRegex
         self.floating = floating
-        self.opacity = opacity
-        self.alwaysOnTop = alwaysOnTop
     }
 }
 
@@ -133,20 +110,12 @@ public struct FocusIndicatorConfig: Sendable {
     public init() {}
 }
 
-/// Zen mode configuration: dim unfocused tiled windows.
-public struct ZenModeConfig: Sendable {
-    public var enabled: Bool = false
-    public var dimAlpha: Double = 0.3
-    public var fadeDuration: Double = 0.15
-    public init() {}
-}
-
 // MARK: - Loading
 
-extension ScrollWMConfig {
+extension ReelConfig {
 
     /// Load config: parse bundled defaults first, then overlay user config on top.
-    public static func load() -> (config: ScrollWMConfig, error: String?) {
+    public static func load() -> (config: ReelConfig, error: String?) {
         // Start from bundled defaults
         var config = loadDefaults()
 
@@ -170,7 +139,7 @@ extension ScrollWMConfig {
     }
 
     /// Load defaults from bundled config.default.toml.
-    private static let cachedDefaults: ScrollWMConfig = {
+    private static let cachedDefaults: ReelConfig = {
         guard let url = Bundle.module.url(forResource: "config.default", withExtension: "toml"),
               let content = try? String(contentsOf: url, encoding: .utf8),
               let table = try? TOMLTable(string: content) else {
@@ -178,12 +147,12 @@ extension ScrollWMConfig {
             print("[Config] Warning: could not load bundled config.default.toml, using hardcoded defaults")
             fflush(stdout)
             #endif
-            return ScrollWMConfig()
+            return ReelConfig()
         }
-        return parse(table: table, base: ScrollWMConfig())
+        return parse(table: table, base: ReelConfig())
     }()
 
-    private static func loadDefaults() -> ScrollWMConfig {
+    private static func loadDefaults() -> ReelConfig {
         cachedDefaults
     }
 
@@ -223,7 +192,7 @@ extension ScrollWMConfig {
 
     /// Parse a TOML table into a config, starting from a base config.
     /// Only keys present in the table override the base values.
-    private static func parse(table: TOMLTable, base: ScrollWMConfig = ScrollWMConfig()) -> ScrollWMConfig {
+    private static func parse(table: TOMLTable, base: ReelConfig = ReelConfig()) -> ReelConfig {
         var config = base
 
         // [layout]
@@ -288,9 +257,6 @@ extension ScrollWMConfig {
                 }
             }
             if let v = readBool(layout["position_memory"]) { config.positionMemory = v }
-            if let v = readDouble(layout["saved_position_limit"]) { config.savedPositionLimit = Int(v) }
-            if let v = readDouble(layout["floating_opacity"]) { config.floatingOpacity = max(0.0, min(1.0, v)) }
-            if let v = readBool(layout["floating_always_on_top"]) { config.floatingAlwaysOnTop = v }
         }
 
         // [animation]
@@ -325,22 +291,7 @@ extension ScrollWMConfig {
                     rc.appIDRegex = readString(rule["app_id_regex"])
                     rc.titleRegex = readString(rule["title_regex"])
                     if let v = readBool(rule["floating"]) { rc.floating = v }
-                    if let v = readDouble(rule["opacity"]) { rc.opacity = max(0.0, min(1.0, v)) }
-                    if let v = readBool(rule["always_on_top"]) { rc.alwaysOnTop = v }
                     config.rules.append(rc)
-                }
-            }
-        }
-
-        if let pmRules = readArray(table["position_memory_rules"]) {
-            for item in pmRules {
-                if let rule = readTable(item) {
-                    var rc = PositionMemoryRuleConfig(appID: "")
-                    if let v = readString(rule["app_id"]) { rc.appID = v }
-                    if let v = readString(rule["match_by"]) { rc.matchBy = v }
-                    if !rc.appID.isEmpty {
-                        config.positionMemoryRules.append(rc)
-                    }
                 }
             }
         }
@@ -363,13 +314,6 @@ extension ScrollWMConfig {
             if let v = readString(fi["color"]) { config.focusIndicator.color = v }
             if let v = readDouble(fi["width"]) { config.focusIndicator.width = v }
             if let v = readDouble(fi["corner_radius"]) { config.focusIndicator.cornerRadius = v }
-        }
-
-        // [zen_mode]
-        if let zm = readTable(table["zen_mode"]) {
-            if let v = readBool(zm["enabled"]) { config.zenMode.enabled = v }
-            if let v = readDouble(zm["dim_alpha"]) { config.zenMode.dimAlpha = max(0.0, min(1.0, v)) }
-            if let v = readDouble(zm["fade_duration"]) { config.zenMode.fadeDuration = max(0.05, v) }
         }
 
         return config
@@ -410,7 +354,7 @@ public final class ConfigWatcher: @unchecked Sendable {
     private var source: DispatchSourceFileSystemObject?
     private var fileDescriptor: Int32 = -1
 
-    public var onConfigChanged: ((ScrollWMConfig) -> Void)?
+    public var onConfigChanged: ((ReelConfig) -> Void)?
 
     public init() {}
 
@@ -418,7 +362,7 @@ public final class ConfigWatcher: @unchecked Sendable {
 
     /// Start watching the config file.
     public func start() {
-        let path = ScrollWMConfig.configPath
+        let path = ReelConfig.configPath
 
         fileDescriptor = open(path, O_EVTONLY)
         guard fileDescriptor >= 0 else {
@@ -464,7 +408,7 @@ public final class ConfigWatcher: @unchecked Sendable {
     }
 
     private func reload() {
-        let (config, error) = ScrollWMConfig.load()
+        let (config, error) = ReelConfig.load()
         if let error = error {
             #if DEBUG
             print("[Config] Reload error: \(error)")

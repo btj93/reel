@@ -5,7 +5,7 @@ import Foundation
 import IPC
 import Platform
 
-/// Central coordinator for ScrollWM.
+/// Central coordinator for Reel.
 /// Connects WindowTracker (discovery) → StripController (layout) → Platform APIs.
 /// All state mutations happen on the main thread via the serial event queue.
 public final class WindowManager: @unchecked Sendable {
@@ -18,8 +18,8 @@ public final class WindowManager: @unchecked Sendable {
     /// Per-display strip controllers. One strip per connected monitor.
     public private(set) var stripControllers: [CGDirectDisplayID: StripController] = [:]
 
-    /// Position memory for restoring window placement.
-    public var positionMemory: PositionMemory?
+    /// Snapshot store for restoring window placement.
+    public var snapshotStore: StripSnapshotStore?
 
     /// The currently active (focused) display.
     public private(set) var activeDisplayID: CGDirectDisplayID = CGMainDisplayID()
@@ -42,7 +42,7 @@ public final class WindowManager: @unchecked Sendable {
     private var ipcServer: SocketServer?
 
     /// Current configuration.
-    public private(set) var config: ScrollWMConfig
+    public private(set) var config: ReelConfig
 
     /// State persistence for crash recovery.
     private let stateFilePath: String
@@ -51,17 +51,8 @@ public final class WindowManager: @unchecked Sendable {
     /// Pending external focus scroll — debounced to avoid visual flash during space transitions.
     private var pendingFocusScroll: DispatchWorkItem?
 
-    /// Opacity applied to floating windows, keyed by CGWindowID.
-    private var floatingWindowOpacities: [CGWindowID: Double] = [:]
-
     /// Windows that were user-toggled to floating (via alt-space / toggle-floating).
     private var userToggledFloats: Set<CGWindowID> = []
-
-    /// Windows currently pinned (always-on-top), keyed by CGWindowID.
-    private var pinnedWindows: Set<CGWindowID> = []
-
-    /// Windows that were user-toggled to always-on-top (via hotkey/IPC).
-    private var userToggledPinned: Set<CGWindowID> = []
 
     /// Recently adopted windows — grace period prevents immediate removal on next health check.
     /// Fixes thrashing when tab-based apps (e.g. Fork) rapidly swap windows during tab switch.
@@ -70,7 +61,7 @@ public final class WindowManager: @unchecked Sendable {
     /// Position of most recently removed window per PID, for same-PID tab-switch detection.
     /// When a new window from the same PID appears shortly after, it inherits this position
     /// instead of looking up its own (potentially different) saved position.
-    private var recentRemovalsByPID: [pid_t: (position: SavedPosition, date: Date)] = [:]
+    private var recentRemovalsByPID: [pid_t: RecentRemoval] = [:]
 
     /// On-screen window IDs at startup. Used to filter initial discovery so windows on
     /// other Spaces aren't added to the current strip. Cleared after initial batch finishes.
@@ -78,7 +69,7 @@ public final class WindowManager: @unchecked Sendable {
 
     public init() {
         // Load config first
-        let (loadedConfig, configError) = ScrollWMConfig.load()
+        let (loadedConfig, configError) = ReelConfig.load()
         self.config = loadedConfig
         if let err = configError {
             #if DEBUG
@@ -114,7 +105,7 @@ public final class WindowManager: @unchecked Sendable {
         activeDisplayID = displayManager.mainDisplay?.displayID ?? CGMainDisplayID()
 
         // State file path
-        let stateDir = NSHomeDirectory() + "/.local/state/scrollwm"
+        let stateDir = NSHomeDirectory() + "/.local/state/reel"
         self.stateFilePath = stateDir + "/window-state.json"
 
         // Apply config to all subsystems
@@ -123,7 +114,7 @@ public final class WindowManager: @unchecked Sendable {
     }
 
     /// Apply config values to all subsystems.
-    public func applyConfig(_ config: ScrollWMConfig) {
+    public func applyConfig(_ config: ReelConfig) {
         self.config = config
 
         // Strip layout
@@ -147,20 +138,6 @@ public final class WindowManager: @unchecked Sendable {
             sc.widthSpringParams = config.widthSpringParams
             sc.focusIndicator.reloadConfig(config.focusIndicator)
             sc.focusIndicator.springParams = config.widthSpringParams
-            // Zen mode
-            let oldZenEnabled = sc.zenDimmer.enabled
-            sc.zenDimmer.reloadConfig(config.zenMode)
-            // If zen mode was just enabled, apply dimming to already-unfocused windows
-            if !oldZenEnabled && config.zenMode.enabled {
-                if let activeTile = sc.strip.activeColumn?.activeTile {
-                    let allTileIDs = sc.strip.columns.compactMap(\.activeTile)
-                    if sc.zenDimmer.setFocusedWindow(
-                        activeTile, allTileIDs: allTileIDs, at: TimeUtil.now())
-                    {
-                        sc.frameLoop?.resume()
-                    }
-                }
-            }
         }
 
         // Window rules
@@ -169,9 +146,7 @@ public final class WindowManager: @unchecked Sendable {
                 appID: rule.appID,
                 appIDRegex: rule.appIDRegex,
                 titleRegex: rule.titleRegex,
-                classification: rule.floating ? .float : .tile,
-                opacity: rule.opacity,
-                alwaysOnTop: rule.alwaysOnTop
+                classification: rule.floating ? .float : .tile
             )
         }
 
@@ -241,14 +216,12 @@ public final class WindowManager: @unchecked Sendable {
             sc.setSpaceFingerprint(initialFingerprint)
         }
 
-        // Initialize position memory before window discovery
+        // Initialize snapshot store before window discovery
         if config.positionMemory {
-            let pmStateDir = NSHomeDirectory() + "/.local/state/scrollwm"
-            let filePath = URL(fileURLWithPath: pmStateDir + "/window-positions.json")
-            let rules = positionMemoryMatchingRules
-            positionMemory = PositionMemory(
-                capacity: config.savedPositionLimit, filePath: filePath, matchingRules: rules)
-            positionMemory?.loadFromDisk()
+            let stateDir = NSHomeDirectory() + "/.local/state/reel"
+            let filePath = URL(fileURLWithPath: stateDir + "/window-snapshots.json")
+            snapshotStore = StripSnapshotStore(filePath: filePath)
+            snapshotStore?.loadFromDisk()
         }
 
         // Start subsystems — batch window discovery to avoid N layout passes.
@@ -272,46 +245,7 @@ public final class WindowManager: @unchecked Sendable {
             fflush(stdout)
         #endif
 
-        // Wire position memory save callback on each strip controller
-        for (displayID, sc) in stripControllers {
-            sc.onBeforeRemoveWindow = {
-                [weak self] tileID, column, columnData, colIndex, neighborBefore, neighborAfter in
-                guard let self, let positionMemory = self.positionMemory, self.config.positionMemory
-                else { return }
-
-                guard let window = sc.windowMap[tileID],
-                      let bundleID = self.tracker.apps[window.pid]?.bundleIdentifier
-                else { return }
-
-                let windowTitle = window.getTitle()
-                let spaceFingerprint = sc.currentSpaceFingerprint
-
-                // Normalize .auto width to .fixed
-                let width: ColumnWidth
-                switch column.width {
-                case .auto:
-                    width = .fixed(columnData.cachedWidth)
-                default:
-                    width = column.width
-                }
-
-                let position = SavedPosition(
-                    columnIndex: colIndex,
-                    neighborBefore: neighborBefore,
-                    neighborAfter: neighborAfter,
-                    width: width,
-                    presetIndex: column.presetIndex,
-                    isFullWidth: column.isFullWidth,
-                    lastSeen: Date()
-                )
-
-                positionMemory.save(
-                    bundleID: bundleID, windowTitle: windowTitle,
-                    displayID: UInt32(displayID), spaceFingerprint: spaceFingerprint,
-                    windowID: window.windowID,
-                    position: position)
-            }
-        }
+        // No per-removal callback needed — snapshot model uses debounced strip capture
 
         hotkeyManager.registerFromConfig(config.keybindings)
         let hotkeyOk = hotkeyManager.start()
@@ -369,11 +303,11 @@ public final class WindowManager: @unchecked Sendable {
         stateWriteTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) {
             [weak self] _ in
             self?.persistState()
-            self?.positionMemory?.persistToDisk()
+            self?.snapshotStore?.persistToDisk()
         }
 
         #if DEBUG
-            print("[WM] Config loaded from \(ScrollWMConfig.configPath)")
+            print("[WM] Config loaded from \(ReelConfig.configPath)")
             fflush(stdout)
         #endif
 
@@ -381,26 +315,26 @@ public final class WindowManager: @unchecked Sendable {
         let server = SocketServer()
         server.onCommand = { [weak self] command in
             guard let self = self else {
-                return ScrollWMResponse(success: false, message: "Shutting down")
+                return ReelResponse(success: false, message: "Shutting down")
             }
             return self.handleIPCCommand(command)
         }
         server.onMessage = { [weak self] message in
-            guard let self else { return ScrollWMResponse(success: false, message: "No handler") }
+            guard let self else { return ReelResponse(success: false, message: "No handler") }
             switch message.command {
             case "clear-positions-app":
                 guard let appID = message.appID else {
-                    return ScrollWMResponse(success: false, message: "Missing appID")
+                    return ReelResponse(success: false, message: "Missing appID")
                 }
-                self.positionMemory?.clear(bundleID: appID)
-                self.positionMemory?.persistToDisk()
-                return ScrollWMResponse(success: true, message: "Cleared positions for \(appID)")
+                self.snapshotStore?.clear(bundleID: appID)
+                self.snapshotStore?.persistToDisk()
+                return ReelResponse(success: true, message: "Cleared positions for \(appID)")
             default:
                 // Fall back to standard command handling
-                if let cmd = ScrollWMCommand(rawValue: message.command) {
+                if let cmd = ReelCommand(rawValue: message.command) {
                     return self.handleIPCCommand(cmd)
                 }
-                return ScrollWMResponse(
+                return ReelResponse(
                     success: false, message: "Unknown command: \(message.command)")
             }
         }
@@ -431,11 +365,11 @@ public final class WindowManager: @unchecked Sendable {
         }
 
         #if DEBUG
-            print("[ScrollWM] Window manager started")
-            print("[ScrollWM] Tracked windows: \(tracker.windows.count)")
-            print("[ScrollWM] Tracked apps: \(tracker.apps.count)")
-            print("[ScrollWM] Strip columns: \(stripController.strip.columns.count)")
-            print("[ScrollWM] Strip working area: \(stripController.strip.workingArea)")
+            print("[Reel] Window manager started")
+            print("[Reel] Tracked windows: \(tracker.windows.count)")
+            print("[Reel] Tracked apps: \(tracker.apps.count)")
+            print("[Reel] Strip columns: \(stripController.strip.columns.count)")
+            print("[Reel] Strip working area: \(stripController.strip.workingArea)")
             fflush(stdout)
         #endif
 
@@ -455,7 +389,7 @@ public final class WindowManager: @unchecked Sendable {
                 }
                 #if DEBUG
                     print(
-                        "[ScrollWM] Startup retry @\(delay)s: \(self.stripController.strip.columns.count) cols"
+                        "[Reel] Startup retry @\(delay)s: \(self.stripController.strip.columns.count) cols"
                     )
                     fflush(stdout)
                 #endif
@@ -475,27 +409,16 @@ public final class WindowManager: @unchecked Sendable {
         // Restore all windows to reasonable on-screen positions
         restoreAllWindows()
 
-        // Restore zen mode alpha for all windows
-        for (_, sc) in stripControllers {
-            sc.zenDimmer.restoreAll()
-        }
-
-        // Restore floating window opacities
-        for (wid, _) in floatingWindowOpacities {
-            ZenDimmer.setWindowAlpha(wid, 1.0)
-        }
-        floatingWindowOpacities.removeAll()
-
-        // Restore all pinned windows to normal level
-        for wid in pinnedWindows {
-            ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.normalWindow))
-        }
-        pinnedWindows.removeAll()
-        userToggledPinned.removeAll()
-
         // Persist final state
         persistState()
-        positionMemory?.persistToDisk()
+        // Save all snapshots before shutdown
+        for (displayID, sc) in stripControllers {
+            let key = SnapshotKey(displayID: UInt32(displayID), spaceFingerprint: sc.currentSpaceFingerprint)
+            if let snapshot = captureSnapshot(sc: sc) {
+                snapshotStore?.saveImmediate(snapshot, for: key)
+            }
+        }
+        snapshotStore?.persistToDisk()
 
         // Stop subsystems
         ipcServer?.stop()
@@ -532,16 +455,12 @@ public final class WindowManager: @unchecked Sendable {
                 sc.clearCommittedFrames()
                 sc.applyLayout()
             }
-            // Re-apply always-on-top levels
-            for wid in pinnedWindows {
-                ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.floatingWindow))
-            }
         }
     }
 
     /// Reload config from disk and apply to all subsystems.
     public func reloadConfig() {
-        let (newConfig, error) = ScrollWMConfig.load()
+        let (newConfig, error) = ReelConfig.load()
         if let err = error {
             #if DEBUG
                 print("[WM] Config reload error: \(err)")
@@ -553,81 +472,12 @@ public final class WindowManager: @unchecked Sendable {
         // Apply shared config fields (strip layout, hotkeys, rules, gesture modifier)
         applyConfig(newConfig)
 
-        // Re-evaluate rule opacities for all tiled windows
-        for (_, sc) in stripControllers {
-            for (_, window) in sc.windowMap {
-                let ruleAlpha = resolveRuleOpacity(for: window)
-                if let alpha = ruleAlpha, alpha < 1.0 {
-                    sc.zenDimmer.setRuleOpacity(for: window.windowID, opacity: alpha)
-                } else {
-                    sc.zenDimmer.clearRuleOpacity(for: window.windowID)
-                }
-            }
-        }
-
-        // Re-evaluate floating window opacities
-        var updatedFloatingOpacities: [CGWindowID: Double] = [:]
-        for wid in tracker.floatingWindows {
-            guard let window = tracker.windows[wid] else { continue }
-            let ruleAlpha = resolveRuleOpacity(for: window)
-            if let ruleAlpha, ruleAlpha < 1.0 {
-                updatedFloatingOpacities[wid] = ruleAlpha
-                ZenDimmer.setWindowAlpha(wid, Float(ruleAlpha))
-            } else if userToggledFloats.contains(wid) {
-                let alpha = config.floatingOpacity
-                if alpha < 1.0 {
-                    updatedFloatingOpacities[wid] = alpha
-                    ZenDimmer.setWindowAlpha(wid, Float(alpha))
-                } else {
-                    ZenDimmer.setWindowAlpha(wid, 1.0)
-                }
-            } else if floatingWindowOpacities[wid] != nil {
-                ZenDimmer.setWindowAlpha(wid, 1.0)
-            }
-        }
-        floatingWindowOpacities = updatedFloatingOpacities
-
-        // Re-evaluate always-on-top rules
-        let oldPinned = pinnedWindows
-        var newPinned = userToggledPinned
-        for (_, sc) in stripControllers {
-            for (_, window) in sc.windowMap {
-                if resolveAlwaysOnTop(for: window) == true {
-                    newPinned.insert(window.windowID)
-                }
-            }
-        }
-        for wid in tracker.floatingWindows {
-            guard let window = tracker.windows[wid] else { continue }
-            if resolveAlwaysOnTop(for: window) == true {
-                newPinned.insert(wid)
-            } else if userToggledFloats.contains(wid) && config.floatingAlwaysOnTop {
-                newPinned.insert(wid)
-            }
-        }
-        // Restore level for dropped windows
-        for wid in oldPinned.subtracting(newPinned) {
-            ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.normalWindow))
-        }
-        pinnedWindows = newPinned
-        // Re-apply level for all pinned windows
-        for wid in pinnedWindows {
-            ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.floatingWindow))
-        }
-
-        // Position memory (reload-specific: may create or update)
-        if config.positionMemory {
-            if positionMemory == nil {
-                let stateDir = NSHomeDirectory() + "/.local/state/scrollwm"
-                let filePath = URL(fileURLWithPath: stateDir + "/window-positions.json")
-                positionMemory = PositionMemory(
-                    capacity: config.savedPositionLimit, filePath: filePath,
-                    matchingRules: positionMemoryMatchingRules)
-                positionMemory?.loadFromDisk()
-            } else {
-                positionMemory?.applyConfig(
-                    capacity: config.savedPositionLimit, matchingRules: positionMemoryMatchingRules)
-            }
+        // Snapshot store (reload-specific: may create)
+        if config.positionMemory, snapshotStore == nil {
+            let stateDir = NSHomeDirectory() + "/.local/state/reel"
+            let filePath = URL(fileURLWithPath: stateDir + "/window-snapshots.json")
+            snapshotStore = StripSnapshotStore(filePath: filePath)
+            snapshotStore?.loadFromDisk()
         }
 
         // Relayout
@@ -733,30 +583,16 @@ public final class WindowManager: @unchecked Sendable {
             case .tile:
                 if let app = tracker.apps[window.pid] {
                     let (displayID, sc) = stripControllerEntryForWindow(window)
-                    let saved = lookupSavedPosition(for: window, on: sc, displayID: displayID)
+                    let saved = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
                     #if DEBUG
                         print("[WM] windowAdded wid=\(window.windowID) pid=\(window.pid) restored=\(saved != nil)")
                         fflush(stdout)
                     #endif
                     sc.addWindow(window, app: app, restoredPosition: saved)
-                    if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
-                        sc.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
-                    }
-                    if resolveAlwaysOnTop(for: window) == true {
-                        applyPinState(windowID: window.windowID, pinned: true)
-                    }
+                    scheduleSnapshotSave(sc: sc)
                 }
             case .float:
-                // Apply rule opacity to auto-classified floating windows (NOT config.floatingOpacity,
-                // which is for user-toggled floats only). Track in floatingWindowOpacities for
-                // space-switch reapplication.
-                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
-                    floatingWindowOpacities[window.windowID] = ruleAlpha
-                    ZenDimmer.setWindowAlpha(window.windowID, Float(ruleAlpha))
-                }
-                if resolveAlwaysOnTop(for: window) == true {
-                    applyPinState(windowID: window.windowID, pinned: true)
-                }
+                break
             case .ignore:
                 break
             }
@@ -766,17 +602,12 @@ public final class WindowManager: @unchecked Sendable {
                 print("[WM] windowRemoved tileID=\(tileID.rawValue)")
                 fflush(stdout)
             #endif
-            if floatingWindowOpacities.removeValue(forKey: windowID) != nil {
-                ZenDimmer.setWindowAlpha(windowID, 1.0)
-            }
             userToggledFloats.remove(windowID)
-            pinnedWindows.remove(windowID)
-            userToggledPinned.remove(windowID)
-            ZenDimmer.setWindowLevel(windowID, CGWindowLevelForKey(.normalWindow))
             // Remove from whichever strip has it
             for (_, sc) in stripControllers {
                 if sc.windowMap[tileID] != nil {
                     sc.removeWindow(tileID: tileID)
+                    scheduleSnapshotSave(sc: sc)
                     break
                 }
             }
@@ -855,6 +686,7 @@ public final class WindowManager: @unchecked Sendable {
                 fflush(stdout)
             #endif
             stripController.removeWindow(tileID: TileID(windowID))
+            scheduleSnapshotSave()
 
         case .windowDeminimized(let windowID):
             #if DEBUG
@@ -865,19 +697,15 @@ public final class WindowManager: @unchecked Sendable {
                 let app = tracker.apps[window.pid]
             {
                 let (displayID, sc) = stripControllerEntryForWindow(window)
-                let saved = lookupSavedPosition(for: window, on: sc, displayID: displayID)
+                let saved = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
                 sc.addWindow(window, app: app, restoredPosition: saved)
-                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
-                    sc.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
-                }
-                if pinnedWindows.contains(windowID) || resolveAlwaysOnTop(for: window) == true {
-                    applyPinState(windowID: windowID, pinned: true)
-                }
+                scheduleSnapshotSave(sc: sc)
             }
 
         case .windowResized(let windowID):
             // User resized a window — update the strip column width to match
             stripController.handleUserResize(windowID: windowID)
+            scheduleSnapshotSave()
 
         case .windowMoved(let windowID):
             // User dragged a window — snap it back to its strip position
@@ -906,6 +734,9 @@ public final class WindowManager: @unchecked Sendable {
             fflush(stdout)
         #endif
 
+        // Save snapshot for the leaving space before switching
+        saveSnapshotImmediate(sc: stripController)
+
         // Try to restore saved state for this Space
         let restored = stripController.switchSpace(onScreenWindowIDs: onScreenIDs)
 
@@ -918,8 +749,6 @@ public final class WindowManager: @unchecked Sendable {
             let goneIDs = managedIDs.subtracting(onScreenIDs)
             for goneID in goneIDs {
                 stripController.removeWindow(tileID: TileID(goneID))
-                pinnedWindows.remove(goneID)
-                userToggledPinned.remove(goneID)
             }
 
             // Add new windows that weren't in the saved state
@@ -940,7 +769,7 @@ public final class WindowManager: @unchecked Sendable {
                         tracker.registerTrackedWindow(window)
                         app.observeWindow(window.element)
                         let (displayID, targetSC) = stripControllerEntryForWindow(window)
-                        let saved = lookupSavedPosition(
+                        let saved = resolveSnapshotPosition(
                             for: window, on: targetSC, displayID: displayID)
                         targetSC.addWindow(window, app: app, restoredPosition: saved)
                         #if DEBUG
@@ -959,16 +788,6 @@ public final class WindowManager: @unchecked Sendable {
                     print("[WM] space restored: \(stripController.strip.columns.count) cols")
                     fflush(stdout)
                 #endif
-            }
-
-            // Re-apply rule opacities and always-on-top for all tiled windows on restored space
-            for (_, window) in stripController.windowMap {
-                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
-                    stripController.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
-                }
-                if resolveAlwaysOnTop(for: window) == true {
-                    applyPinState(windowID: window.windowID, pinned: true)
-                }
             }
 
             // Restore focus to the window the user had active before leaving.
@@ -990,16 +809,6 @@ public final class WindowManager: @unchecked Sendable {
             #if DEBUG
                 fflush(stdout)
             #endif
-
-            // Reapply floating window opacities — macOS may reset compositing alpha on space switch
-            for (wid, alpha) in floatingWindowOpacities {
-                ZenDimmer.setWindowAlpha(wid, Float(alpha))
-            }
-
-            // Re-apply always-on-top levels
-            for wid in pinnedWindows {
-                ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.floatingWindow))
-            }
             return
         }
 
@@ -1022,35 +831,11 @@ public final class WindowManager: @unchecked Sendable {
                 tracker.registerTrackedWindow(window)
                 app.observeWindow(window.element)
                 let (displayID, targetSC) = stripControllerEntryForWindow(window)
-                let saved = lookupSavedPosition(for: window, on: targetSC, displayID: displayID)
+                let saved = resolveSnapshotPosition(for: window, on: targetSC, displayID: displayID)
                 targetSC.addWindow(window, app: app, restoredPosition: saved)
             }
         }
         stripController.finishBatch()
-
-        // Apply rule opacities for tiled windows on new space
-        for (_, window) in stripController.windowMap {
-            if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
-                stripController.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
-            }
-        }
-
-        // Reapply floating window opacities — macOS may reset compositing alpha on space switch
-        for (wid, alpha) in floatingWindowOpacities {
-            ZenDimmer.setWindowAlpha(wid, Float(alpha))
-        }
-
-        // Evaluate rules for new-space tiled windows
-        for (_, window) in stripController.windowMap {
-            if resolveAlwaysOnTop(for: window) == true {
-                applyPinState(windowID: window.windowID, pinned: true)
-            }
-        }
-
-        // Re-apply always-on-top levels for pre-existing pinned windows
-        for wid in pinnedWindows {
-            ZenDimmer.setWindowLevel(wid, CGWindowLevelForKey(.floatingWindow))
-        }
 
         #if DEBUG
             print(
@@ -1073,12 +858,16 @@ public final class WindowManager: @unchecked Sendable {
             stripController.focusRight()
         case .moveColumnLeft:
             stripController.moveColumnLeft()
+            scheduleSnapshotSave()
         case .moveColumnRight:
             stripController.moveColumnRight()
+            scheduleSnapshotSave()
         case .cycleWidthPreset:
             stripController.cycleWidthPreset()
+            scheduleSnapshotSave()
         case .toggleFullWidth:
             stripController.toggleFullWidth()
+            scheduleSnapshotSave()
         case .toggleFloating:
             if let focusedWID = getFocusedWindowID(),
                tracker.floatingWindows.contains(focusedWID),
@@ -1087,33 +876,18 @@ public final class WindowManager: @unchecked Sendable {
             {
                 tracker.unmarkFloating(focusedWID)
                 userToggledFloats.remove(focusedWID)
-                // Restore to 1.0 before unfloating — prevents visual jump
-                // when ZenDimmer assumes currentAlpha is 1.0
-                restoreFloatingOpacity(windowID: focusedWID)
-                // Remove auto-pin from floating (keep if user explicitly toggled pin)
-                if pinnedWindows.contains(focusedWID) && !userToggledPinned.contains(focusedWID) {
-                    applyPinState(windowID: focusedWID, pinned: false)
-                }
-                stripController.unfloatWindow(window, app: app)
-                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
-                    stripController.zenDimmer.setRuleOpacity(for: focusedWID, opacity: ruleAlpha)
-                }
-                // Re-apply rule-based pin if matched (now as tiled window)
-                if resolveAlwaysOnTop(for: window) == true {
-                    applyPinState(windowID: focusedWID, pinned: true)
-                }
+                let (displayID, sc) = stripControllerEntryForWindow(window)
+                let restored = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
+                stripController.unfloatWindow(window, app: app, restoredPosition: restored)
+                scheduleSnapshotSave()
                 #if DEBUG
                     print("[WM] Window \(focusedWID) is now tiled (unfloated)")
                     fflush(stdout)
                 #endif
             } else if let window = stripController.toggleFloating() {
+                saveSnapshotImmediate(sc: stripController)
                 tracker.markFloating(window.windowID)
                 userToggledFloats.insert(window.windowID)
-                applyFloatingOpacity(windowID: window.windowID, window: window)
-                // Auto-pin if floatingAlwaysOnTop or rule matches
-                if resolveAlwaysOnTop(for: window) == true || config.floatingAlwaysOnTop {
-                    applyPinState(windowID: window.windowID, pinned: true)
-                }
                 #if DEBUG
                     print("[WM] Window \(window.tileID.rawValue) is now floating")
                     fflush(stdout)
@@ -1121,23 +895,6 @@ public final class WindowManager: @unchecked Sendable {
             }
         case .closeWindow:
             stripController.closeActiveWindow()
-        case .toggleAlwaysOnTop:
-            guard let focusedWID = getFocusedWindowID() else { break }
-            if pinnedWindows.contains(focusedWID) {
-                applyPinState(windowID: focusedWID, pinned: false)
-                userToggledPinned.remove(focusedWID)
-                #if DEBUG
-                    print("[WM] Window \(focusedWID) unpinned")
-                    fflush(stdout)
-                #endif
-            } else {
-                applyPinState(windowID: focusedWID, pinned: true)
-                userToggledPinned.insert(focusedWID)
-                #if DEBUG
-                    print("[WM] Window \(focusedWID) pinned (always-on-top)")
-                    fflush(stdout)
-                #endif
-            }
         case .workspace:
             break  // TODO: Phase 3
         }
@@ -1156,66 +913,6 @@ public final class WindowManager: @unchecked Sendable {
         // so we rely on the err == .success check above for validity.
         let element = value as! AXUIElement
         return windowID(for: element)
-    }
-
-    /// Find the opacity rule that matches a window, if any.
-    private func resolveRuleOpacity(for window: AXWindow) -> Double? {
-        let bundleID = tracker.apps[window.pid]?.bundleIdentifier
-        let title = window.getTitle()
-        var props = WindowProperties()
-        props.bundleIdentifier = bundleID
-        props.title = title
-        return tracker.rules.first(where: {
-            $0.opacity != nil
-            && $0.matches(props)
-            && ($0.appIDRegex == nil || bundleID != nil)
-            && ($0.titleRegex == nil || title != nil)
-        })?.opacity
-    }
-
-    /// Apply opacity to a user-toggled floating window and track it.
-    private func applyFloatingOpacity(windowID: CGWindowID, window: AXWindow) {
-        let ruleOpacity = resolveRuleOpacity(for: window)
-        let alpha = ruleOpacity ?? config.floatingOpacity
-        if alpha < 1.0 {
-            floatingWindowOpacities[windowID] = alpha
-            ZenDimmer.setWindowAlpha(windowID, Float(alpha))
-        } else {
-            floatingWindowOpacities.removeValue(forKey: windowID)
-            ZenDimmer.setWindowAlpha(windowID, 1.0)
-        }
-    }
-
-    /// Restore a floating window to full opacity and remove from tracking.
-    private func restoreFloatingOpacity(windowID: CGWindowID) {
-        floatingWindowOpacities.removeValue(forKey: windowID)
-        ZenDimmer.setWindowAlpha(windowID, 1.0)
-    }
-
-    /// Find whether a window matches an always_on_top rule.
-    private func resolveAlwaysOnTop(for window: AXWindow) -> Bool? {
-        let bundleID = tracker.apps[window.pid]?.bundleIdentifier
-        let title = window.getTitle()
-        var props = WindowProperties()
-        props.bundleIdentifier = bundleID
-        props.title = title
-        return tracker.rules.first(where: {
-            $0.alwaysOnTop != nil
-            && $0.matches(props)
-            && ($0.appIDRegex == nil || bundleID != nil)
-            && ($0.titleRegex == nil || title != nil)
-        })?.alwaysOnTop
-    }
-
-    /// Apply or remove always-on-top for a window.
-    private func applyPinState(windowID: CGWindowID, pinned: Bool) {
-        let level: Int32 = pinned ? CGWindowLevelForKey(.floatingWindow) : CGWindowLevelForKey(.normalWindow)
-        ZenDimmer.setWindowLevel(windowID, level)
-        if pinned {
-            pinnedWindows.insert(windowID)
-        } else {
-            pinnedWindows.remove(windowID)
-        }
     }
 
     // MARK: - Window Health Check
@@ -1252,32 +949,15 @@ public final class WindowManager: @unchecked Sendable {
                     continue
                 }
 
-                // Fix D: Capture position before removal for same-PID tab-switch detection.
+                // Capture position before removal for same-PID tab-switch detection.
                 // If another window from this PID appears soon, it inherits this column.
                 if let colIndex = stripController.strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
                     let col = stripController.strip.columns[colIndex]
                     let colData = stripController.strip.columnData[colIndex]
                     let width: ColumnWidth = col.width == .auto ? .fixed(colData.cachedWidth) : col.width
-
-                    let neighborBefore: String? = if colIndex > 0,
-                        let tile = stripController.strip.columns[colIndex - 1].activeTile,
-                        let win = stripController.windowMap[tile],
-                        let app = tracker.apps[win.pid] { app.bundleIdentifier } else { nil }
-                    let neighborAfter: String? = if colIndex < stripController.strip.columns.count - 1,
-                        let tile = stripController.strip.columns[colIndex + 1].activeTile,
-                        let win = stripController.windowMap[tile],
-                        let app = tracker.apps[win.pid] { app.bundleIdentifier } else { nil }
-
-                    recentRemovalsByPID[window.pid] = (
-                        position: SavedPosition(
-                            columnIndex: colIndex,
-                            neighborBefore: neighborBefore,
-                            neighborAfter: neighborAfter,
-                            width: width,
-                            presetIndex: col.presetIndex,
-                            isFullWidth: col.isFullWidth,
-                            lastSeen: now),
-                        date: now)
+                    recentRemovalsByPID[window.pid] = RecentRemoval(
+                        columnIndex: colIndex, width: width,
+                        presetIndex: col.presetIndex, isFullWidth: col.isFullWidth, date: now)
                 }
 
                 #if DEBUG
@@ -1285,9 +965,8 @@ public final class WindowManager: @unchecked Sendable {
                     fflush(stdout)
                 #endif
                 stripController.removeWindow(tileID: tileID)
+                scheduleSnapshotSave()
                 tracker.untrackWindow(window.windowID)
-                pinnedWindows.remove(window.windowID)
-                userToggledPinned.remove(window.windowID)
                 recentlyAdoptedWindows.removeValue(forKey: window.windowID)
                 changed = true
                 continue
@@ -1306,6 +985,7 @@ public final class WindowManager: @unchecked Sendable {
         if changed {
             stripController.clearCommittedFrames()
             stripController.applyLayout()
+            scheduleSnapshotSave()
         }
     }
 
@@ -1356,30 +1036,25 @@ public final class WindowManager: @unchecked Sendable {
 
                 // Fix D: If a window from this PID was recently removed (tab switch),
                 // inherit its position instead of looking up this window's own saved position.
-                let saved: SavedPosition?
+                let restored: RestoredSlot?
                 if let recent = recentRemovalsByPID[pid],
                    Date().timeIntervalSince(recent.date) < 2.0 {
-                    saved = recent.position
+                    restored = RestoredSlot(
+                        slotIndex: recent.columnIndex, width: recent.width,
+                        presetIndex: recent.presetIndex, isFullWidth: recent.isFullWidth)
                     recentRemovalsByPID.removeValue(forKey: pid)
                     #if DEBUG
-                        print("[HealthCheck] Using same-PID position for wid=\(window.windowID) pid=\(pid) col=\(recent.position.columnIndex)")
+                        print("[HealthCheck] Using same-PID position for wid=\(window.windowID) pid=\(pid) col=\(recent.columnIndex)")
                         fflush(stdout)
                     #endif
                 } else {
-                    saved = lookupSavedPosition(for: window, on: targetSC, displayID: displayID)
+                    restored = resolveSnapshotPosition(for: window, on: targetSC, displayID: displayID)
                 }
 
-                targetSC.addWindow(window, app: app, restoredPosition: saved)
+                targetSC.addWindow(window, app: app, restoredPosition: restored)
 
                 // Fix B: Track adoption time for grace period
                 recentlyAdoptedWindows[window.windowID] = Date()
-
-                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
-                    targetSC.zenDimmer.setRuleOpacity(for: window.windowID, opacity: ruleAlpha)
-                }
-                if resolveAlwaysOnTop(for: window) == true {
-                    applyPinState(windowID: window.windowID, pinned: true)
-                }
                 adopted = true
                 #if DEBUG
                     print(
@@ -1470,26 +1145,30 @@ public final class WindowManager: @unchecked Sendable {
 
     // MARK: - IPC Command Handling
 
-    private func handleIPCCommand(_ command: ScrollWMCommand) -> ScrollWMResponse {
+    private func handleIPCCommand(_ command: ReelCommand) -> ReelResponse {
         switch command {
         case .focusLeft:
             stripController.focusLeft()
-            return ScrollWMResponse(success: true)
+            return ReelResponse(success: true)
         case .focusRight:
             stripController.focusRight()
-            return ScrollWMResponse(success: true)
+            return ReelResponse(success: true)
         case .moveColumnLeft:
             stripController.moveColumnLeft()
-            return ScrollWMResponse(success: true)
+            scheduleSnapshotSave()
+            return ReelResponse(success: true)
         case .moveColumnRight:
             stripController.moveColumnRight()
-            return ScrollWMResponse(success: true)
+            scheduleSnapshotSave()
+            return ReelResponse(success: true)
         case .cycleWidthPreset:
             stripController.cycleWidthPreset()
-            return ScrollWMResponse(success: true)
+            scheduleSnapshotSave()
+            return ReelResponse(success: true)
         case .toggleFullWidth:
             stripController.toggleFullWidth()
-            return ScrollWMResponse(success: true)
+            scheduleSnapshotSave()
+            return ReelResponse(success: true)
         case .toggleFloating:
             if let focusedWID = getFocusedWindowID(),
                tracker.floatingWindows.contains(focusedWID),
@@ -1498,43 +1177,19 @@ public final class WindowManager: @unchecked Sendable {
             {
                 tracker.unmarkFloating(focusedWID)
                 userToggledFloats.remove(focusedWID)
-                restoreFloatingOpacity(windowID: focusedWID)
-                if pinnedWindows.contains(focusedWID) && !userToggledPinned.contains(focusedWID) {
-                    applyPinState(windowID: focusedWID, pinned: false)
-                }
-                stripController.unfloatWindow(window, app: app)
-                if let ruleAlpha = resolveRuleOpacity(for: window), ruleAlpha < 1.0 {
-                    stripController.zenDimmer.setRuleOpacity(for: focusedWID, opacity: ruleAlpha)
-                }
-                if resolveAlwaysOnTop(for: window) == true {
-                    applyPinState(windowID: focusedWID, pinned: true)
-                }
+                let (displayID, sc) = stripControllerEntryForWindow(window)
+                let restored = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
+                stripController.unfloatWindow(window, app: app, restoredPosition: restored)
+                scheduleSnapshotSave()
             } else if let window = stripController.toggleFloating() {
+                saveSnapshotImmediate(sc: stripController)
                 tracker.markFloating(window.windowID)
                 userToggledFloats.insert(window.windowID)
-                applyFloatingOpacity(windowID: window.windowID, window: window)
-                if resolveAlwaysOnTop(for: window) == true || config.floatingAlwaysOnTop {
-                    applyPinState(windowID: window.windowID, pinned: true)
-                }
             }
-            return ScrollWMResponse(success: true)
+            return ReelResponse(success: true)
         case .closeWindow:
             stripController.closeActiveWindow()
-            return ScrollWMResponse(success: true)
-        case .toggleAlwaysOnTop:
-            guard let focusedWID = getFocusedWindowID() else {
-                return ScrollWMResponse(success: false, message: "No focused window")
-            }
-            let wasPinned = pinnedWindows.contains(focusedWID)
-            if wasPinned {
-                applyPinState(windowID: focusedWID, pinned: false)
-                userToggledPinned.remove(focusedWID)
-            } else {
-                applyPinState(windowID: focusedWID, pinned: true)
-                userToggledPinned.insert(focusedWID)
-            }
-            return ScrollWMResponse(success: true,
-                message: wasPinned ? "Unpinned" : "Pinned")
+            return ReelResponse(success: true)
         case .listWindows:
             let windows = stripController.windowMap.map { (tileID, window) -> [String: Any] in
                 ["id": tileID.rawValue, "pid": window.pid, "title": window.getTitle() ?? ""]
@@ -1542,9 +1197,9 @@ public final class WindowManager: @unchecked Sendable {
             if let data = try? JSONSerialization.data(withJSONObject: windows),
                 let json = String(data: data, encoding: .utf8)
             {
-                return ScrollWMResponse(success: true, data: json)
+                return ReelResponse(success: true, data: json)
             }
-            return ScrollWMResponse(success: true, data: "[]")
+            return ReelResponse(success: true, data: "[]")
         case .getLayout:
             let cols = stripController.strip.columns.enumerated().map { (i, col) -> [String: Any] in
                 [
@@ -1557,72 +1212,216 @@ public final class WindowManager: @unchecked Sendable {
             if let data = try? JSONSerialization.data(withJSONObject: cols),
                 let json = String(data: data, encoding: .utf8)
             {
-                return ScrollWMResponse(success: true, data: json)
+                return ReelResponse(success: true, data: json)
             }
-            return ScrollWMResponse(success: true, data: "[]")
+            return ReelResponse(success: true, data: "[]")
         case .listPositions:
-            if let pm = positionMemory {
-                let entries = pm.allEntries().map { entry -> [String: Any] in
-                    [
-                        "bundleID": entry.key.bundleID,
-                        "windowTitle": entry.key.windowTitle ?? "nil",
-                        "displayID": entry.key.displayID,
-                        "columnIndex": entry.position.columnIndex,
-                        "width": "\(entry.position.width)",
-                        "lastSeen": Self.isoFormatter.string(from: entry.position.lastSeen),
-                    ]
+            if let store = snapshotStore {
+                var allSlots: [[String: Any]] = []
+                for (key, snapshot) in store.allSnapshots() {
+                    for (i, slot) in snapshot.slots.enumerated() {
+                        allSlots.append([
+                            "displayID": key.displayID,
+                            "slotIndex": i,
+                            "bundleID": slot.bundleID,
+                            "windowTitle": slot.windowTitle ?? "nil",
+                            "width": "\(slot.width)",
+                            "vacant": slot.vacant,
+                        ])
+                    }
                 }
-                if let data = try? JSONSerialization.data(withJSONObject: entries),
+                if let data = try? JSONSerialization.data(withJSONObject: allSlots),
                     let json = String(data: data, encoding: .utf8)
                 {
-                    return ScrollWMResponse(success: true, data: json)
+                    return ReelResponse(success: true, data: json)
                 }
             }
-            return ScrollWMResponse(success: true, data: "[]")
+            return ReelResponse(success: true, data: "[]")
 
         case .clearPositions:
-            positionMemory?.clearAll()
-            positionMemory?.persistToDisk()
-            return ScrollWMResponse(success: true, message: "Cleared all saved positions")
+            snapshotStore?.clearAll()
+            snapshotStore?.persistToDisk()
+            return ReelResponse(success: true, message: "Cleared all saved positions")
         case .recover:
             restoreAllWindows()
             for (_, sc) in stripControllers {
                 sc.clearCommittedFrames()
                 sc.applyLayout()
             }
-            return ScrollWMResponse(success: true, message: "Windows recovered")
+            return ReelResponse(success: true, message: "Windows recovered")
         case .quit:
             DispatchQueue.main.async { NSApp.terminate(nil) }
-            return ScrollWMResponse(success: true, message: "Quitting")
+            return ReelResponse(success: true, message: "Quitting")
         }
     }
 
     // MARK: - Multi-Monitor Helpers
 
-    /// Convert config position memory rules to the dictionary format PositionMemory expects.
-    private var positionMemoryMatchingRules: [String: String] {
-        config.positionMemoryRules.reduce(into: [String: String]()) { dict, rule in
-            dict[rule.appID] = rule.matchBy
-        }
-    }
-
-    /// Look up a saved position for a window and consume it if found.
-    private func lookupSavedPosition(
+    /// Resolve a snapshot position for a window using the strip snapshot store.
+    private func resolveSnapshotPosition(
         for window: AXWindow, on sc: StripController, displayID: CGDirectDisplayID
-    ) -> SavedPosition? {
-        guard config.positionMemory, let positionMemory else { return nil }
+    ) -> RestoredSlot? {
+        guard config.positionMemory, let snapshotStore else { return nil }
 
         let bundleID = tracker.apps[window.pid]?.bundleIdentifier
         guard let bundleID else { return nil }
 
         let title = window.getTitle()
-        let fingerprint = sc.currentSpaceFingerprint
+        let key = SnapshotKey(displayID: UInt32(displayID), spaceFingerprint: sc.currentSpaceFingerprint)
+        var currentBundleIDs = buildCurrentBundleIDs(sc: sc)
+        currentBundleIDs.insert(bundleID)  // Include the incoming window for disk matching
 
-        return positionMemory.lookupAndConsume(
-            bundleID: bundleID, windowTitle: title,
-            displayID: UInt32(displayID),
-            spaceFingerprint: fingerprint,
-            windowID: window.windowID)
+        guard let snapshot = snapshotStore.snapshotFuzzyByBundleIDs(
+            displayID: key.displayID, fingerprint: key.spaceFingerprint,
+            currentBundleIDs: currentBundleIDs)
+        else { return nil }
+
+        let stripWindows = buildStripWindowInfos(sc: sc)
+        let filled = computeFilledSlots(slots: snapshot.slots, stripWindows: stripWindows)
+
+        guard let slotIndex = matchWindowToSlot(
+            windowID: window.windowID,
+            bundleID: bundleID,
+            title: title,
+            snapshot: snapshot,
+            filledSlots: filled,
+            now: Date())
+        else { return nil }
+
+        let slot = snapshot.slots[slotIndex]
+        return RestoredSlot(
+            slotIndex: slotIndex,
+            width: slot.width,
+            presetIndex: slot.presetIndex,
+            isFullWidth: slot.isFullWidth)
+    }
+
+    /// Build StripWindowInfo array from a strip controller (caches AX title calls).
+    private func buildStripWindowInfos(sc: StripController) -> [StripWindowInfo] {
+        var infos: [StripWindowInfo] = []
+        for column in sc.strip.columns {
+            guard let tile = column.activeTile,
+                  let win = sc.windowMap[tile],
+                  let app = tracker.apps[win.pid]
+            else { continue }
+            infos.append(StripWindowInfo(
+                tileID: tile,
+                windowID: win.windowID,
+                bundleID: app.bundleIdentifier ?? "",
+                windowTitle: win.getTitle()))
+        }
+        return infos
+    }
+
+    /// Build the set of bundleIDs currently on a strip (for fuzzy disk matching).
+    private func buildCurrentBundleIDs(sc: StripController) -> Set<String> {
+        var ids = Set<String>()
+        for column in sc.strip.columns {
+            guard let tile = column.activeTile,
+                  let win = sc.windowMap[tile],
+                  let app = tracker.apps[win.pid],
+                  let bid = app.bundleIdentifier
+            else { continue }
+            ids.insert(bid)
+        }
+        return ids
+    }
+
+    /// Capture the current strip state as a snapshot.
+    private func captureSnapshot(sc: StripController) -> StripSnapshot? {
+        var slots: [SlotDescriptor] = []
+        for (i, column) in sc.strip.columns.enumerated() {
+            guard let tile = column.activeTile,
+                  let win = sc.windowMap[tile],
+                  let app = tracker.apps[win.pid]
+            else { continue }
+
+            let colData = sc.strip.columnData[i]
+            let width: ColumnWidth = column.width == .auto ? .fixed(colData.cachedWidth) : column.width
+
+            slots.append(SlotDescriptor(
+                windowID: win.windowID,
+                bundleID: app.bundleIdentifier ?? "",
+                windowTitle: win.getTitle(),
+                width: width,
+                presetIndex: column.presetIndex,
+                isFullWidth: column.isFullWidth))
+        }
+
+        // Merge ghost slots from previous snapshot
+        let key = snapshotStoreKey(for: sc)
+        if let prevSnapshot = snapshotStore?.snapshot(for: key) {
+            let now = Date()
+
+            // Phase 1: Re-insert surviving non-expired ghosts from previous snapshot.
+            // Collect insertions first, then apply in reverse order (highest index first)
+            // to prevent positional drift as the array grows.
+            var ghostInsertions: [(index: Int, slot: SlotDescriptor)] = []
+            for (origIndex, slot) in prevSnapshot.slots.enumerated() {
+                guard slot.vacant else { continue }
+                // Skip expired ghosts
+                if let vacatedAt = slot.vacatedAt,
+                   now.timeIntervalSince(vacatedAt) > 600 { continue }
+                // Skip if a live column matches this ghost
+                let matched = slots.contains { !$0.vacant && $0.bundleID == slot.bundleID && ($0.windowTitle == slot.windowTitle || slot.windowTitle == nil) }
+                if !matched {
+                    ghostInsertions.append((min(origIndex, slots.count), slot))
+                }
+            }
+            // Insert in reverse order so earlier insertions don't shift later indices
+            for insertion in ghostInsertions.reversed() {
+                let insertAt = min(insertion.index, slots.count)
+                slots.insert(insertion.slot, at: insertAt)
+            }
+
+            // Phase 2: Convert newly-missing non-vacant slots to ghosts.
+            // Two checks: (a) is there a live window for this slot? (b) is there already a ghost?
+            // Both prevent unnecessary ghost creation while avoiding double-insertion.
+            for prevSlot in prevSnapshot.slots {
+                guard !prevSlot.vacant else { continue }
+                let stillLive = slots.contains { !$0.vacant && $0.bundleID == prevSlot.bundleID && (prevSlot.windowTitle == nil || $0.windowTitle == prevSlot.windowTitle) }
+                let ghostExists = slots.contains { $0.vacant && $0.bundleID == prevSlot.bundleID && $0.windowTitle == prevSlot.windowTitle }
+                if !stillLive && !ghostExists {
+                    var ghost = prevSlot
+                    ghost.windowID = nil
+                    ghost.vacant = true
+                    ghost.vacatedAt = now  // Only set on first ghosting; inherited by Phase 1 on subsequent saves
+                    slots.append(ghost)
+                }
+            }
+        }
+
+        guard !slots.isEmpty else { return nil }
+        return StripSnapshot(slots: slots, lastUpdated: Date())
+    }
+
+    /// Build a SnapshotKey for the given strip controller.
+    private func snapshotStoreKey(for sc: StripController) -> SnapshotKey {
+        let displayID = stripControllers.first(where: { $0.value === sc })?.key ?? activeDisplayID
+        return SnapshotKey(displayID: UInt32(displayID), spaceFingerprint: sc.currentSpaceFingerprint)
+    }
+
+    /// Schedule a debounced snapshot save for the given strip controller.
+    /// Defaults to the active strip if no `sc` is provided.
+    private func scheduleSnapshotSave(sc: StripController? = nil) {
+        guard config.positionMemory, let snapshotStore else { return }
+        let targetSC = sc ?? stripController
+        let key = snapshotStoreKey(for: targetSC)
+        snapshotStore.scheduleSnapshotSave(key: key) { [weak self] in
+            self?.captureSnapshot(sc: targetSC)
+        }
+    }
+
+    /// Immediate snapshot save for the given strip controller.
+    private func saveSnapshotImmediate(sc: StripController) {
+        guard config.positionMemory, let snapshotStore else { return }
+        let key = snapshotStoreKey(for: sc)
+        if let snapshot = captureSnapshot(sc: sc) {
+            snapshotStore.saveImmediate(snapshot, for: key)
+            // Consume the matching disk entry now that we have a live entry
+            let bundleIDs = buildCurrentBundleIDs(sc: sc)
+            snapshotStore.consumeDiskEntry(displayID: key.displayID, bundleIDs: bundleIDs)
+        }
     }
 
     /// Returns both the displayID and StripController for a window based on its frame.
@@ -1660,5 +1459,5 @@ public final class WindowManager: @unchecked Sendable {
 // MARK: - Notification Names
 
 extension Notification.Name {
-    static let scrollWMShutdown = Notification.Name("scrollWMShutdown")
+    static let reelShutdown = Notification.Name("reelShutdown")
 }

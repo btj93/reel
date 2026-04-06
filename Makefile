@@ -1,11 +1,11 @@
 .PHONY: run, run-debug
 
 run-debug:
-	-pkill -x ScrollWM
+	-pkill -x Reel
 	bash scripts/bundle.sh
-	.build/debug/ScrollWM 2>&1
+	.build/debug/Reel 2>&1
 
 run:
-	-pkill -x ScrollWM
+	-pkill -x Reel
 	bash scripts/bundle.sh
-	open .build/bundled/ScrollWM.app
+	open .build/bundled/Reel.app
