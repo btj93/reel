@@ -271,6 +271,34 @@ public final class StripController: @unchecked Sendable {
 
     }
 
+    // MARK: - Trackpad Focus (velocity-aware)
+
+    func focusLeftAnimated(velocity: Double) {
+        let time = TimeUtil.now()
+        if animationEnabled {
+            let clampedVelocity = max(-5000, min(5000, velocity))
+            if let _ = strip.navigateLeft(at: time, velocity: clampedVelocity) {
+                frameLoop?.resume()
+            }
+        } else {
+            strip.navigateLeftInstant(at: time)
+            applyLayout()
+        }
+    }
+
+    func focusRightAnimated(velocity: Double) {
+        let time = TimeUtil.now()
+        if animationEnabled {
+            let clampedVelocity = max(-5000, min(5000, velocity))
+            if let _ = strip.navigateRight(at: time, velocity: clampedVelocity) {
+                frameLoop?.resume()
+            }
+        } else {
+            strip.navigateRightInstant(at: time)
+            applyLayout()
+        }
+    }
+
     public func moveColumnLeft() {
         strip.moveColumnLeft(at: TimeUtil.now())
         applyLayout()
@@ -300,6 +328,20 @@ public final class StripController: @unchecked Sendable {
         } else {
             strip.cycleWidthPreset(at: time, params: nil)
             strip.recenterActiveColumn(at: time)
+            applyLayout()
+        }
+    }
+
+    func setWidthPreset(index: Int) {
+        let time = TimeUtil.now()
+        strip.setWidthPreset(
+            index: index,
+            at: time,
+            params: animationEnabled ? widthSpringParams : nil
+        )
+        if animationEnabled {
+            frameLoop?.resume()
+        } else {
             applyLayout()
         }
     }
@@ -343,6 +385,54 @@ public final class StripController: @unchecked Sendable {
     /// Re-add a floating window back to the strip at a restored position.
     public func unfloatWindow(_ window: AXWindow, app: AXApp, restoredPosition: RestoredSlot? = nil) {
         addWindow(window, app: app, restoredPosition: restoredPosition)
+    }
+
+    // MARK: - Minimap Reorder
+
+    private var preMinimapWidths: [Double]?
+    var isMinimapActive: Bool { preMinimapWidths != nil }
+
+    func enterMinimapMode(draggedColumnIndex: Int) {
+        preMinimapWidths = strip.columnData.map { $0.cachedWidth }
+        focusIndicator.hide()
+        frameLoop?.resume()
+    }
+
+    func cancelMinimapMode() {
+        guard let savedWidths = preMinimapWidths else { return }
+        let time = TimeUtil.now()
+        restoreWidths(savedWidths, at: time)
+        preMinimapWidths = nil
+        frameLoop?.resume()
+    }
+
+    func commitMinimapReorder(from sourceIndex: Int, to destIndex: Int) {
+        guard let savedWidths = preMinimapWidths else { return }
+        let time = TimeUtil.now()
+
+        strip.moveColumn(from: sourceIndex, to: destIndex, at: time)
+        let _ = strip.recenterActiveColumnAnimated(at: time)
+
+        // Adjust saved widths array to match new column order
+        var reorderedWidths = savedWidths
+        let movedWidth = reorderedWidths.remove(at: sourceIndex)
+        reorderedWidths.insert(movedWidth, at: destIndex)
+
+        restoreWidths(reorderedWidths, at: time)
+        preMinimapWidths = nil
+        frameLoop?.resume()
+    }
+
+    private func restoreWidths(_ targetWidths: [Double], at time: Double) {
+        let params = widthSpringParams
+        for i in 0..<min(targetWidths.count, strip.columnData.count) {
+            let currentWidth = strip.columnData[i].currentWidth(at: time)
+            strip.columnData[i].widthAnimation = nil
+            strip.columnData[i].widthAnimation = SpringAnimation(
+                from: currentWidth, to: targetWidths[i], startTime: time, params: params
+            )
+            strip.columnData[i].cachedWidth = targetWidths[i]
+        }
     }
 
     // MARK: - User Move/Resize Handling
