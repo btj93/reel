@@ -1268,6 +1268,54 @@ do {
     assertEq(filled3.count, 3, "after 3rd add: all 3 slots filled")
 }
 
+// MARK: - Minimap Layout Mode
+print()
+print("Minimap Layout Mode Tests")
+
+section("LayoutMode — normal mode unchanged")
+do {
+    let strip = makeLayoutStrip(widths: [400, 600, 400], activeIndex: 1, viewOffset: 0)
+    let normalFrames = computeTargetFrames(strip: strip, time: 0)
+    let modeFrames = computeTargetFrames(strip: strip, time: 0, mode: .normal)
+    assertEq(normalFrames.count, modeFrames.count, "same count")
+    for i in 0..<normalFrames.count {
+        assertEq(normalFrames[i].frame, modeFrames[i].frame, "frame \(i) matches")
+    }
+}
+
+section("LayoutMode — minimap excludes dragged column")
+do {
+    let strip = makeLayoutStrip(widths: [400, 600, 400], activeIndex: 0, viewOffset: 0)
+    let cursor = CGPoint(x: 500, y: 200)
+    let frames = computeTargetFrames(strip: strip, time: 0, mode: .minimap(
+        draggedColumnIndex: 1, insertionIndex: 0, cursorPosition: cursor
+    ))
+    assertEq(frames.count, 3, "all tiles present")
+    let draggedTile = frames.first { $0.tileID == TileID(2) }!
+    assertClose(draggedTile.frame.origin.x, cursor.x, tolerance: 1, "dragged at cursor X")
+    assertClose(draggedTile.frame.origin.y, cursor.y, tolerance: 1, "dragged at cursor Y")
+    let nonDragged = frames.filter { $0.tileID != TileID(2) }
+    for f in nonDragged {
+        check(f.isVisible, "non-dragged \(f.tileID) is visible")
+        check(!f.isOffScreen, "non-dragged \(f.tileID) not off-screen")
+    }
+}
+
+section("LayoutMode — minimap thumbnails centered vertically")
+do {
+    let strip = makeLayoutStrip(widths: [400, 600, 400], activeIndex: 0, viewOffset: 0)
+    let cursor = CGPoint(x: 500, y: 200)
+    let frames = computeTargetFrames(strip: strip, time: 0, mode: .minimap(
+        draggedColumnIndex: 1, insertionIndex: 2, cursorPosition: cursor
+    ))
+    let nonDragged = frames.filter { $0.tileID != TileID(2) }
+    let wa = strip.workingArea
+    for f in nonDragged {
+        let centerY = f.frame.midY
+        assertClose(centerY, wa.midY, tolerance: wa.height / 2, "centered in working area")
+    }
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
