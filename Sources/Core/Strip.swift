@@ -197,7 +197,8 @@ public struct Strip: Sendable {
     /// Create a rubber-band bounce at the strip edge.
     /// Overshoots by ~40px in the given direction, then springs back to current position.
     /// direction: -1 for left edge, +1 for right edge.
-    private mutating func createRubberBandAnimation(direction: Double, at time: Double) -> SpringAnimation {
+    @discardableResult
+    public mutating func createRubberBandAnimation(direction: Double, kickVelocity: Double? = nil, at time: Double) -> SpringAnimation {
         let currentPos = viewOffset.current(at: time)
         let overshoot = 40.0 * direction  // how far to stretch past the edge
 
@@ -206,10 +207,11 @@ public struct Strip: Sendable {
 
         // Animate: current → overshoot position, but target is current (so it bounces back)
         // We achieve this by starting with an initial velocity that carries past the target
+        let velocity = kickVelocity ?? overshoot * 15
         let anim = SpringAnimation(
             from: currentPos,
             to: currentPos,                     // return to same position
-            initialVelocity: overshoot * 15,    // kick velocity to overshoot
+            initialVelocity: velocity,          // kick velocity to overshoot
             startTime: time,
             params: bounceParams
         )

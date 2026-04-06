@@ -1353,6 +1353,22 @@ do {
     assertEq(strip.activeColumnIndex, 1, "active unchanged")
 }
 
+// MARK: - Rubber-band with custom velocity
+
+section("rubber-band — default kick velocity")
+do {
+    var strip = makeStrip(columnCount: 1)
+    let anim = strip.createRubberBandAnimation(direction: 1, at: 0)
+    assertClose(anim.initialVelocity, 600, tolerance: 1, "default kick")
+}
+
+section("rubber-band — custom kick velocity")
+do {
+    var strip = makeStrip(columnCount: 1)
+    let anim = strip.createRubberBandAnimation(direction: 1, kickVelocity: 200, at: 0)
+    assertClose(anim.initialVelocity, 200, tolerance: 1, "custom kick")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
