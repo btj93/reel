@@ -50,6 +50,7 @@ public final class WindowManager: @unchecked Sendable {
     /// State persistence for crash recovery.
     private let stateFilePath: String
     private var stateWriteTimer: Timer?
+    private var healthCheckTimer: Timer?
 
     /// Pending external focus scroll — debounced to avoid visual flash during space transitions.
     private var pendingFocusScroll: DispatchWorkItem?
@@ -172,6 +173,13 @@ public final class WindowManager: @unchecked Sendable {
         if let tb = titleBarInteraction {
             tb.longPressDelayMs = config.trackpad.longPressDelayMs
             tb.dragThresholdPx = config.trackpad.dragThresholdPx
+            switch config.gestureModifier.lowercased() {
+            case "fn": tb.requiredModifier = .maskSecondaryFn
+            case "ctrl", "control": tb.requiredModifier = .maskControl
+            case "alt", "opt", "option": tb.requiredModifier = .maskAlternate
+            case "cmd", "command": tb.requiredModifier = .maskCommand
+            default: tb.requiredModifier = .maskSecondaryFn
+            }
         }
         for (_, sc) in stripControllers {
             sc.minimapThumbnailWidth = config.trackpad.thumbnailWidth
@@ -321,6 +329,13 @@ public final class WindowManager: @unchecked Sendable {
         let titleBar = TitleBarInteraction()
         titleBar.longPressDelayMs = config.trackpad.longPressDelayMs
         titleBar.dragThresholdPx = config.trackpad.dragThresholdPx
+        switch config.gestureModifier.lowercased() {
+        case "fn": titleBar.requiredModifier = .maskSecondaryFn
+        case "ctrl", "control": titleBar.requiredModifier = .maskControl
+        case "alt", "opt", "option": titleBar.requiredModifier = .maskAlternate
+        case "cmd", "command": titleBar.requiredModifier = .maskCommand
+        default: titleBar.requiredModifier = .maskSecondaryFn
+        }
         stripController.minimapThumbnailWidth = config.trackpad.thumbnailWidth
 
         titleBar.onNeedsManagedFrames = { [weak self] () -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat) in
@@ -356,24 +371,15 @@ public final class WindowManager: @unchecked Sendable {
         titleBar.onDragCancel = { [weak self] in
             self?.stripController.cancelMinimapMode()
         }
-        titleBar.onMenuShow = { [weak self] (columnIndex: Int, _: CGRect) in
+        titleBar.onMenuShow = { [weak self] (columnIndex: Int, cgMousePoint: CGPoint) in
             guard let self = self else { return }
             let sc = self.stripController
             let pills = sc.buildPillItems(for: columnIndex)
-            // Get the window frame for anchor positioning (in AppKit coords for overlay)
-            let titleBarFrame: CGRect
-            if let tileID = sc.strip.columns[columnIndex].activeTile,
-               let cgFrame = sc.lastCommittedFrames[tileID] {
-                // Convert CG title bar to AppKit coords for overlay positioning
-                // CG: origin.y is window top. Title bar is [origin.y, origin.y+28].
-                // AppKit Y of title bar bottom = primaryScreenHeight - (origin.y + 28)
-                let appKitY = sc.primaryScreenHeight - cgFrame.origin.y - 28
-                titleBarFrame = CGRect(x: cgFrame.origin.x, y: appKitY, width: cgFrame.width, height: 28)
-            } else {
-                titleBarFrame = .zero
-            }
+            // Convert CG cursor position to AppKit coords for overlay positioning
+            let appKitY = sc.primaryScreenHeight - cgMousePoint.y
+            let anchorFrame = CGRect(x: cgMousePoint.x, y: appKitY, width: 0, height: 0)
             self.titleBarInteraction?.overlay.mode = .menu(
-                pills: pills, anchorFrame: titleBarFrame, selectedIndex: nil
+                pills: pills, anchorFrame: anchorFrame, selectedIndex: nil
             )
             self.titleBarInteraction?.overlay.show()
         }
@@ -456,7 +462,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Periodic window health check — detect closed windows that AX observer missed.
         // kAXUIElementDestroyedNotification is unreliable for some apps.
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkWindowHealth()
         }
 
@@ -506,6 +512,15 @@ public final class WindowManager: @unchecked Sendable {
         }
     }
 
+    /// Recover windows — reposition all managed windows to their strip positions.
+    public func recoverWindows() {
+        restoreAllWindows()
+        for (_, sc) in stripControllers {
+            sc.clearCommittedFrames()
+            sc.applyLayout()
+        }
+    }
+
     /// Stop and restore all windows.
     public func shutdown() {
         #if DEBUG
@@ -514,6 +529,7 @@ public final class WindowManager: @unchecked Sendable {
         #endif
         isPaused = true
         stateWriteTimer?.invalidate()
+        healthCheckTimer?.invalidate()
 
         // Restore all windows to reasonable on-screen positions
         restoreAllWindows()

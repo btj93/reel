@@ -65,7 +65,7 @@ public final class StripController: @unchecked Sendable {
     /// Timestamp of the last layout application. Used to suppress echo AX events.
     public private(set) var lastLayoutTime: Double = 0
 
-    /// How long to ignore AX echo events after a layout (100ms).
+    /// How long to ignore AX echo events after a layout (150ms).
     public static let echoSuppressionInterval: Double = 0.15
 
     /// Timestamp of the last space switch. Used to suppress macOS-initiated

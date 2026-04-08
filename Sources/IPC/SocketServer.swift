@@ -64,6 +64,9 @@ public final class SocketServer: @unchecked Sendable {
             return false
         }
 
+        // Restrict socket to owner only
+        chmod(socketPath, 0o600)
+
         // Listen
         guard listen(listenerFD, 5) == 0 else {
             #if DEBUG
@@ -109,20 +112,30 @@ public final class SocketServer: @unchecked Sendable {
 
     // MARK: - Connection Handling
 
+    /// Maximum message size to prevent DoS (64KB).
+    private static let maxMessageSize = 65536
+
     private func acceptConnection() {
         let clientFD = accept(listenerFD, nil, nil)
         guard clientFD >= 0 else { return }
 
-        // Read command (max 4KB)
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        let bytesRead = read(clientFD, &buffer, buffer.count)
+        // Set read timeout to prevent hung clients
+        var tv = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
-        guard bytesRead > 0 else {
+        // Read command — loop until EOF, cap at maxMessageSize
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while data.count < Self.maxMessageSize {
+            let bytesRead = read(clientFD, &buffer, buffer.count)
+            if bytesRead <= 0 { break }
+            data.append(contentsOf: buffer[0..<bytesRead])
+        }
+
+        guard !data.isEmpty else {
             close(clientFD)
             return
         }
-
-        let data = Data(buffer[0..<bytesRead])
 
         // Parse command
         let response: ReelResponse
@@ -148,7 +161,14 @@ public final class SocketServer: @unchecked Sendable {
         if let responseData = try? Self.jsonEncoder.encode(response) {
             let responseStr = String(data: responseData, encoding: .utf8)! + "\n"
             responseStr.withCString { ptr in
-                _ = write(clientFD, ptr, strlen(ptr))
+                let len = strlen(ptr)
+                let written = write(clientFD, ptr, len)
+                #if DEBUG
+                if written < 0 {
+                    print("[IPC] Write failed: \(String(cString: strerror(errno)))")
+                    fflush(stdout)
+                }
+                #endif
             }
         }
 

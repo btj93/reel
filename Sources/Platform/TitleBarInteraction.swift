@@ -18,6 +18,8 @@ public final class TitleBarInteraction: @unchecked Sendable {
     public var longPressDelayMs: Int = 300
     public var dragThresholdPx: Double = 5.0
     public var titleBarHeight: Double = 28.0
+    /// Modifier that must be held for title-bar drag/long-press to activate.
+    public var requiredModifier: CGEventFlags = .maskSecondaryFn
 
     // Callbacks
     public var onNeedsManagedFrames: (() -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat))?
@@ -26,7 +28,7 @@ public final class TitleBarInteraction: @unchecked Sendable {
     public var onDragUpdate: ((CGPoint) -> Void)?
     public var onDragEnd: ((Int) -> Void)?
     public var onDragCancel: (() -> Void)?
-    public var onMenuShow: ((Int, CGRect) -> Void)?
+    public var onMenuShow: ((Int, CGPoint) -> Void)?
     public var onMenuSelect: ((Int) -> Void)?
     public var onMenuDismiss: (() -> Void)?
 
@@ -138,6 +140,7 @@ public final class TitleBarInteraction: @unchecked Sendable {
 
     private func handleMouseDown(event: CGEvent, location: CGPoint) -> CGEvent? {
         guard case .idle = state else { return event }
+        guard event.flags.contains(requiredModifier) else { return event }
         guard let info = onNeedsManagedFrames?() else { return event }
 
         guard let (columnIndex, tileID) = hitTestTitleBar(
@@ -146,7 +149,7 @@ public final class TitleBarInteraction: @unchecked Sendable {
         ) else { return event }
 
         let timer = DispatchWorkItem { [weak self] in
-            self?.transitionToMenu(columnIndex: columnIndex, tileID: tileID)
+            self?.transitionToMenu(columnIndex: columnIndex, tileID: tileID, mousePoint: location)
         }
         DispatchQueue.main.asyncAfter(
             deadline: .now() + .milliseconds(longPressDelayMs),
@@ -266,14 +269,14 @@ public final class TitleBarInteraction: @unchecked Sendable {
         onDragBegin?(columnIndex)
     }
 
-    private func transitionToMenu(columnIndex: Int, tileID: TileID) {
+    private func transitionToMenu(columnIndex: Int, tileID: TileID, mousePoint: CGPoint) {
         state = .menu(columnIndex: columnIndex, tileID: tileID)
         setupEscapeTap()
         if let screen = NSScreen.main {
             overlay.ensurePanel(for: screen)
         }
         overlay.setMousePassthrough(false)
-        onMenuShow?(columnIndex, .zero)
+        onMenuShow?(columnIndex, mousePoint)
     }
 
     // MARK: - Helpers

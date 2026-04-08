@@ -1,4 +1,5 @@
 import AppKit
+import Config
 import Core
 import Platform
 import ServiceManagement
@@ -114,7 +115,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
             menu.addItem(pauseItem)
             menu.addItem(NSMenuItem(title: "Reload Config", action: #selector(reloadConfig), keyEquivalent: "r"))
+            menu.addItem(NSMenuItem(title: "Open Config", action: #selector(openConfig), keyEquivalent: ","))
             menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem(title: "Recover Windows", action: #selector(recoverWindows), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Clear Saved Positions", action: #selector(clearPositions), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         }
@@ -199,6 +202,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             applyLoginItem(enabled: config.startAtLogin)
         }
         setupMenuBar()
+    }
+
+    @objc private func openConfig() {
+        let path = ReelConfig.configPath
+        if !FileManager.default.fileExists(atPath: path) {
+            ReelConfig.createDefaultConfig()
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    @objc private func recoverWindows() {
+        windowManager?.recoverWindows()
     }
 
     @objc private func clearPositions() {

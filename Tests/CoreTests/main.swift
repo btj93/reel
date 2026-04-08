@@ -2,6 +2,7 @@ import Foundation
 import Core
 import CoreGraphics
 import Config
+import IPC
 import TOMLKit
 import WindowManager
 
@@ -1436,6 +1437,220 @@ do {
     assertClose(config.dragThresholdPx, 5.0, tolerance: 0.01, "default drag threshold")
     assertClose(config.swipeThresholdPx, 50.0, tolerance: 0.01, "default swipe threshold")
     assertClose(config.thumbnailWidth, 120.0, tolerance: 0.01, "default thumbnail width")
+}
+
+// MARK: - removeColumn viewOffset Preservation
+
+print("removeColumn viewOffset Preservation Tests")
+
+section("removeColumn — left of active preserves viewOffset")
+do {
+    // 3 columns, active=2, each 720px wide, gap=16
+    var strip = makeStrip(columnCount: 3)
+    strip.activeColumnIndex = 2
+    // Set a known viewOffset
+    strip.viewOffset = .static(-100)
+    let removedWidth = strip.columnData[0].currentWidth(at: 0) + strip.gap  // 720 + 16 = 736
+    strip.removeColumn(at: 0, at: 0)
+    // After removing column to the left, viewOffset should shift by -removedWidth
+    let expected = -100 - removedWidth
+    assertClose(strip.viewOffset.current(at: 0), expected, tolerance: 0.1, "viewOffset should shift by -removedWidth")
+    assertEq(strip.activeColumnIndex, 1, "active index should decrement")
+}
+
+section("removeColumn — right of active preserves viewOffset")
+do {
+    var strip = makeStrip(columnCount: 3)
+    strip.activeColumnIndex = 0
+    strip.viewOffset = .static(-200)
+    strip.removeColumn(at: 2, at: 0)
+    // Removing column to the right should not change viewOffset
+    assertClose(strip.viewOffset.current(at: 0), -200, tolerance: 0.1, "viewOffset should be unchanged")
+    assertEq(strip.activeColumnIndex, 0, "active index unchanged")
+}
+
+section("removeColumn — active column recenters")
+do {
+    var strip = makeStrip(columnCount: 3)
+    strip.activeColumnIndex = 1
+    strip.viewOffset = .static(-999)
+    strip.removeColumn(at: 1, at: 0)
+    // Removing active column should recenter on new active
+    let offset = strip.viewOffset.current(at: 0)
+    // New active is column 1 (right neighbor). Snap offset for middle with 720px column and 1440 wa = -360
+    assertClose(offset, -360, tolerance: 0.1, "should recenter on new active column")
+}
+
+// MARK: - computeTargetFrames Horizontal Positioning
+
+print("computeTargetFrames Horizontal Positioning Tests")
+
+section("computeTargetFrames — single column centered")
+do {
+    let strip = makeLayoutStrip(widths: [720], activeIndex: 0, viewOffset: -360)
+    // viewPos = columnX(0) + viewOffset = 0 + (-360) = -360
+    // screenX = colX(0) - viewPos + wa.minX = 0 - (-360) + 0 = 360
+    let frames = computeTargetFrames(strip: strip, time: 0)
+    check(!frames.isEmpty, "should have frames")
+    if let f = frames.first {
+        assertClose(Double(f.frame.minX), 360.0, tolerance: 1.0, "column centered at x=360")
+        assertClose(Double(f.frame.width), 720.0, tolerance: 1.0, "column width 720")
+        check(f.isVisible, "single centered column should be visible")
+    }
+}
+
+section("computeTargetFrames — two columns, left visible")
+do {
+    // Two 600px columns with gap=16, viewOffset=0 (left-aligned)
+    let strip = makeLayoutStrip(widths: [600, 600], activeIndex: 0, viewOffset: 0)
+    // viewPos = columnX(0) + 0 = 0
+    // col0 screenX = 0 - 0 + 0 = 0
+    // col1 screenX = 616 - 0 + 0 = 616
+    let frames = computeTargetFrames(strip: strip, time: 0)
+    assertEq(frames.count, 2, "two tiles")
+    let f0 = frames.first(where: { $0.tileID == TileID(1) })
+    let f1 = frames.first(where: { $0.tileID == TileID(2) })
+    if let f0 = f0 {
+        assertClose(Double(f0.frame.minX), 0.0, tolerance: 1.0, "col0 at x=0")
+        check(f0.isVisible, "col0 visible")
+    }
+    if let f1 = f1 {
+        assertClose(Double(f1.frame.minX), 616.0, tolerance: 1.0, "col1 at x=616")
+        check(f1.isVisible, "col1 visible")
+    }
+}
+
+section("computeTargetFrames — far column off-screen")
+do {
+    // 5 columns of 720px each, active=0, viewOffset=0. Columns beyond screen should be far.
+    let strip = makeLayoutStrip(widths: [720, 720, 720, 720, 720], activeIndex: 0, viewOffset: 0)
+    let frames = computeTargetFrames(strip: strip, time: 0)
+    // col0: x=0 (visible), col1: x=736 (visible), col2: x=1472 (partially visible or near)
+    // col3: x=2208 (far), col4: x=2944 (far)
+    let f3 = frames.first(where: { $0.tileID == TileID(4) })
+    let f4 = frames.first(where: { $0.tileID == TileID(5) })
+    if let f3 = f3 {
+        check(f3.isOffScreen, "col3 should be off-screen")
+    }
+    if let f4 = f4 {
+        check(f4.isOffScreen, "col4 should be off-screen")
+    }
+}
+
+// MARK: - Config Validation
+
+print("Config Validation Tests")
+
+section("Config — negative gap clamped to 0")
+do {
+    let toml = """
+    [layout]
+    gap = -5
+    """
+    let table = try! TOMLTable(string: toml)
+    let config = ReelConfig.load(from: table)
+    assertClose(config.gap, 0, tolerance: 0.01, "negative gap clamped to 0")
+}
+
+section("Config — negative stiffness clamped to 1")
+do {
+    let toml = """
+    [animation]
+    scroll_stiffness = -100
+    """
+    let table = try! TOMLTable(string: toml)
+    let config = ReelConfig.load(from: table)
+    assertClose(config.scrollStiffness, 1, tolerance: 0.01, "negative stiffness clamped to 1")
+}
+
+section("Config — damping ratio clamped to 0.01")
+do {
+    let toml = """
+    [animation]
+    scroll_damping_ratio = 0
+    """
+    let table = try! TOMLTable(string: toml)
+    let config = ReelConfig.load(from: table)
+    assertClose(config.scrollDampingRatio, 0.01, tolerance: 0.001, "zero damping ratio clamped to 0.01")
+}
+
+section("Config — proportion clamped to [0.01, 1]")
+do {
+    let toml = """
+    [layout.default_width]
+    proportion = 5.0
+    """
+    let table = try! TOMLTable(string: toml)
+    let config = ReelConfig.load(from: table)
+    if case .proportion(let p) = config.defaultWidth {
+        assertClose(p, 1.0, tolerance: 0.01, "proportion clamped to 1.0")
+    } else {
+        check(false, "should be proportion type")
+    }
+}
+
+section("Config — invalid regex ignored")
+do {
+    let toml = """
+    [[rules]]
+    app_id_regex = "[invalid("
+    floating = true
+    """
+    let table = try! TOMLTable(string: toml)
+    let config = ReelConfig.load(from: table)
+    assertEq(config.rules.count, 1, "rule should still be added")
+    check(config.rules[0].appIDRegex == nil, "invalid regex should be nil")
+}
+
+// MARK: - IPC Message Round-Trip
+
+print("IPC Message Round-Trip Tests")
+
+section("IPCMessage — encode/decode round-trip")
+do {
+    let msg = IPCMessage(command: "focus-left")
+    let data = try! JSONEncoder().encode(msg)
+    let decoded = try! JSONDecoder().decode(IPCMessage.self, from: data)
+    check(decoded.command == "focus-left", "command preserved")
+    check(decoded.appID == nil, "appID nil when not set")
+}
+
+section("IPCMessage — with appID round-trip")
+do {
+    let msg = IPCMessage(command: "clear-positions", appID: "com.example.app")
+    let data = try! JSONEncoder().encode(msg)
+    let decoded = try! JSONDecoder().decode(IPCMessage.self, from: data)
+    check(decoded.command == "clear-positions", "command preserved")
+    check(decoded.appID == "com.example.app", "appID preserved")
+}
+
+section("ReelResponse — success round-trip")
+do {
+    let resp = ReelResponse(success: true, message: "ok", data: "{\"count\":5}")
+    let data = try! JSONEncoder().encode(resp)
+    let decoded = try! JSONDecoder().decode(ReelResponse.self, from: data)
+    check(decoded.success == true, "success preserved")
+    check(decoded.message == "ok", "message preserved")
+    check(decoded.data == "{\"count\":5}", "data preserved")
+}
+
+section("ReelResponse — failure with nil fields")
+do {
+    let resp = ReelResponse(success: false)
+    let data = try! JSONEncoder().encode(resp)
+    let decoded = try! JSONDecoder().decode(ReelResponse.self, from: data)
+    check(decoded.success == false, "success false preserved")
+    check(decoded.message == nil, "nil message preserved")
+    check(decoded.data == nil, "nil data preserved")
+}
+
+section("ReelCommand — rawValue round-trip")
+do {
+    for cmd in ReelCommand.allCases {
+        let encoded = try! JSONEncoder().encode(cmd)
+        let decoded = try! JSONDecoder().decode(ReelCommand.self, from: encoded)
+        check(decoded == cmd, "\(cmd.rawValue) round-trip")
+    }
 }
 
 // ============================================================

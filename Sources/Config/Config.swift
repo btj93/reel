@@ -133,6 +133,11 @@ public struct FocusIndicatorConfig: Sendable {
 extension ReelConfig {
 
     /// Load config: parse bundled defaults first, then overlay user config on top.
+    /// Parse a config from a TOMLTable (for testing).
+    public static func load(from table: TOMLTable) -> ReelConfig {
+        return parse(table: table)
+    }
+
     public static func load() -> (config: ReelConfig, error: String?) {
         // Start from bundled defaults
         var config = loadDefaults()
@@ -224,7 +229,7 @@ extension ReelConfig {
 
         // [layout]
         if let layout = readTable(table["layout"]) {
-            if let v = readDouble(layout["gap"]) { config.gap = v }
+            if let v = readDouble(layout["gap"]), v.isFinite { config.gap = max(0, v) }
             if let dw = readTable(layout["default_width"]) {
                 config.defaultWidth = parseColumnWidth(dw)
             }
@@ -262,10 +267,10 @@ extension ReelConfig {
             if let v = readBool(layout["animation_enabled"]) { config.animationEnabled = v }
 
             if let struts = readTable(layout["struts"]) {
-                if let v = readDouble(struts["left"]) { config.struts.left = v }
-                if let v = readDouble(struts["right"]) { config.struts.right = v }
-                if let v = readDouble(struts["top"]) { config.struts.top = v }
-                if let v = readDouble(struts["bottom"]) { config.struts.bottom = v }
+                if let v = readDouble(struts["left"]), v.isFinite { config.struts.left = max(0, v) }
+                if let v = readDouble(struts["right"]), v.isFinite { config.struts.right = max(0, v) }
+                if let v = readDouble(struts["top"]), v.isFinite { config.struts.top = max(0, v) }
+                if let v = readDouble(struts["bottom"]), v.isFinite { config.struts.bottom = max(0, v) }
             }
             if let presetsArray = readArray(layout["width_presets"]) {
                 var presets: [ColumnWidth] = []
@@ -288,10 +293,10 @@ extension ReelConfig {
 
         // [animation]
         if let anim = readTable(table["animation"]) {
-            if let v = readDouble(anim["scroll_stiffness"]) { config.scrollStiffness = v }
-            if let v = readDouble(anim["scroll_damping_ratio"]) { config.scrollDampingRatio = v }
-            if let v = readDouble(anim["bounce_distance"]) { config.bounceDistance = v }
-            if let v = readDouble(anim["bounce_damping_ratio"]) { config.bounceDampingRatio = v }
+            if let v = readDouble(anim["scroll_stiffness"]), v.isFinite { config.scrollStiffness = max(1, v) }
+            if let v = readDouble(anim["scroll_damping_ratio"]), v.isFinite { config.scrollDampingRatio = max(0.01, v) }
+            if let v = readDouble(anim["bounce_distance"]), v.isFinite { config.bounceDistance = max(0, v) }
+            if let v = readDouble(anim["bounce_damping_ratio"]), v.isFinite { config.bounceDampingRatio = max(0.01, v) }
         }
 
         // [keybindings]
@@ -311,10 +316,10 @@ extension ReelConfig {
 
         // [trackpad]
         if let trackpad = readTable(table["trackpad"]) {
-            if let v = readInt(trackpad["long_press_delay_ms"]) { config.trackpad.longPressDelayMs = v }
-            if let v = readDouble(trackpad["drag_threshold_px"]) { config.trackpad.dragThresholdPx = v }
-            if let v = readDouble(trackpad["swipe_threshold_px"]) { config.trackpad.swipeThresholdPx = v }
-            if let v = readDouble(trackpad["thumbnail_width"]) { config.trackpad.thumbnailWidth = v }
+            if let v = readInt(trackpad["long_press_delay_ms"]) { config.trackpad.longPressDelayMs = max(50, v) }
+            if let v = readDouble(trackpad["drag_threshold_px"]), v.isFinite { config.trackpad.dragThresholdPx = max(0, v) }
+            if let v = readDouble(trackpad["swipe_threshold_px"]), v.isFinite { config.trackpad.swipeThresholdPx = max(0, v) }
+            if let v = readDouble(trackpad["thumbnail_width"]), v.isFinite { config.trackpad.thumbnailWidth = max(20, v) }
         }
 
         // [[rules]]
@@ -323,8 +328,26 @@ extension ReelConfig {
                 if let rule = readTable(item) {
                     var rc = WindowRuleConfig()
                     rc.appID = readString(rule["app_id"])
-                    rc.appIDRegex = readString(rule["app_id_regex"])
-                    rc.titleRegex = readString(rule["title_regex"])
+                    if let pattern = readString(rule["app_id_regex"]) {
+                        if (try? NSRegularExpression(pattern: pattern)) != nil {
+                            rc.appIDRegex = pattern
+                        } else {
+                            #if DEBUG
+                            print("[Config] Warning: invalid app_id_regex '\(pattern)', ignoring")
+                            fflush(stdout)
+                            #endif
+                        }
+                    }
+                    if let pattern = readString(rule["title_regex"]) {
+                        if (try? NSRegularExpression(pattern: pattern)) != nil {
+                            rc.titleRegex = pattern
+                        } else {
+                            #if DEBUG
+                            print("[Config] Warning: invalid title_regex '\(pattern)', ignoring")
+                            fflush(stdout)
+                            #endif
+                        }
+                    }
                     if let v = readBool(rule["floating"]) { rc.floating = v }
                     config.rules.append(rc)
                 }
@@ -347,16 +370,20 @@ extension ReelConfig {
                 }
             }
             if let v = readString(fi["color"]) { config.focusIndicator.color = v }
-            if let v = readDouble(fi["width"]) { config.focusIndicator.width = v }
-            if let v = readDouble(fi["corner_radius"]) { config.focusIndicator.cornerRadius = v }
+            if let v = readDouble(fi["width"]), v.isFinite { config.focusIndicator.width = max(0.5, v) }
+            if let v = readDouble(fi["corner_radius"]), v.isFinite { config.focusIndicator.cornerRadius = max(0, v) }
         }
 
         return config
     }
 
     private static func parseColumnWidth(_ table: TOMLTable) -> ColumnWidth {
-        if let p = readDouble(table["proportion"]) { return .proportion(p) }
-        if let f = readDouble(table["fixed"]) { return .fixed(f) }
+        if let p = readDouble(table["proportion"]), p.isFinite {
+            return .proportion(min(1, max(0.01, p)))
+        }
+        if let f = readDouble(table["fixed"]), f.isFinite {
+            return .fixed(max(1, f))
+        }
         return .proportion(0.5)
     }
 

@@ -141,10 +141,10 @@ public struct Strip: Sendable {
             return
         }
 
-        // Adjust active column index
+        // Adjust active column index and view offset based on removal position
         if index < activeColumnIndex {
             activeColumnIndex -= 1
-            // Compensate view offset for the removed width
+            // Compensate view offset for the removed width to preserve visual position
             viewOffset.shiftBy(-removedWidth)
         } else if index == activeColumnIndex {
             if index < columns.count {
@@ -154,16 +154,16 @@ public struct Strip: Sendable {
                 // No right neighbor; use left neighbor
                 activeColumnIndex = columns.count - 1
             }
+            // Recenter on the new active column
+            let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
+            let newOffset = computeSnapOffset(
+                snapPoint: snapPoint,
+                columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
+                workingAreaWidth: workingArea.width
+            )
+            viewOffset = .static(newOffset)
         }
-
-        // Recompute view offset
-        let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
-        let newOffset = computeSnapOffset(
-            snapPoint: snapPoint,
-            columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
-            workingAreaWidth: workingArea.width
-        )
-        viewOffset = .static(newOffset)
+        // index > activeColumnIndex: active column unchanged, no viewOffset adjustment needed
     }
 
     // MARK: - Recenter
