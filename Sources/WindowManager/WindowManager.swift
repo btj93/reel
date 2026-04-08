@@ -804,7 +804,14 @@ public final class WindowManager: @unchecked Sendable {
                 print("[WM] windowDeminimized wid=\(windowID)")
                 fflush(stdout)
             #endif
-            if let window = tracker.windows[windowID],
+            if userToggledFloats.contains(windowID) {
+                // Was floating before minimize — restore as floating, macOS handles the frame
+                tracker.markFloating(windowID)
+                #if DEBUG
+                    print("[WM] windowDeminimized wid=\(windowID) restored as floating")
+                    fflush(stdout)
+                #endif
+            } else if let window = tracker.windows[windowID],
                 let app = tracker.apps[window.pid]
             {
                 let (displayID, sc) = stripControllerEntryForWindow(window)
