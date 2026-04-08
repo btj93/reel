@@ -982,22 +982,30 @@ public final class StripController: @unchecked Sendable {
                 let targetColumn = columnUnderCursor(gestureOffset: state.currentOffset)
                 let colWidth = strip.columnData[targetColumn].currentWidth(at: time)
                 let wa = strip.workingArea.width
-                let (snapIdx, snapOffset): (Int, Double)
+
+                // computeSnapOffset returns offsets assuming the target column IS the
+                // active column. Translate into the current activeColumnIndex coordinate
+                // space by adding the distance between the two columns.
+                let columnDelta = strip.columnX(at: targetColumn, time: time)
+                    - strip.columnX(at: strip.activeColumnIndex, time: time)
+
+                let (snapIdx, rawSnapOffset): (Int, Double)
                 if velocity > 0 {
-                    (snapIdx, snapOffset) = nextSnapMilestoneRight(
-                        currentOffset: state.currentOffset,
+                    (snapIdx, rawSnapOffset) = nextSnapMilestoneRight(
+                        currentOffset: state.currentOffset - columnDelta,
                         snapPoints: strip.snapPoints,
                         columnWidth: colWidth,
                         workingAreaWidth: wa
                     )
                 } else {
-                    (snapIdx, snapOffset) = nextSnapMilestoneLeft(
-                        currentOffset: state.currentOffset,
+                    (snapIdx, rawSnapOffset) = nextSnapMilestoneLeft(
+                        currentOffset: state.currentOffset - columnDelta,
                         snapPoints: strip.snapPoints,
                         columnWidth: colWidth,
                         workingAreaWidth: wa
                     )
                 }
+                let snapOffset = rawSnapOffset + columnDelta
                 // Store snap index for the target column — will be applied when focus moves on settle
                 strip.snapIndices[targetColumn] = snapIdx
 
@@ -1010,10 +1018,14 @@ public final class StripController: @unchecked Sendable {
                 )
                 strip.viewOffset = .animation(anim)
             } else {
-                // Free scroll — animate to projected position, no column alignment
+                // Free scroll — animate to projected position, no column alignment.
+                // projectedEndPosition is relative to tracker.position (starts at 0),
+                // but currentOffset includes the pre-gesture viewOffset. Add the
+                // momentum delta so the target is in the same coordinate space.
+                let momentumDelta = projected - state.tracker.position
                 let anim = SpringAnimation(
                     from: state.currentOffset,
-                    to: projected,
+                    to: state.currentOffset + momentumDelta,
                     initialVelocity: velocity,
                     startTime: time,
                     params: .horizontalScroll
