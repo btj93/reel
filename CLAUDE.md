@@ -62,6 +62,10 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 **Animation flow**: hotkey → `strip.focusRightAnimated(at:)` → `viewOffset = .animation(spring)` → `frameLoop.resume()` → tick calls `computeTargetFrames(time:)` → dispatches `setPosition` to per-app background threads → spring converges → `viewOffset = .static(final)` → `frameLoop.pause()`.
 
+**Focus dispatch (`ScrollMode`)**: `StripController.scrollToWindow(tileID:mode:)` has two modes. Keyboard/IPC focus and pure space-restore use `.center` (default) — resets `snapIndices[col]` to `defaultSnapIndex` and re-centers. External focus events (`.windowFocused` from `kAXFocusedWindowChanged`, `.appActivated` from dock / Cmd+Tab, dock-driven space restore) use `.incrementalSnap` — no-op if the column is already fully visible; otherwise slides to the first unreached snap milestone in the travel direction via `Strip.focusColumnIncremental`. When adding a new external focus trigger, pick `.center` for "I want a clean recenter" and `.incrementalSnap` for "honor where the user is already looking."
+
+**Dock click across Spaces**: `.appActivated` stores the pid in `recentAppActivation` (500ms TTL). `handleSpaceChange` reads it to override `savedFocusTile` with the activated app's AX-focused window on the destination strip. The field is one-shot — consumed on same-space resolution, on space-change consumption, and at the end of the new-space discovery path.
+
 **Off-screen windows**: 1px sliver at screen edge (primary), corner-hiding at (-10000,-10000) (fallback for resistant apps).
 
 **Space switching**: saves strip state keyed by on-screen window ID fingerprint. Restores on return, discovers new windows, removes closed ones.
