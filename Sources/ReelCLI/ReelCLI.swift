@@ -71,6 +71,9 @@ struct ReelCLI {
         cmdStr.withCString { ptr in
             _ = write(fd, ptr, strlen(ptr))
         }
+        // Signal EOF so the server's read loop terminates immediately,
+        // while keeping the read side open for the response.
+        shutdown(fd, SHUT_WR)
 
         // Read response
         var buffer = [UInt8](repeating: 0, count: 4096)
