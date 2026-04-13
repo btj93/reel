@@ -1709,6 +1709,148 @@ do {
     assertEq(result, 0, "dragging last, cursor before first → insert at 0")
 }
 
+// MARK: - focusColumnIncremental Tests
+print()
+print("focusColumnIncremental Tests")
+
+section("fully visible active column → anchorOnly, no scroll")
+do {
+    // 3 columns of 0.5 width on 1440px screen: each col 720, gap 16.
+    // Col 0: x=0; Col 1: x=736; Col 2: x=1472.
+    // viewOffset makes activeColumn middle (slack=720-720=0 — all snaps = 0).
+    // With activeIndex=1 and col1 centered, col1 occupies x=16..736 on screen (roughly).
+    // Let's use narrower columns so we can see visible vs off-screen.
+    var strip = makeStrip(columnCount: 3, width: 0.3, snapPoints: [.middle])
+    // cols width = 432, gap 16. totalWidth = 3*432 + 2*16 = 1328. screen 1440. slack = 1008.
+    // activeIndex=0, snap=middle → offset = -504
+    strip.activeColumnIndex = 0
+    strip.snapIndices = [0, 0, 0]
+    strip.viewOffset = .static(-504)  // col0 centered on screen
+    // On screen: col0 at x=504..936; col1 at x=952..1384 (still visible). col2 off right.
+    let result = strip.focusColumnIncremental(colIndex: 1, at: 0, animated: false)
+    assertEq(result, .anchorOnly, "col1 is fully visible → anchorOnly")
+    assertEq(strip.activeColumnIndex, 1, "activeColumnIndex updated")
+    // viewOffset re-anchored: oldColX=0, newColX=448 (432+16). adjusted = -504 + 0 - 448 = -952
+    if case .static(let off) = strip.viewOffset {
+        assertClose(off, -952, tolerance: 0.01, "re-anchored offset")
+    } else {
+        check(false, "expected static viewOffset after anchorOnly")
+    }
+    assertEq(strip.snapIndices[1], 0, "snap index untouched")
+}
+
+section("off-right column → scrolls to first leftward milestone")
+do {
+    // 3 cols of 0.3 width (432 each), snapPoints = [.left, .middle, .right]
+    var strip = makeStrip(columnCount: 3, width: 0.3, snapPoints: [.left, .middle, .right])
+    // cols width = 432, screen 1440, slack = 1008.
+    // offsets per snap: .left = 0, .middle = -504, .right = -1008
+    // activeIndex=0, snap=.left → offset = 0. col0 at x=0..432; col1 at x=448..880; col2 at x=896..1328 (visible).
+    // Push col2 off: set viewOffset to .left for col0 AND swap activeIndex=0 to right-shift cols.
+    // Instead: use 4 columns so col3 is clearly off-right.
+    var strip4 = makeStrip(columnCount: 4, width: 0.3, snapPoints: [.left, .middle, .right])
+    strip4.activeColumnIndex = 0
+    strip4.snapIndices = [0, 0, 0, 0]  // all .left
+    strip4.viewOffset = .static(0)  // col0 at left
+    // col0: 0..432, col1: 448..880, col2: 896..1328, col3: 1344..1776 (off-right)
+    let result = strip4.focusColumnIncremental(colIndex: 3, at: 0, animated: false)
+    // Need to travel leftward: nextSnapMilestoneLeft from adjustedOffset.
+    // adjustedOffset = 0 + 0 - 1344 = -1344. snapPoints in column-space offsets:
+    //   .left=0, .middle=-504, .right=-1008.
+    // Iterate right→left indices (2,1,0): offset -1008 > -1344? yes → index 2 (.right).
+    // So target offset = -1008.
+    assertEq(strip4.activeColumnIndex, 3, "activeColumnIndex updated to 3")
+    assertEq(strip4.snapIndices[3], 2, "snap index set to .right (milestone leftward)")
+    if case .scrolledInstant(let to) = result {
+        assertClose(to, -1008, tolerance: 0.01, "target offset = .right snap")
+    } else {
+        check(false, "expected scrolledInstant, got \(result)")
+    }
+    if case .static(let off) = strip4.viewOffset {
+        assertClose(off, -1008, tolerance: 0.01, "viewOffset set to target")
+    } else {
+        check(false, "expected static viewOffset")
+    }
+}
+
+section("off-left column → scrolls to first rightward milestone")
+do {
+    var strip = makeStrip(columnCount: 4, width: 0.3, snapPoints: [.left, .middle, .right])
+    // same geometry as above
+    strip.activeColumnIndex = 3
+    strip.snapIndices = [2, 2, 2, 2]  // all .right
+    strip.viewOffset = .static(-1008)  // col3 right-aligned
+    // col positions on screen: col3 at x=1008..1440; col0 off-left at x= -1344..-912, etc.
+    let result = strip.focusColumnIncremental(colIndex: 0, at: 0, animated: false)
+    // adjustedOffset = -1008 + col3X - col0X = -1008 + 1344 - 0 = 336.
+    // Iterate 0→n: .left=0 → 336 > 0? yes → index 0.
+    // target offset = 0.
+    assertEq(strip.activeColumnIndex, 0, "active updated to 0")
+    assertEq(strip.snapIndices[0], 0, "snap set to .left (milestone rightward)")
+    if case .scrolledInstant(let to) = result {
+        assertClose(to, 0, tolerance: 0.01, "target offset = .left snap")
+    } else {
+        check(false, "expected scrolledInstant, got \(result)")
+    }
+}
+
+section("animated path produces .animation viewOffset")
+do {
+    var strip = makeStrip(columnCount: 4, width: 0.3, snapPoints: [.middle])
+    strip.activeColumnIndex = 0
+    strip.snapIndices = [0, 0, 0, 0]
+    strip.viewOffset = .static(0)
+    let result = strip.focusColumnIncremental(colIndex: 3, at: 1.0, animated: true)
+    if case .scrolledAnimated(let from, let to) = result {
+        check(from != to, "from/to differ")
+    } else {
+        check(false, "expected scrolledAnimated, got \(result)")
+    }
+    if case .animation = strip.viewOffset {
+        check(true)
+    } else {
+        check(false, "expected animation viewOffset")
+    }
+}
+
+section("click on current active column → anchorOnly, no visual change")
+do {
+    var strip = makeStrip(columnCount: 3, width: 0.3, snapPoints: [.middle])
+    strip.activeColumnIndex = 1
+    strip.snapIndices = [0, 0, 0]
+    strip.viewOffset = .static(-504)
+    let before = strip.viewOffset
+    let result = strip.focusColumnIncremental(colIndex: 1, at: 0, animated: false)
+    assertEq(result, .anchorOnly, "same-column click")
+    assertEq(strip.activeColumnIndex, 1)
+    // viewOffset re-anchored with delta 0 (old == new column) → unchanged
+    if case .static(let a) = strip.viewOffset, case .static(let b) = before {
+        assertClose(a, b, tolerance: 0.01, "viewOffset unchanged")
+    }
+}
+
+section("invalid colIndex → noChange")
+do {
+    var strip = makeStrip(columnCount: 2)
+    let result = strip.focusColumnIncremental(colIndex: 99, at: 0, animated: false)
+    assertEq(result, .noChange)
+    assertEq(strip.activeColumnIndex, 0, "active unchanged")
+}
+
+section("column wider than screen → clamps to offset 0")
+do {
+    // col width 1600 > screen 1440, slack < 0, computeSnapOffset returns 0 regardless of snap.
+    var strip = makeStrip(columnCount: 2, width: 1.2, snapPoints: [.left, .middle, .right])
+    strip.activeColumnIndex = 0
+    strip.snapIndices = [0, 0]
+    strip.viewOffset = .static(-200)  // off-left scenario
+    // col1 position depends, but all snaps collapse to 0.
+    let result = strip.focusColumnIncremental(colIndex: 1, at: 0, animated: false)
+    if case .scrolledInstant(let to) = result {
+        assertClose(to, 0, tolerance: 0.01, "all snaps collapse to 0")
+    }
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

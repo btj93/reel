@@ -298,6 +298,98 @@ public struct Strip: Sendable {
         return anim
     }
 
+    // MARK: - Mouse-Driven Focus (Incremental Snap)
+
+    /// Result of `focusColumnIncremental`.
+    public enum IncrementalFocusResult: Equatable, Sendable {
+        /// Invalid column index — no mutation performed.
+        case noChange
+        /// Clicked column is already fully visible; viewOffset re-anchored to it (no scroll).
+        case anchorOnly
+        /// Instant scroll applied; `to` is the new static viewOffset.
+        case scrolledInstant(to: Double)
+        /// Animated scroll started; spring goes `from` → `to`.
+        case scrolledAnimated(from: Double, to: Double)
+    }
+
+    /// Change `activeColumnIndex` to `colIndex` and scroll only if the column isn't
+    /// fully visible. Direction of travel decides which snap milestone we land on
+    /// (first unreached snap in that direction, same helpers as keyboard nav).
+    /// - Parameter animated: If true, sets `viewOffset = .animation(...)`; else `.static(...)`.
+    @discardableResult
+    public mutating func focusColumnIncremental(
+        colIndex: Int,
+        at time: Double,
+        animated: Bool
+    ) -> IncrementalFocusResult {
+        guard colIndex >= 0, colIndex < columns.count else { return .noChange }
+
+        let oldActive = activeColumnIndex
+        let oldColX = columnX(at: oldActive, time: time)
+        let newColX = columnX(at: colIndex, time: time)
+        let currentOffset = viewOffset.current(at: time)
+        let newColWidth = columnData[colIndex].currentWidth(at: time)
+
+        // Current on-screen position of the clicked column's left edge.
+        // viewPos = oldColX + currentOffset gives viewport left edge in strip-space.
+        let viewportLeft = oldColX + currentOffset
+        let colLeftOnScreen = newColX - viewportLeft
+        let colRightOnScreen = colLeftOnScreen + newColWidth
+
+        // Re-anchor viewOffset to the new active column (preserves visual position).
+        let adjustedOffset = currentOffset + oldColX - newColX
+        activeColumnIndex = colIndex
+
+        // Fully visible? (epsilon guards float jitter)
+        let eps: Double = 0.5
+        if colLeftOnScreen >= -eps && colRightOnScreen <= workingArea.width + eps {
+            viewOffset = .static(adjustedOffset)
+            return .anchorOnly
+        }
+
+        // Pick direction of travel & find first unreached milestone.
+        let (snapIdx, targetOffset): (Int, Double)
+        if colRightOnScreen > workingArea.width {
+            // Column extends past the right edge → slide leftward on screen.
+            (snapIdx, targetOffset) = nextSnapMilestoneLeft(
+                currentOffset: adjustedOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+        } else {
+            // Column extends past the left edge → slide rightward on screen.
+            (snapIdx, targetOffset) = nextSnapMilestoneRight(
+                currentOffset: adjustedOffset,
+                snapPoints: snapPoints,
+                columnWidth: newColWidth,
+                workingAreaWidth: workingArea.width
+            )
+        }
+        snapIndices[colIndex] = snapIdx
+
+        // If target is the same as adjusted (already on a snap line somehow), just static.
+        if abs(adjustedOffset - targetOffset) < 1.0 {
+            viewOffset = .static(targetOffset)
+            return .scrolledInstant(to: targetOffset)
+        }
+
+        if animated {
+            let anim = SpringAnimation(
+                from: adjustedOffset,
+                to: targetOffset,
+                initialVelocity: 0,
+                startTime: time,
+                params: .horizontalScroll
+            )
+            viewOffset = .animation(anim)
+            return .scrolledAnimated(from: adjustedOffset, to: targetOffset)
+        } else {
+            viewOffset = .static(targetOffset)
+            return .scrolledInstant(to: targetOffset)
+        }
+    }
+
     // MARK: - Snap Navigation
 
     /// Navigate right: advance snap point on current column, or move focus right if exhausted.
