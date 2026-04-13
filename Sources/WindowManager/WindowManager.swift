@@ -55,6 +55,12 @@ public final class WindowManager: @unchecked Sendable {
     /// Pending external focus scroll — debounced to avoid visual flash during space transitions.
     private var pendingFocusScroll: DispatchWorkItem?
 
+    /// Most recent .appActivated event, used by handleSpaceChange to override
+    /// savedFocusTile when a dock click is followed by a space change. Consumed
+    /// (set to nil) once a space-change handles it; expires after 500ms.
+    private var recentAppActivation: (pid: pid_t, time: Double)?
+    private static let appActivationCarryover: Double = 0.5
+
     private let reorderOverlay = ReorderOverlayController()
     private var isReorderPending = false
 
@@ -793,9 +799,13 @@ public final class WindowManager: @unchecked Sendable {
             stripController.userActiveTileIDTime = TimeUtil.now()
 
         case .appActivated(let pid):
+            recentAppActivation = (pid: pid, time: TimeUtil.now())
             // Dock click / Cmd+Tab: resolve which window of this app to scroll to.
             let sc = stripController
             if let tileID = resolveFocusedTileID(forPID: pid, on: sc) {
+                // Same-space resolution: consume the carryover so an unrelated
+                // later space switch can't confuse savedFocusTile with this pid.
+                recentAppActivation = nil
                 pendingFocusScroll?.cancel()
                 let work = DispatchWorkItem { [weak self] in
                     guard let self, !self.isPaused else { return }
@@ -940,19 +950,33 @@ public final class WindowManager: @unchecked Sendable {
                 #endif
             }
 
-            // Restore focus to the window the user had active before leaving.
-            // Use TileID (not numeric index) so column insertions/removals don't
-            // cause us to focus the wrong window.
-            if let focusTile = savedFocusTile,
-                stripController.windowMap[focusTile] != nil
+            // Decide focus target: prefer a recent app activation (dock click that
+            // crossed spaces) over the saved-focus tile. Fall back to saved.
+            let now = TimeUtil.now()
+            var dockActivationTile: TileID?
+            if let recent = recentAppActivation,
+               now - recent.time < Self.appActivationCarryover
             {
-                stripController.scrollToWindow(tileID: focusTile)
-                // Trusted focus — space restore
+                dockActivationTile = resolveFocusedTileID(
+                    forPID: recent.pid,
+                    on: stripController
+                )
+            }
+            recentAppActivation = nil  // consume regardless — one-shot
+
+            let focusTile = dockActivationTile ?? savedFocusTile
+
+            if let focusTile, stripController.windowMap[focusTile] != nil {
+                // Dock-driven activation animates nicer visually; saved-focus restore
+                // uses .center to match historical behavior.
+                let mode: StripController.ScrollMode =
+                    (dockActivationTile != nil) ? .incrementalSnap : .center
+                stripController.scrollToWindow(tileID: focusTile, mode: mode)
+                // Trusted focus — space restore / dock activation
                 stripController.userActiveTileID = focusTile
                 stripController._confirmedUserActiveTileID = focusTile
             } else {
-                // Original window was closed while away — just re-apply layout
-                // with whatever activeColumnIndex removeColumn settled on
+                // Neither target is present — just re-apply layout
                 stripController.applyLayout()
             }
 
