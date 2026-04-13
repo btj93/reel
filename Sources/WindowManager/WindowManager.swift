@@ -1091,9 +1091,20 @@ public final class WindowManager: @unchecked Sendable {
     // MARK: - Focused Window Query
 
     /// Get the CGWindowID of the macOS-focused window via Accessibility API.
+    /// Routes through the frontmost app's tracked AXApp when possible so the
+    /// call inherits the 100ms messaging timeout set in AXApp.init; falls back
+    /// to a direct query for unmanaged / un-tracked apps (still with an explicit
+    /// timeout so a hung app can't block main).
     private func getFocusedWindowID() -> CGWindowID? {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
-        let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+        let pid = frontApp.processIdentifier
+        if let axApp = tracker.apps[pid] {
+            return axApp.focusedWindowID()
+        }
+        // Fallback: app isn't tracked (unmanaged activation policy, etc.).
+        // Apply the same messaging timeout defensively before querying.
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value)
         guard err == .success, let value else { return nil }
