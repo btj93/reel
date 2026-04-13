@@ -793,21 +793,13 @@ public final class WindowManager: @unchecked Sendable {
             stripController.userActiveTileIDTime = TimeUtil.now()
 
         case .appActivated(let pid):
-            // Cmd+Tab support: find the first window of this app and scroll to it
-            if let window = tracker.windows.values.first(where: { $0.pid == pid }) {
-                let tileID = window.tileID
-                // Debounce — same as windowFocused to avoid space-transition flash
+            // Dock click / Cmd+Tab: resolve which window of this app to scroll to.
+            let sc = stripController
+            if let tileID = resolveFocusedTileID(forPID: pid, on: sc) {
                 pendingFocusScroll?.cancel()
-                let sc = stripController
                 let work = DispatchWorkItem { [weak self] in
                     guard let self, !self.isPaused else { return }
-                    if let colIndex = sc.strip.columns.firstIndex(where: {
-                        $0.tiles.contains(tileID)
-                    }),
-                        colIndex != sc.strip.activeColumnIndex
-                    {
-                        sc.scrollToWindow(tileID: tileID)
-                    }
+                    sc.scrollToWindow(tileID: tileID, mode: .incrementalSnap)
                 }
                 pendingFocusScroll = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
@@ -1079,6 +1071,48 @@ public final class WindowManager: @unchecked Sendable {
         // so we rely on the err == .success check above for validity.
         let element = value as! AXUIElement
         return windowID(for: element)
+    }
+
+    /// Resolve "which tracked window of `pid` does the user mean right now" on the
+    /// given strip. Tries in order:
+    /// 1. AX's kAXFocusedWindow on the app (authoritative).
+    /// 2. Most recently focused tracked window of pid on this strip.
+    ///    If no window has focus history, the first iterated window wins
+    ///    (nil-guard below) — arbitrary but no worse than the old `.first(where:)`.
+    ///
+    /// Scope note: `sc` is a single strip (one display). On multi-monitor setups
+    /// where the activated app's focused window lives on a different monitor's
+    /// strip, all tiers miss and nil is returned — the dock click produces no
+    /// scroll on any monitor. This matches the pre-plan behavior, which also
+    /// only scrolled `stripController` (active display). Searching all strips
+    /// would risk surprising scrolls on background monitors.
+    ///
+    /// Also returns nil for apps whose only visible windows are floating (not
+    /// in `sc.windowMap`) or cross-Space activations before the destination
+    /// strip has been restored — both intentional no-ops.
+    private func resolveFocusedTileID(forPID pid: pid_t, on sc: StripController) -> TileID? {
+        // 1. Ask AX
+        if let axApp = tracker.apps[pid],
+           let wid = axApp.focusedWindowID()
+        {
+            let tid = TileID(wid)
+            if sc.windowMap[tid] != nil { return tid }
+        }
+
+        // 2. Most recently focused tracked window of this pid on this strip.
+        //    `bestTile == nil` guard guarantees the first matching window wins
+        //    when no focus history exists; real timestamps (TimeUtil.now() values,
+        //    which are far above 0) overwrite it.
+        var bestTile: TileID?
+        var bestTime: Double = 0
+        for (tid, window) in sc.windowMap where window.pid == pid {
+            let t = tracker.lastFocusTimeByWindow[window.windowID] ?? 0
+            if bestTile == nil || t > bestTime {
+                bestTile = tid
+                bestTime = t
+            }
+        }
+        return bestTile
     }
 
     // MARK: - Window Health Check
