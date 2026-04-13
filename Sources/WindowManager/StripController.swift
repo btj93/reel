@@ -593,31 +593,74 @@ public final class StripController: @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
-    // MARK: - Scroll to Window (Cmd+Tab support)
+    // MARK: - Scroll to Window
+
+    /// Scroll strategy used by `scrollToWindow`.
+    public enum ScrollMode: Sendable {
+        /// Center the target column on its default snap point (snapIndex reset).
+        /// Used by keyboard/IPC focus, Cmd+Tab, space restore.
+        case center
+        /// Only scroll if the target column isn't fully visible, otherwise no-op.
+        /// When scrolling, slide to the first unreached snap milestone in travel direction.
+        /// Used by mouse-driven focus (dock click, window click).
+        case incrementalSnap
+    }
 
     /// Scroll the strip to make a specific window visible.
-    public func scrollToWindow(tileID: TileID) {
+    public func scrollToWindow(tileID: TileID, mode: ScrollMode = .center) {
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
         #if DEBUG
         let window = windowMap[tileID]
-        print("[Strip] scrollTo wid=\(window?.windowID ?? 0) tileID=\(tileID.rawValue) col=\(colIndex) title=\(window?.getTitle() ?? "?")")
+        print("[Strip] scrollTo wid=\(window?.windowID ?? 0) tileID=\(tileID.rawValue) col=\(colIndex) mode=\(mode) title=\(window?.getTitle() ?? "?")")
         fflush(stdout)
         #endif
 
         let time = TimeUtil.now()
+        // Clear any width animation on the target — snap offsets use current width,
+        // stale springs would race our scroll.
         strip.columnData[colIndex].widthAnimation = nil
-        strip.activeColumnIndex = colIndex
-        strip.snapIndices[colIndex] = strip.defaultSnapIndex
 
-        let snapPoint = strip.snapPoints[strip.snapIndices[colIndex]]
-        let newOffset = computeSnapOffset(
-            snapPoint: snapPoint,
-            columnWidth: strip.columnData[colIndex].currentWidth(at: time),
-            workingAreaWidth: strip.workingArea.width
-        )
-        strip.viewOffset = .static(newOffset)
+        switch mode {
+        case .center:
+            strip.activeColumnIndex = colIndex
+            strip.snapIndices[colIndex] = strip.defaultSnapIndex
 
-        applyLayout()
+            let snapPoint = strip.snapPoints[strip.snapIndices[colIndex]]
+            let newOffset = computeSnapOffset(
+                snapPoint: snapPoint,
+                columnWidth: strip.columnData[colIndex].currentWidth(at: time),
+                workingAreaWidth: strip.workingArea.width
+            )
+            strip.viewOffset = .static(newOffset)
+            applyLayout()
+
+        case .incrementalSnap:
+            let result = strip.focusColumnIncremental(
+                colIndex: colIndex,
+                at: time,
+                animated: animationEnabled
+            )
+            switch result {
+            case .noChange:
+                return
+            case .anchorOnly:
+                applyLayout()
+            case .scrolledInstant:
+                applyLayout()
+            case .scrolledAnimated:
+                scrollWidthSettled = false
+                // Bump lastLayoutTime so the AX move/resize echoes from the
+                // first animation frame (which arrives ~8ms from now via the
+                // frame loop) are caught by isInEchoSuppression. The .center
+                // and .scrolledInstant paths get this for free via applyLayout().
+                // IMPORTANT: if applyLayout() ever acquires additional init
+                // side effects beyond bumping lastLayoutTime, mirror them here
+                // or extract a shared helper to keep the two paths in sync.
+                lastLayoutTime = TimeUtil.now()
+                frameLoop?.resume()
+                // Don't call applyLayout — frame loop will tick within one frame.
+            }
+        }
     }
 
     // MARK: - Layout Application
