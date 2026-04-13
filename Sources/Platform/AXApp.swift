@@ -181,6 +181,23 @@ public final class AXApp: @unchecked Sendable {
             self?.onEvent?(event)
         }
     }
+
+    // MARK: - Focused Window Query
+
+    /// Get the CGWindowID of this app's currently focused window via AX.
+    /// Returns nil if the app has no focused window or the AX call fails/times out.
+    /// Safe to call from main thread — uses the app element's 100ms messaging timeout.
+    public func focusedWindowID() -> CGWindowID? {
+        var value: AnyObject?
+        let err = AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedWindowAttribute as CFString,
+            &value
+        )
+        guard err == .success, let value else { return nil }
+        let element = value as! AXUIElement
+        return windowID(for: element)
+    }
 }
 
 /// Event emitted by an AXApp observer.
