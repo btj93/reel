@@ -37,7 +37,7 @@ swift build
 
 macOS will prompt for Accessibility permission — grant it once, and it persists across rebuilds at `.build/debug/Reel`.
 
-A `⊞` icon appears in the menu bar. Open some windows — they tile automatically.
+A icon appears in the menu bar. Open some windows — they tile automatically.
 
 ### .app Bundle
 
