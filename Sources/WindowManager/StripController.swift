@@ -672,8 +672,11 @@ public final class StripController: @unchecked Sendable {
             } else {
                 let frame = target.frame
                 if let app = apps[window.pid] {
-                    DispatchQueue.global(qos: .userInteractive).async {
-                        app.dispatchSetFrame(window, frame: frame)
+                    DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                        let result = app.dispatchSetFrame(window, frame: frame)
+                        if case .failure = result {
+                            DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
+                        }
                     }
                 } else {
                     // Fallback: dispatch setFrame directly when app not in dict
@@ -775,18 +778,25 @@ public final class StripController: @unchecked Sendable {
             // During animation: use setFrame for visible (width may be changing), skip far windows
             switch target.visibilityZone {
             case .visible, .nearBuffer:
+                let tileID = target.tileID
                 if let app = apps[window.pid] {
                     if widthSettled {
                         // Width done, only position changing — position-only is cheaper
                         let position = target.frame.origin
-                        DispatchQueue.global(qos: .userInteractive).async {
-                            app.dispatchSetPosition(window, position: position)
+                        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                            let result = app.dispatchSetPosition(window, position: position)
+                            if case .failure = result {
+                                DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
+                            }
                         }
                     } else {
                         // Width still animating — need full setFrame to resize
                         let frame = target.frame
-                        DispatchQueue.global(qos: .userInteractive).async {
-                            app.dispatchSetFrame(window, frame: frame)
+                        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                            let result = app.dispatchSetFrame(window, frame: frame)
+                            if case .failure = result {
+                                DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
+                            }
                         }
                     }
                 }

@@ -144,21 +144,25 @@ public final class AXApp: @unchecked Sendable {
     // MARK: - AX Call Dispatching
 
     /// Execute a setFrame call on this app's thread, tracking cost.
-    public func dispatchSetFrame(_ window: AXWindow, frame: CGRect) {
+    @discardableResult
+    public func dispatchSetFrame(_ window: AXWindow, frame: CGRect) -> AXResult<Void> {
         let start = TimeUtil.now()
-        let _ = window.setFrame(frame)
+        let result = window.setFrame(frame)
         let duration = TimeUtil.now() - start
 
         // Update EMA: 80% old, 20% new
         axCallCostEMA = axCallCostEMA * 0.8 + duration * 0.2
+        return result
     }
 
     /// Execute a setPosition-only call (cheaper during animation).
-    public func dispatchSetPosition(_ window: AXWindow, position: CGPoint) {
+    @discardableResult
+    public func dispatchSetPosition(_ window: AXWindow, position: CGPoint) -> AXResult<Void> {
         let start = TimeUtil.now()
-        let _ = window.setPosition(position)
+        let result = window.setPosition(position)
         let duration = TimeUtil.now() - start
         axCallCostEMA = axCallCostEMA * 0.8 + duration * 0.2
+        return result
     }
 
     // MARK: - Internal Event Handling
