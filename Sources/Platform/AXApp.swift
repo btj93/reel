@@ -186,7 +186,8 @@ public final class AXApp: @unchecked Sendable {
 
     /// Get the CGWindowID of this app's currently focused window via AX.
     /// Returns nil if the app has no focused window or the AX call fails/times out.
-    /// Safe to call from main thread — uses the app element's 100ms messaging timeout.
+    /// Thread-safe: `appElement` is immutable after init. Bounded by the app element's
+    /// 100ms messaging timeout, so a hung app fails fast instead of blocking the caller.
     public func focusedWindowID() -> CGWindowID? {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(

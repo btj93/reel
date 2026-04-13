@@ -598,11 +598,12 @@ public final class StripController: @unchecked Sendable {
     /// Scroll strategy used by `scrollToWindow`.
     public enum ScrollMode: Sendable {
         /// Center the target column on its default snap point (snapIndex reset).
-        /// Used by keyboard/IPC focus, Cmd+Tab, space restore.
+        /// Used by keyboard/IPC focus and pure space-restore (no recent dock activation).
         case center
         /// Only scroll if the target column isn't fully visible, otherwise no-op.
         /// When scrolling, slide to the first unreached snap milestone in travel direction.
-        /// Used by mouse-driven focus (dock click, window click).
+        /// Used by mouse-driven focus (window click, dock click, Cmd+Tab) and dock-driven
+        /// space restore.
         case incrementalSnap
     }
 
