@@ -351,8 +351,24 @@ public final class WindowManager: @unchecked Sendable {
                 if sourceIndex != destIndex {
                     let time = TimeUtil.now()
                     self.stripController.strip.moveColumn(from: sourceIndex, to: destIndex, at: time)
-                    let _ = self.stripController.strip.recenterActiveColumnAnimated(at: time)
-                    self.stripController.frameLoop?.resume()
+                    // Make the dropped column the new active/focused column. Without
+                    // this, when the user drags a non-active column, the old active
+                    // stays centered and the dropped column lands at a position that
+                    // depends on its new strip-index relative to the old active —
+                    // shifting further right the larger the destination index. Making
+                    // the dropped column active pins it at its snap point (centered
+                    // by default) regardless of drop index.
+                    self.stripController.strip.activeColumnIndex = destIndex
+                    // Re-center the viewOffset on the new active column INSTANTLY
+                    // (before applyLayout) so applyLayout places windows at their
+                    // final positions. If we used the animated variant and called
+                    // applyLayout before it, applyLayout would evaluate positions with
+                    // the stale (old-active-centered) viewOffset, so windows would
+                    // visibly snap to the wrong place and only animate to the right
+                    // place over the next frames — a visible "wrong then right" jump.
+                    self.stripController.strip.recenterActiveColumn(at: time)
+                    self.stripController.applyLayout()
+                    self.stripController.focusActiveWindow()
                     self.scheduleSnapshotSave()
                 }
                 self.isReorderPending = false

@@ -117,7 +117,7 @@ class OverlayView: NSView {
         let containerHeight = pillHeight + containerPadding * 2
 
         let containerX = anchorFrame.midX - containerWidth / 2
-        let containerY = anchorFrame.maxY + 8
+        let containerY = anchorFrame.minY - 8 - containerHeight
         let containerRect = CGRect(x: containerX, y: containerY, width: containerWidth, height: containerHeight)
 
         let bgColor = NSColor(white: 0.12, alpha: 0.92)
@@ -179,8 +179,9 @@ class OverlayView: NSView {
         let totalPillWidth = pillWidths.reduce(0, +)
             + CGFloat(max(0, pills.count - 1)) * pillSpacing
         let containerWidth = totalPillWidth + containerPadding * 2
+        let containerHeight = pillHeight + containerPadding * 2
         let containerX = anchorFrame.midX - containerWidth / 2
-        let containerY = anchorFrame.maxY + 8
+        let containerY = anchorFrame.minY - 8 - containerHeight
 
         var x = containerX + containerPadding
         let pillY = containerY + containerPadding

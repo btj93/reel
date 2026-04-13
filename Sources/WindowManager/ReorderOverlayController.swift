@@ -166,23 +166,24 @@ final class ReorderOverlayController {
 
     // MARK: - commitDrop()
 
-    /// Triggers settle animation → fade-out → `onCommit` callback.
+    /// Fires the commit immediately, then fades the overlay out.
+    ///
+    /// We intentionally do NOT animate the ghost to the overlay's band-centered gap
+    /// before committing: that target doesn't correspond to where the dropped column
+    /// actually lands on the strip, so the user saw the ghost "settle in the wrong
+    /// spot, then at the last instant the real windows snapped to the right place."
+    /// By firing `onCommit` up front, the real windows rearrange while the ghost
+    /// simply fades in place from the cursor's release position.
     func commitDrop() {
         guard let window = overlayWindow else {
             onCommit?(draggedIndex, insertionIndex)
             return
         }
 
-        let gapIndex = mapToThumbnailGapIndex(insertionIndex)
-        let settleOrigin = window.settleOrigin(forGapIndex: gapIndex)
+        onCommit?(draggedIndex, insertionIndex)
 
-        window.animateGhostSettle(to: settleOrigin) { [weak self, weak window] in
-            guard let self else { return }
-            window?.animateFadeOut { [weak self] in
-                guard let self else { return }
-                self.onCommit?(self.draggedIndex, self.insertionIndex)
-                self.overlayWindow = nil
-            }
+        window.animateFadeOut { [weak self] in
+            self?.overlayWindow = nil
         }
     }
 

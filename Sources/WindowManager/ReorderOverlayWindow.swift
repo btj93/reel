@@ -43,6 +43,10 @@ public final class ReorderOverlayWindow: NSWindow {
     private let bandHeight: Double
     private let thumbnailHeight: Double
 
+    /// Y-offset of the band within the full-screen content view (AppKit coords).
+    /// Used to translate vibrancy-local layout math into window-local coords for the ghost.
+    private let bandOriginY: Double
+
     /// Gap between thumbnail images. Settable before or after configureThumbnails.
     public var thumbnailGap: Double = 12.0
 
@@ -83,16 +87,21 @@ public final class ReorderOverlayWindow: NSWindow {
         self.thumbnailHeight = thumbnailHeight
         self.bandHeight = thumbnailHeight + 40
 
-        // Window frame: full screen width, band height, vertically centered on screen.
-        let windowFrame = CGRect(
-            x: screenFrame.minX,
-            y: screenFrame.midY - bandHeight / 2,
-            width: screenFrame.width,
+        // Window spans the full screen so the ghost can follow the cursor anywhere.
+        // The band visual sits near the top of the screen so it doesn't overlap the
+        // windows the user is reordering. In AppKit coords, higher y = closer to top.
+        let windowFrame = screenFrame
+        let topMargin: Double = 40
+        let bandFrameInWindow = CGRect(
+            x: 0,
+            y: windowFrame.height - bandHeight - topMargin,
+            width: windowFrame.width,
             height: bandHeight
         )
+        self.bandOriginY = bandFrameInWindow.minY
 
-        // --- NSVisualEffectView (vibrancy) ---
-        let effectView = NSVisualEffectView(frame: CGRect(origin: .zero, size: windowFrame.size))
+        // --- NSVisualEffectView (vibrancy) — sized to the band, not the full window ---
+        let effectView = NSVisualEffectView(frame: bandFrameInWindow)
         effectView.material = .hudWindow
         effectView.blendingMode = .behindWindow
         effectView.state = .active
@@ -101,8 +110,8 @@ public final class ReorderOverlayWindow: NSWindow {
         effectView.layer?.masksToBounds = true
         vibrancyView = effectView
 
-        // --- containerView ---
-        let container = NSView(frame: CGRect(origin: .zero, size: windowFrame.size))
+        // --- containerView (inside vibrancy, band-sized) ---
+        let container = NSView(frame: CGRect(origin: .zero, size: bandFrameInWindow.size))
         container.wantsLayer = true
         containerView = container
 
@@ -160,23 +169,23 @@ public final class ReorderOverlayWindow: NSWindow {
         backgroundColor = .clear
         ignoresMouseEvents = true
         level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
-        hasShadow = true
+        // No window-level shadow: the window is full-screen; only the band should
+        // appear to have depth, and vibrancy handles its own rendering.
+        hasShadow = false
         isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .stationary, .transient]
 
         // Make the window layer-backed
         contentView?.wantsLayer = true
 
-        // Build view hierarchy
+        // Build view hierarchy. The ghost lives on contentView (NOT inside vibrancyView)
+        // so it isn't clipped by the band's rounded-corner mask when the cursor is
+        // outside the band's y-range.
         contentView?.addSubview(vibrancyView)
         vibrancyView.addSubview(containerView)
-        vibrancyView.addSubview(ghostView)
         vibrancyView.addSubview(indicatorLine)
         vibrancyView.addSubview(indicatorArrow)
-
-        // Fill vibrancy view to window bounds
-        vibrancyView.frame = CGRect(origin: .zero, size: windowFrame.size)
-        vibrancyView.autoresizingMask = [.width, .height]
+        contentView?.addSubview(ghostView)
     }
 
     // MARK: - Thumbnail Configuration
@@ -282,24 +291,16 @@ public final class ReorderOverlayWindow: NSWindow {
 
     // MARK: - Hit Testing
 
-    /// Returns the X midpoints between adjacent thumbnails for gap hit-testing.
-    /// Result has `count + 1` elements: before first, between each pair, after last.
-    /// Only the `count - 1` between-thumbnail midpoints are returned (between adjacent pairs).
+    /// Returns the X dividing points for cursor→gap hit-testing.
+    ///
+    /// With N non-dragged thumbnails, there are N+1 gap positions (before first, between
+    /// each adjacent pair, after last). Mapping the cursor to one of N+1 gaps needs N
+    /// dividers — the thumbnail centers. Using between-thumbnail midpoints (only N−1 of
+    /// them) makes the middle "between adjacent pair" indices unreachable, e.g. with 2
+    /// thumbnails you can only hit gap 0 (before) or gap 2 (after), never gap 1 (between).
     public func thumbnailMidpoints() -> [Double] {
         guard !thumbnailViews.isEmpty else { return [] }
-
-        // For a single thumbnail, return its center X so the cursor can land on either side.
-        if thumbnailViews.count == 1 {
-            return [thumbnailViews[0].frame.midX]
-        }
-
-        var midpoints: [Double] = []
-        for i in 0..<thumbnailViews.count - 1 {
-            let leftMax = thumbnailViews[i].frame.maxX
-            let rightMin = thumbnailViews[i + 1].frame.minX
-            midpoints.append((leftMax + rightMin) / 2)
-        }
-        return midpoints
+        return thumbnailViews.map { $0.frame.midX }
     }
 
     // MARK: - Ghost
@@ -540,7 +541,9 @@ public final class ReorderOverlayWindow: NSWindow {
     /// - Gap index n (n == count): after the last thumbnail.
     /// - Otherwise: between thumbnails[index-1] and thumbnails[index].
     public func settleOrigin(forGapIndex index: Int) -> CGPoint {
-        let y = (bandHeight - thumbnailHeight) / 2
+        // Ghost lives on contentView, so y must be in window/contentView coords —
+        // offset the band-local center by the band's y-origin within the window.
+        let y = bandOriginY + (bandHeight - thumbnailHeight) / 2
 
         if thumbnailViews.isEmpty {
             let x = (frame.width - ghostWidth) / 2

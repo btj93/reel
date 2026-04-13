@@ -2,7 +2,10 @@ import CoreGraphics
 
 /// Compute the insertion index in original column-index space from cursor X position.
 /// - `cursorX`: cursor X position relative to the thumbnail row
-/// - `thumbnailMidpoints`: X midpoints between each pair of adjacent thumbnails
+/// - `thumbnailMidpoints`: ascending X dividers, one per non-dragged thumbnail, used to
+///   assign the cursor to one of N+1 gap positions. With N thumbnails we need N dividers
+///   (typically the thumbnail centers) so every gap — including between adjacent
+///   thumbnails — is reachable.
 /// - `nonDraggedOriginalIndices`: the original column indices of the non-dragged thumbnails, in order
 /// - `draggedIndex`: the original index of the dragged column
 /// - `columnCount`: total number of columns
