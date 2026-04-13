@@ -1269,9 +1269,9 @@ do {
     assertEq(filled3.count, 3, "after 3rd add: all 3 slots filled")
 }
 
-// MARK: - Minimap Layout Mode
+// MARK: - Layout Mode
 print()
-print("Minimap Layout Mode Tests")
+print("Layout Mode Tests")
 
 section("LayoutMode — normal mode unchanged")
 do {
@@ -1281,39 +1281,6 @@ do {
     assertEq(normalFrames.count, modeFrames.count, "same count")
     for i in 0..<normalFrames.count {
         assertEq(normalFrames[i].frame, modeFrames[i].frame, "frame \(i) matches")
-    }
-}
-
-section("LayoutMode — minimap excludes dragged column")
-do {
-    let strip = makeLayoutStrip(widths: [400, 600, 400], activeIndex: 0, viewOffset: 0)
-    let cursor = CGPoint(x: 500, y: 200)
-    let frames = computeTargetFrames(strip: strip, time: 0, mode: .minimap(
-        draggedColumnIndex: 1, insertionIndex: 0, cursorPosition: cursor
-    ))
-    assertEq(frames.count, 3, "all tiles present")
-    let draggedTile = frames.first { $0.tileID == TileID(2) }!
-    assertClose(draggedTile.frame.origin.x, cursor.x, tolerance: 1, "dragged at cursor X")
-    assertClose(draggedTile.frame.origin.y, cursor.y, tolerance: 1, "dragged at cursor Y")
-    let nonDragged = frames.filter { $0.tileID != TileID(2) }
-    for f in nonDragged {
-        check(f.isVisible, "non-dragged \(f.tileID) is visible")
-        check(!f.isOffScreen, "non-dragged \(f.tileID) not off-screen")
-    }
-}
-
-section("LayoutMode — minimap thumbnails centered vertically")
-do {
-    let strip = makeLayoutStrip(widths: [400, 600, 400], activeIndex: 0, viewOffset: 0)
-    let cursor = CGPoint(x: 500, y: 200)
-    let frames = computeTargetFrames(strip: strip, time: 0, mode: .minimap(
-        draggedColumnIndex: 1, insertionIndex: 2, cursorPosition: cursor
-    ))
-    let nonDragged = frames.filter { $0.tileID != TileID(2) }
-    let wa = strip.workingArea
-    for f in nonDragged {
-        let centerY = f.frame.midY
-        assertClose(centerY, wa.midY, tolerance: wa.height / 2, "centered in working area")
     }
 }
 
@@ -1436,7 +1403,13 @@ do {
     assertEq(config.longPressDelayMs, 300, "default long press delay")
     assertClose(config.dragThresholdPx, 5.0, tolerance: 0.01, "default drag threshold")
     assertClose(config.swipeThresholdPx, 50.0, tolerance: 0.01, "default swipe threshold")
-    assertClose(config.thumbnailWidth, 120.0, tolerance: 0.01, "default thumbnail width")
+}
+
+section("ReorderOverlayConfig — defaults")
+do {
+    let config = ReorderOverlayConfig()
+    assertEq(config.thumbnailStyle, "screenshot", "default thumbnail style")
+    assertClose(config.thumbnailHeight, 160.0, tolerance: 0.01, "default thumbnail height")
 }
 
 // MARK: - removeColumn viewOffset Preservation
@@ -1651,6 +1624,89 @@ do {
         let decoded = try! JSONDecoder().decode(ReelCommand.self, from: encoded)
         check(decoded == cmd, "\(cmd.rawValue) round-trip")
     }
+}
+
+// ============================================================
+// MARK: - Reorder Insertion Index
+
+section("Insertion index — cursor left of all thumbnails")
+do {
+    // 3 columns [A, B, C], dragging B (index 1). Non-dragged: [A, C] at indices [0, 2].
+    // Thumbnails at x: 100 (A), 250 (C). Midpoint: 175.
+    let result = computeReorderInsertionIndex(
+        cursorX: 50,
+        thumbnailMidpoints: [175],
+        nonDraggedOriginalIndices: [0, 2],
+        draggedIndex: 1,
+        columnCount: 3
+    )
+    assertEq(result, 0, "cursor left of all → insert at 0")
+}
+
+section("Insertion index — cursor right of all thumbnails")
+do {
+    let result = computeReorderInsertionIndex(
+        cursorX: 300,
+        thumbnailMidpoints: [175],
+        nonDraggedOriginalIndices: [0, 2],
+        draggedIndex: 1,
+        columnCount: 3
+    )
+    assertEq(result, 3, "cursor right of all → insert at end")
+}
+
+section("Insertion index — cursor between thumbnails")
+do {
+    // 4 columns [A, B, C, D], dragging A (index 0). Non-dragged: [B, C, D] at indices [1, 2, 3].
+    // Midpoints: [175, 325].
+    let result = computeReorderInsertionIndex(
+        cursorX: 200,
+        thumbnailMidpoints: [175, 325],
+        nonDraggedOriginalIndices: [1, 2, 3],
+        draggedIndex: 0,
+        columnCount: 4
+    )
+    assertEq(result, 2, "cursor between B and C → insert at 2")
+}
+
+section("Insertion index — single non-dragged column, cursor left")
+do {
+    // 2 columns [A, B], dragging A (index 0). Non-dragged: [B] at index [1].
+    // Thumbnail B is centered at ~150; midpoint at 150 splits left/right.
+    let result = computeReorderInsertionIndex(
+        cursorX: 50,
+        thumbnailMidpoints: [150],
+        nonDraggedOriginalIndices: [1],
+        draggedIndex: 0,
+        columnCount: 2
+    )
+    assertEq(result, 0, "cursor left of single thumbnail → insert at 0")
+}
+
+section("Insertion index — single non-dragged column, cursor right")
+do {
+    let result = computeReorderInsertionIndex(
+        cursorX: 300,
+        thumbnailMidpoints: [150],
+        nonDraggedOriginalIndices: [1],
+        draggedIndex: 0,
+        columnCount: 2
+    )
+    assertEq(result, 2, "cursor right of single thumbnail → insert at end")
+}
+
+section("Insertion index — dragging last column")
+do {
+    // 3 columns [A, B, C], dragging C (index 2). Non-dragged: [A, B] at indices [0, 1].
+    // Midpoint: 175.
+    let result = computeReorderInsertionIndex(
+        cursorX: 100,
+        thumbnailMidpoints: [175],
+        nonDraggedOriginalIndices: [0, 1],
+        draggedIndex: 2,
+        columnCount: 3
+    )
+    assertEq(result, 0, "dragging last, cursor before first → insert at 0")
 }
 
 // ============================================================

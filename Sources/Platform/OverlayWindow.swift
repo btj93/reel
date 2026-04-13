@@ -3,7 +3,6 @@ import CoreGraphics
 
 public enum OverlayMode {
     case hidden
-    case minimap(insertionX: CGFloat, dimAlpha: CGFloat)
     case menu(pills: [PillItem], anchorFrame: CGRect, selectedIndex: Int?)
 }
 
@@ -102,21 +101,6 @@ class OverlayView: NSView {
         switch mode {
         case .hidden:
             break
-
-        case .minimap(let insertionX, let dimAlpha):
-            ctx.setFillColor(NSColor.black.withAlphaComponent(dimAlpha).cgColor)
-            ctx.fill(bounds)
-
-            let indicatorWidth: CGFloat = 4
-            let indicatorRect = CGRect(
-                x: insertionX - indicatorWidth / 2,
-                y: bounds.minY + bounds.height * 0.2,
-                width: indicatorWidth,
-                height: bounds.height * 0.6
-            )
-            ctx.setFillColor(accentColor.cgColor)
-            ctx.addPath(CGPath(roundedRect: indicatorRect, cornerWidth: 2, cornerHeight: 2, transform: nil))
-            ctx.fillPath()
 
         case .menu(let pills, let anchorFrame, let selectedIndex):
             drawPillBar(ctx: ctx, pills: pills, anchorFrame: anchorFrame, selectedIndex: selectedIndex)

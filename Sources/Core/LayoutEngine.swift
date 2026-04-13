@@ -50,14 +50,6 @@ public func computeTargetFrames(
 ) -> [TargetFrame] {
     guard !strip.columns.isEmpty else { return [] }
 
-    if case .minimap(let draggedIndex, let insertionIndex, let cursorPosition) = mode {
-        return computeMinimapFrames(
-            strip: strip, time: time,
-            draggedIndex: draggedIndex, insertionIndex: insertionIndex,
-            cursorPosition: cursorPosition
-        )
-    }
-
     let viewPos = strip.viewPos(at: time)
     let wa = strip.workingArea
 
@@ -227,66 +219,3 @@ func sliverFrame(
     }
 }
 
-func computeMinimapFrames(
-    strip: Strip,
-    time: Double,
-    draggedIndex: Int,
-    insertionIndex: Int,
-    cursorPosition: CGPoint
-) -> [TargetFrame] {
-    let wa = strip.workingArea
-    let colCount = strip.columns.count
-
-    var thumbnailWidths: [(index: Int, width: Double)] = []
-    for i in 0..<colCount where i != draggedIndex {
-        let w = strip.columnData[i].currentWidth(at: time)
-        thumbnailWidths.append((i, w))
-    }
-
-    let totalWidth = thumbnailWidths.reduce(0.0) { $0 + $1.width }
-        + Double(max(0, thumbnailWidths.count - 1)) * strip.gap
-    let startX = wa.minX + (wa.width - totalWidth) / 2
-
-    let thumbnailHeight = wa.height * 0.4
-    let thumbnailY = wa.minY + (wa.height - thumbnailHeight) / 2
-
-    var results: [TargetFrame] = []
-    var x = startX
-
-    for (colIndex, colWidth) in thumbnailWidths {
-        let column = strip.columns[colIndex]
-        let tileCount = column.tiles.count
-        let tileHeight = max(1, thumbnailHeight / Double(tileCount))
-
-        var y = thumbnailY
-        for tile in column.tiles {
-            results.append(TargetFrame(
-                tileID: tile,
-                frame: CGRect(x: x, y: y, width: colWidth, height: tileHeight),
-                isVisible: true,
-                isOffScreen: false,
-                visibilityZone: .visible
-            ))
-            y += tileHeight
-        }
-        x += colWidth + strip.gap
-    }
-
-    let draggedColumn = strip.columns[draggedIndex]
-    let draggedWidth = strip.columnData[draggedIndex].currentWidth(at: time)
-    let dragTileCount = draggedColumn.tiles.count
-    let dragTileHeight = max(1, thumbnailHeight / Double(dragTileCount))
-    var dy = cursorPosition.y
-    for tile in draggedColumn.tiles {
-        results.append(TargetFrame(
-            tileID: tile,
-            frame: CGRect(x: cursorPosition.x, y: dy, width: draggedWidth, height: dragTileHeight),
-            isVisible: true,
-            isOffScreen: false,
-            visibilityZone: .visible
-        ))
-        dy += dragTileHeight
-    }
-
-    return results
-}

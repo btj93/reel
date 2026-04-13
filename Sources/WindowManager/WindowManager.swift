@@ -55,6 +55,9 @@ public final class WindowManager: @unchecked Sendable {
     /// Pending external focus scroll — debounced to avoid visual flash during space transitions.
     private var pendingFocusScroll: DispatchWorkItem?
 
+    private let reorderOverlay = ReorderOverlayController()
+    private var isReorderPending = false
+
     /// Windows that were user-toggled to floating (via alt-space / toggle-floating).
     private var userToggledFloats: Set<CGWindowID> = []
 
@@ -159,13 +162,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Gesture modifier
         if let gc = gestureCapture {
-            switch config.gestureModifier.lowercased() {
-            case "fn": gc.requiredModifier = .maskSecondaryFn
-            case "ctrl", "control": gc.requiredModifier = .maskControl
-            case "alt", "opt", "option": gc.requiredModifier = .maskAlternate
-            case "cmd", "command": gc.requiredModifier = .maskCommand
-            default: gc.requiredModifier = .maskSecondaryFn
-            }
+            gc.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
             gc.swipeThresholdPx = config.trackpad.swipeThresholdPx
         }
 
@@ -173,18 +170,8 @@ public final class WindowManager: @unchecked Sendable {
         if let tb = titleBarInteraction {
             tb.longPressDelayMs = config.trackpad.longPressDelayMs
             tb.dragThresholdPx = config.trackpad.dragThresholdPx
-            switch config.gestureModifier.lowercased() {
-            case "fn": tb.requiredModifier = .maskSecondaryFn
-            case "ctrl", "control": tb.requiredModifier = .maskControl
-            case "alt", "opt", "option": tb.requiredModifier = .maskAlternate
-            case "cmd", "command": tb.requiredModifier = .maskCommand
-            default: tb.requiredModifier = .maskSecondaryFn
-            }
+            tb.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
         }
-        for (_, sc) in stripControllers {
-            sc.minimapThumbnailWidth = config.trackpad.thumbnailWidth
-        }
-
         // Terminal path is read directly from config when spawning
 
         #if DEBUG
@@ -329,15 +316,7 @@ public final class WindowManager: @unchecked Sendable {
         let titleBar = TitleBarInteraction()
         titleBar.longPressDelayMs = config.trackpad.longPressDelayMs
         titleBar.dragThresholdPx = config.trackpad.dragThresholdPx
-        switch config.gestureModifier.lowercased() {
-        case "fn": titleBar.requiredModifier = .maskSecondaryFn
-        case "ctrl", "control": titleBar.requiredModifier = .maskControl
-        case "alt", "opt", "option": titleBar.requiredModifier = .maskAlternate
-        case "cmd", "command": titleBar.requiredModifier = .maskCommand
-        default: titleBar.requiredModifier = .maskSecondaryFn
-        }
-        stripController.minimapThumbnailWidth = config.trackpad.thumbnailWidth
-
+        titleBar.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
         titleBar.onNeedsManagedFrames = { [weak self] () -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat) in
             guard let sc = self?.stripController else {
                 return (frames: [:], primaryScreenHeight: 0)
@@ -354,22 +333,52 @@ public final class WindowManager: @unchecked Sendable {
         }
 
         titleBar.onDragBegin = { [weak self] columnIndex in
-            self?.stripController.enterMinimapMode(draggedColumnIndex: columnIndex)
-        }
-        titleBar.onDragUpdate = { [weak self] (cgPoint: CGPoint) in
-            self?.stripController.updateMinimapCursor(cgPoint)
-        }
-        titleBar.onDragEnd = { [weak self] (sourceIndex: Int) in
-            guard let sc = self?.stripController else { return }
-            let insertionIndex = sc.minimapInsertionIndex
-            if sourceIndex != insertionIndex {
-                sc.commitMinimapReorder(from: sourceIndex, to: insertionIndex)
-            } else {
-                sc.cancelMinimapMode()
+            guard let self = self else { return }
+            let sc = self.stripController
+            let columns = self.buildColumnInfos(from: sc)
+            self.reorderOverlay.onCommit = { [weak self] sourceIndex, insertionIndex in
+                guard let self = self else { return }
+                // Convert gap-based insertion index to position index for moveColumn.
+                // moveColumn uses remove-then-insert, so after removing sourceIndex,
+                // indices >= sourceIndex shift down by 1.
+                let destIndex = insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex
+                if sourceIndex != destIndex {
+                    let time = TimeUtil.now()
+                    self.stripController.strip.moveColumn(from: sourceIndex, to: destIndex, at: time)
+                    let _ = self.stripController.strip.recenterActiveColumnAnimated(at: time)
+                    self.stripController.frameLoop?.resume()
+                    self.scheduleSnapshotSave()
+                }
+                self.isReorderPending = false
             }
+            // Use the full display frame in AppKit coordinates for the overlay window.
+            let displayID = self.stripControllers.first(where: { $0.value === sc })?.key ?? self.activeDisplayID
+            let screenFrame = self.displayManager.displays[displayID]?.frame ?? sc.strip.workingArea
+            self.reorderOverlay.show(
+                columns: columns,
+                draggedIndex: columnIndex,
+                screenFrame: screenFrame,
+                primaryScreenHeight: sc.primaryScreenHeight,
+                thumbnailStyle: self.config.reorderOverlay.thumbnailStyle,
+                thumbnailHeight: self.config.reorderOverlay.thumbnailHeight,
+                gap: self.config.gap
+            )
         }
+
+        titleBar.onDragUpdate = { [weak self] (cgPoint: CGPoint) in
+            self?.reorderOverlay.updateCursor(position: cgPoint)
+        }
+
+        titleBar.onDragEnd = { [weak self] (_: Int) in
+            guard let self = self else { return }
+            self.isReorderPending = true
+            self.reorderOverlay.commitDrop()
+        }
+
         titleBar.onDragCancel = { [weak self] in
-            self?.stripController.cancelMinimapMode()
+            guard let self = self else { return }
+            self.reorderOverlay.cancel()
+            self.isReorderPending = false
         }
         titleBar.onMenuShow = { [weak self] (columnIndex: Int, cgMousePoint: CGPoint) in
             guard let self = self else { return }
@@ -988,6 +997,14 @@ public final class WindowManager: @unchecked Sendable {
     }
 
     private func handleHotkeyAction(_ action: HotkeyAction) {
+        if isReorderPending {
+            switch action {
+            case .focusLeft, .focusRight, .moveColumnLeft, .moveColumnRight:
+                return
+            default:
+                break
+            }
+        }
         switch action {
         case .focusLeft:
             stripController.focusLeft()
@@ -1283,6 +1300,14 @@ public final class WindowManager: @unchecked Sendable {
     // MARK: - IPC Command Handling
 
     private func handleIPCCommand(_ command: ReelCommand) -> ReelResponse {
+        if isReorderPending {
+            switch command {
+            case .focusLeft, .focusRight, .moveColumnLeft, .moveColumnRight:
+                return ReelResponse(success: false, message: "Reorder in progress")
+            default:
+                break
+            }
+        }
         switch command {
         case .focusLeft:
             stripController.focusLeft()
@@ -1536,6 +1561,49 @@ public final class WindowManager: @unchecked Sendable {
     private func snapshotStoreKey(for sc: StripController) -> SnapshotKey {
         let displayID = stripControllers.first(where: { $0.value === sc })?.key ?? activeDisplayID
         return SnapshotKey(displayID: UInt32(displayID), spaceFingerprint: sc.currentSpaceFingerprint)
+    }
+
+    /// Parse a modifier key string into CGEventFlags. Returns empty flags for "none"/"".
+    private static func parseModifierFlag(_ value: String) -> CGEventFlags {
+        switch value.lowercased() {
+        case "fn": return .maskSecondaryFn
+        case "ctrl", "control": return .maskControl
+        case "alt", "opt", "option": return .maskAlternate
+        case "cmd", "command": return .maskCommand
+        case "none", "": return CGEventFlags(rawValue: 0)
+        default: return .maskSecondaryFn
+        }
+    }
+
+    private func buildColumnInfos(from sc: StripController) -> [ColumnInfo] {
+        var infos: [ColumnInfo] = []
+        for (i, column) in sc.strip.columns.enumerated() {
+            let tileID = column.activeTile ?? column.tiles.first
+            guard let tid = tileID, let axWindow = sc.windowMap[tid] else {
+                // Column has no resolvable window — use a placeholder to maintain index correspondence.
+                infos.append(ColumnInfo(
+                    index: i,
+                    windowID: 0,
+                    pid: 0,
+                    appName: "Unknown",
+                    appIcon: NSImage(named: NSImage.applicationIconName)!,
+                    frameWidth: sc.strip.columnData[i].cachedWidth,
+                    frameHeight: sc.strip.workingArea.height
+                ))
+                continue
+            }
+            let app = NSRunningApplication(processIdentifier: axWindow.pid)
+            infos.append(ColumnInfo(
+                index: i,
+                windowID: axWindow.windowID,
+                pid: axWindow.pid,
+                appName: app?.localizedName ?? "Unknown",
+                appIcon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!,
+                frameWidth: sc.strip.columnData[i].cachedWidth,
+                frameHeight: sc.strip.workingArea.height
+            ))
+        }
+        return infos
     }
 
     /// Schedule a debounced snapshot save for the given strip controller.

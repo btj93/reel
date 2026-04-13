@@ -203,8 +203,6 @@ public final class StripController: @unchecked Sendable {
 
     /// Remove a window from the strip.
     public func removeWindow(tileID: TileID) {
-        // Cancel minimap if active — column indices become stale after removal
-        if isMinimapActive { cancelMinimapMode() }
 
         if let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
             strip.removeColumn(at: colIndex, at: TimeUtil.now())
@@ -400,142 +398,6 @@ public final class StripController: @unchecked Sendable {
     /// Re-add a floating window back to the strip at a restored position.
     public func unfloatWindow(_ window: AXWindow, app: AXApp, restoredPosition: RestoredSlot? = nil) {
         addWindow(window, app: app, restoredPosition: restoredPosition)
-    }
-
-    // MARK: - Minimap Reorder
-
-    private var preMinimapWidths: [Double]?
-    private(set) var minimapDraggedIndex: Int?
-    private(set) var minimapCursorPosition: CGPoint = .zero
-    private(set) var minimapInsertionIndex: Int = 0
-    var isMinimapActive: Bool { preMinimapWidths != nil }
-
-    /// Thumbnail width for minimap mode.
-    var minimapThumbnailWidth: Double = 120
-
-    func enterMinimapMode(draggedColumnIndex: Int) {
-        let time = TimeUtil.now()
-        preMinimapWidths = strip.columnData.map { $0.cachedWidth }
-        minimapDraggedIndex = draggedColumnIndex
-        minimapInsertionIndex = draggedColumnIndex
-        minimapCursorPosition = CGPoint(
-            x: strip.workingArea.midX,
-            y: strip.workingArea.midY
-        )
-
-        // Compress columns to thumbnail width
-        let params = widthSpringParams
-        for i in 0..<strip.columnData.count {
-            let currentWidth = strip.columnData[i].currentWidth(at: time)
-            let thumbWidth = max(minimapThumbnailWidth, 80)
-            strip.columnData[i].widthAnimation = nil
-            strip.columnData[i].widthAnimation = SpringAnimation(
-                from: currentWidth, to: thumbWidth, startTime: time, params: params
-            )
-            strip.columnData[i].cachedWidth = thumbWidth
-        }
-
-        focusIndicator.hide()
-        frameLoop?.resume()
-    }
-
-    func updateMinimapCursor(_ position: CGPoint) {
-        minimapCursorPosition = position
-        minimapInsertionIndex = computeInsertionIndex(cursorX: position.x)
-        applyLayout()
-    }
-
-    func cancelMinimapMode() {
-        guard let savedWidths = preMinimapWidths else { return }
-        let time = TimeUtil.now()
-        restoreWidths(savedWidths, at: time)
-        preMinimapWidths = nil
-        minimapDraggedIndex = nil
-        let _ = focusIndicator.snapTo(frame: .zero)
-        frameLoop?.resume()
-    }
-
-    func commitMinimapReorder(from sourceIndex: Int, to destIndex: Int) {
-        guard let savedWidths = preMinimapWidths else { return }
-        let time = TimeUtil.now()
-
-        // destIndex is in "full array" space. moveColumn does remove(at:source) then
-        // insert(at:dest), so dest is in "post-removal" space. Adjust when dest > source.
-        var adjustedDest = destIndex
-        if adjustedDest > sourceIndex { adjustedDest -= 1 }
-        adjustedDest = min(max(adjustedDest, 0), strip.columns.count - 1)
-        strip.moveColumn(from: sourceIndex, to: adjustedDest, at: time)
-        let _ = strip.recenterActiveColumnAnimated(at: time)
-
-        // Adjust saved widths array to match new column order
-        var reorderedWidths = savedWidths
-        let movedWidth = reorderedWidths.remove(at: sourceIndex)
-        reorderedWidths.insert(movedWidth, at: adjustedDest)
-
-        restoreWidths(reorderedWidths, at: time)
-        preMinimapWidths = nil
-        minimapDraggedIndex = nil
-        focusActiveWindow()
-        frameLoop?.resume()
-    }
-
-    /// Compute insertion index from cursor X position relative to thumbnail midpoints.
-    private func computeInsertionIndex(cursorX: Double) -> Int {
-        guard let draggedIdx = minimapDraggedIndex else { return 0 }
-        let time = TimeUtil.now()
-        let wa = strip.workingArea
-
-        // Compute thumbnail positions (excluding dragged column)
-        var thumbnails: [(index: Int, midX: Double)] = []
-        var totalWidth: Double = 0
-        for i in 0..<strip.columns.count where i != draggedIdx {
-            totalWidth += strip.columnData[i].currentWidth(at: time) + strip.gap
-        }
-        totalWidth -= strip.gap  // remove trailing gap
-
-        var x = wa.minX + (wa.width - totalWidth) / 2
-        for i in 0..<strip.columns.count where i != draggedIdx {
-            let w = strip.columnData[i].currentWidth(at: time)
-            thumbnails.append((index: i, midX: x + w / 2))
-            x += w + strip.gap
-        }
-
-        // Find insertion point based on cursor X
-        var insertAt = thumbnails.count  // default: after last
-        for (j, thumb) in thumbnails.enumerated() {
-            if cursorX < thumb.midX {
-                insertAt = j
-                break
-            }
-        }
-
-        // Map back to original column index space
-        // insertAt is position in the non-dragged array
-        // Convert to the full array index
-        var realIndex = 0
-        var count = 0
-        for i in 0...strip.columns.count {
-            if i == draggedIdx { continue }
-            if count == insertAt {
-                realIndex = i
-                break
-            }
-            count += 1
-            realIndex = i + 1
-        }
-        return min(realIndex, strip.columns.count)
-    }
-
-    private func restoreWidths(_ targetWidths: [Double], at time: Double) {
-        let params = widthSpringParams
-        for i in 0..<min(targetWidths.count, strip.columnData.count) {
-            let currentWidth = strip.columnData[i].currentWidth(at: time)
-            strip.columnData[i].widthAnimation = nil
-            strip.columnData[i].widthAnimation = SpringAnimation(
-                from: currentWidth, to: targetWidths[i], startTime: time, params: params
-            )
-            strip.columnData[i].cachedWidth = targetWidths[i]
-        }
     }
 
     // MARK: - Pill Bar Menu
@@ -760,17 +622,7 @@ public final class StripController: @unchecked Sendable {
 
     // MARK: - Layout Application
 
-    /// Current layout mode — minimap during drag-to-reorder, normal otherwise.
-    private var currentLayoutMode: LayoutMode {
-        if let dragIdx = minimapDraggedIndex {
-            return .minimap(
-                draggedColumnIndex: dragIdx,
-                insertionIndex: minimapInsertionIndex,
-                cursorPosition: minimapCursorPosition
-            )
-        }
-        return .normal
-    }
+    private var currentLayoutMode: LayoutMode { .normal }
 
     /// Compute target frames and apply to real windows.
     /// This is the Phase 1 "instant" mode.

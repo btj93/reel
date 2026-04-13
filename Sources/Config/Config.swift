@@ -48,6 +48,10 @@ public struct ReelConfig: Sendable {
 
     public var trackpad = TrackpadConfig()
 
+    // MARK: - Reorder Overlay
+
+    public var reorderOverlay = ReorderOverlayConfig()
+
     // MARK: - Window Rules
 
     public var rules: [WindowRuleConfig] = []
@@ -109,8 +113,15 @@ public struct TrackpadConfig: Sendable {
     public var dragThresholdPx: Double = 5.0
     /// Minimum 3-finger swipe distance to trigger focus switch.
     public var swipeThresholdPx: Double = 50.0
-    /// Base thumbnail width in minimap reorder mode.
-    public var thumbnailWidth: Double = 120.0
+    public init() {}
+}
+
+/// Configuration for the drag-to-reorder overlay.
+public struct ReorderOverlayConfig: Sendable {
+    /// Thumbnail rendering style: "screenshot" (default) or "icon".
+    public var thumbnailStyle: String = "screenshot"
+    /// Thumbnail height in pixels.
+    public var thumbnailHeight: Double = 160.0
 
     public init() {}
 }
@@ -319,7 +330,19 @@ extension ReelConfig {
             if let v = readInt(trackpad["long_press_delay_ms"]) { config.trackpad.longPressDelayMs = max(50, v) }
             if let v = readDouble(trackpad["drag_threshold_px"]), v.isFinite { config.trackpad.dragThresholdPx = max(0, v) }
             if let v = readDouble(trackpad["swipe_threshold_px"]), v.isFinite { config.trackpad.swipeThresholdPx = max(0, v) }
-            if let v = readDouble(trackpad["thumbnail_width"]), v.isFinite { config.trackpad.thumbnailWidth = max(20, v) }
+        }
+
+        // [reorder_overlay]
+        if let ro = readTable(table["reorder_overlay"]) {
+            if let v = readString(ro["thumbnail_style"]) {
+                let normalized = v.lowercased()
+                if normalized == "screenshot" || normalized == "icon" {
+                    config.reorderOverlay.thumbnailStyle = normalized
+                }
+            }
+            if let v = readDouble(ro["thumbnail_height"]), v.isFinite {
+                config.reorderOverlay.thumbnailHeight = max(40, min(400, v))
+            }
         }
 
         // [[rules]]

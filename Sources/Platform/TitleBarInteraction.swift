@@ -175,11 +175,6 @@ public final class TitleBarInteraction: @unchecked Sendable {
         case .dragging:
             // CGEvent.location is CG coordinates (top-left origin) — pass directly
             onDragUpdate?(location)
-            // Overlay uses AppKit coords — convert for insertion indicator
-            if let info = onNeedsManagedFrames?() {
-                let appKitX = location.x
-                overlay.mode = .minimap(insertionX: appKitX, dimAlpha: 0.4)
-            }
             return nil
 
         case .menu:
@@ -264,7 +259,6 @@ public final class TitleBarInteraction: @unchecked Sendable {
             overlay.ensurePanel(for: screen)
         }
         overlay.setMousePassthrough(true)
-        overlay.mode = .minimap(insertionX: 0, dimAlpha: 0.4)
         overlay.show()
         onDragBegin?(columnIndex)
     }
