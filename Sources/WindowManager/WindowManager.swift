@@ -1011,6 +1011,12 @@ public final class WindowManager: @unchecked Sendable {
         }
         stripController.finishBatch()
 
+        // Consume any pending dock-activation carryover — the new-Space
+        // discovery path does its own focus ordering via addWindow, and
+        // leaving the field set would leak into a subsequent unrelated
+        // space change within the 500ms TTL.
+        recentAppActivation = nil
+
         #if DEBUG
             print(
                 "[WM] space changed: new strip with \(stripController.strip.columns.count) cols"
