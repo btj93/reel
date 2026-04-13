@@ -781,13 +781,9 @@ public final class WindowManager: @unchecked Sendable {
             let sc = stripController
             let work = DispatchWorkItem { [weak self] in
                 guard let self, !self.isPaused else { return }
-                if let colIndex = sc.strip.columns.firstIndex(where: {
-                    $0.tiles.contains(tileID)
-                }),
-                    colIndex != sc.strip.activeColumnIndex
-                {
-                    sc.scrollToWindow(tileID: tileID)
-                }
+                // Incremental snap: if column already visible, no scroll;
+                // otherwise slide to first milestone in travel direction.
+                sc.scrollToWindow(tileID: tileID, mode: .incrementalSnap)
             }
             pendingFocusScroll = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
