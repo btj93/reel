@@ -19,6 +19,10 @@ public final class WindowTracker: @unchecked Sendable {
     /// Windows classified as ignored (not managed at all).
     public private(set) var ignoredWindows: Set<CGWindowID> = []
 
+    /// Last time each tracked window of each pid was focused. Used as a
+    /// fallback when resolving "which window of this pid did the user mean."
+    public private(set) var lastFocusTimeByWindow: [CGWindowID: Double] = [:]
+
     /// Callback for window events.
     public var onEvent: ((WindowEvent) -> Void)?
 
@@ -40,6 +44,7 @@ public final class WindowTracker: @unchecked Sendable {
     /// Remove a window from tracking (used by health check).
     public func untrackWindow(_ windowID: CGWindowID) {
         windows.removeValue(forKey: windowID)
+        lastFocusTimeByWindow.removeValue(forKey: windowID)
     }
 
     /// Window rules for per-app overrides.
@@ -238,6 +243,7 @@ public final class WindowTracker: @unchecked Sendable {
 
         floatingWindows.remove(wid)
         ignoredWindows.remove(wid)
+        lastFocusTimeByWindow.removeValue(forKey: wid)
 
         onEvent?(.windowRemoved(windowID: wid, tileID: window.tileID))
     }
@@ -267,6 +273,7 @@ public final class WindowTracker: @unchecked Sendable {
                     let window = AXWindow(element: event.element, windowID: wid, pid: event.pid)
                     registerWindow(window, bundleID: bundleID)
                 }
+                lastFocusTimeByWindow[wid] = TimeUtil.now()
                 onEvent?(.windowFocused(windowID: wid))
             }
 
