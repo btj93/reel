@@ -576,6 +576,10 @@ public final class WindowManager: @unchecked Sendable {
                 print("[WM] Paused")
                 fflush(stdout)
             #endif
+            hotkeyManager.suspended = true
+            if let tap = hotkeyManager.eventTap {
+                CGEvent.tapEnable(tap: tap, enable: false)
+            }
             for (_, sc) in stripControllers { sc.focusIndicator.hide() }
             restoreAllWindows()
         } else {
@@ -583,6 +587,10 @@ public final class WindowManager: @unchecked Sendable {
                 print("[WM] Resumed")
                 fflush(stdout)
             #endif
+            hotkeyManager.suspended = false
+            if let tap = hotkeyManager.eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
             // Re-discover any windows that aren't in the strip
             let onScreenIDs = Set(getAllWindowInfo().map(\.windowID))
             adoptUnmanagedWindows(onScreenIDs: onScreenIDs)
@@ -634,7 +642,15 @@ public final class WindowManager: @unchecked Sendable {
     private func setupEventHandlers() {
         // Window tracker events → strip controller
         tracker.onEvent = { [weak self] event in
-            guard let self = self, !self.isPaused else { return }
+            guard let self = self else { return }
+            if self.isPaused {
+                // While paused, still restore windows when switching spaces
+                // so off-screen (sliver) windows become reachable.
+                if case .spaceChanged = event {
+                    self.restoreAllWindows()
+                }
+                return
+            }
             self.handleWindowEvent(event)
         }
 

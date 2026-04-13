@@ -31,10 +31,13 @@ public struct HotkeyBinding: Sendable {
 /// Manages global hotkeys via CGEventTap.
 /// Includes tap health monitoring (re-enable if macOS disables it).
 public final class HotkeyManager: @unchecked Sendable {
-    var eventTap: CFMachPort?
+    public var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var bindings: [HotkeyBinding] = []
     private var healthTimer: Timer?
+
+    /// When true, the health monitor won't re-enable a disabled tap.
+    public var suspended: Bool = false
 
     /// Callback invoked on the main thread when a hotkey is triggered.
     public var onAction: ((HotkeyAction) -> Void)?
@@ -147,7 +150,7 @@ public final class HotkeyManager: @unchecked Sendable {
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
 
         guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: mask,
@@ -198,7 +201,7 @@ public final class HotkeyManager: @unchecked Sendable {
     /// This happens when: secure input mode, slow callback, permission revoked.
     private func startHealthMonitor() {
         healthTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self = self, let tap = self.eventTap else { return }
+            guard let self = self, !self.suspended, let tap = self.eventTap else { return }
             if !CGEvent.tapIsEnabled(tap: tap) {
                 #if DEBUG
                 print("[Hotkey] Event tap was disabled — re-enabling")
@@ -236,7 +239,7 @@ private func hotkeyCallback(
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         if let userInfo = userInfo {
             let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
-            if let tap = manager.eventTap {
+            if !manager.suspended, let tap = manager.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
         }
