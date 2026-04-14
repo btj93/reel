@@ -26,6 +26,8 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: macos-latest
+    outputs:
+      sha256: ${{ steps.sha.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
       - run: bash scripts/bundle.sh release
@@ -39,3 +41,31 @@ jobs:
         with:
           tag_name: ${{ needs.release-please.outputs.tag_name }}
           files: .build/bundled/Reel.app.zip
+      - name: SHA256 of release zip
+        id: sha
+        run: echo "sha256=$(shasum -a 256 .build/bundled/Reel.app.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+  update-homebrew:
+    needs: [release-please, build]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: btj93/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Update cask version and sha
+        env:
+          VERSION: ${{ needs.release-please.outputs.tag_name }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          VERSION="${VERSION#v}"
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/reel.rb
+          sed -i "s/sha256 \".*\"/sha256 \"${SHA256}\"/" Casks/reel.rb
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/reel.rb
+          git commit -m "update reel to ${VERSION#v}"
+          git push
