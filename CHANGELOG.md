@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/btj93/reel/compare/v0.2.3...v0.2.4) (2026-04-14)
+
+
+### Bug Fixes
+
+* resolve broken symlinks in resource bundle copy ([fc6f69b](https://github.com/btj93/reel/commit/fc6f69b040cf25da9dada17c2e2c9c08ca15eba9))
+
 ## [0.2.3](https://github.com/btj93/reel/compare/v0.2.2...v0.2.3) (2026-04-14)
 
 
