@@ -50,6 +50,13 @@ fi
 # Only replace the binary — preserves macOS permissions on the .app bundle
 cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
 
+# Copy SwiftPM resource bundles (e.g. Reel_Config.bundle with config.default.toml).
+# Bundle.module resolves via Bundle.main when running inside an .app, which
+# searches Contents/Resources/.
+for bundle in "${BUILD_DIR}"/*.bundle; do
+    [ -d "$bundle" ] && cp -R "$bundle" "${BUNDLE_DIR}/Contents/Resources/"
+done
+
 # Copy icon
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ICON_SRC="${SCRIPT_DIR}/../Resources/Reel.icns"

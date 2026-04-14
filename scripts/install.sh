@@ -31,6 +31,7 @@ if [ -d "${INSTALL_DIR}/${APP_NAME}.app" ]; then
     rm -rf "${INSTALL_DIR}/${APP_NAME}.app"
 fi
 
+xattr -cr "${TMPDIR}/${APP_NAME}.app"
 mv "${TMPDIR}/${APP_NAME}.app" "${INSTALL_DIR}/"
 
 echo "Linking ${CLI_NAME} to ${CLI_LINK}..."
