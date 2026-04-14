@@ -54,12 +54,13 @@ PLIST
 # Only replace the binary — preserves macOS permissions on the .app bundle
 cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
 
-# Copy SwiftPM resource bundles (e.g. Reel_Config.bundle with config.default.toml).
-# Bundle.module resolves via Bundle.main when running inside an .app, which
-# searches Contents/Resources/.
-for bundle in "${BUILD_DIR}"/*.bundle; do
-    [ -d "$bundle" ] && cp -R "$bundle" "${BUNDLE_DIR}/Contents/Resources/"
-done
+# Copy SwiftPM resource bundles into the .app.
+# Bundle.module resolves via Bundle.main inside an .app, searching Contents/Resources/.
+# SwiftPM resource bundles contain broken relative symlinks outside the build tree,
+# so we reconstruct Reel_Config.bundle with the real source files.
+CONFIG_BUNDLE="${BUNDLE_DIR}/Contents/Resources/Reel_Config.bundle"
+mkdir -p "${CONFIG_BUNDLE}"
+cp "${SCRIPT_DIR}/../Sources/Config/config.default.toml" "${CONFIG_BUNDLE}/"
 
 # Copy icon
 ICON_SRC="${SCRIPT_DIR}/../Resources/Reel.icns"
