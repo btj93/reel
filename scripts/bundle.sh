@@ -3,11 +3,12 @@
 set -euo pipefail
 
 PRODUCT="Reel"
-BUILD_DIR=".build/debug"
+CONFIG="${1:-debug}"
+BUILD_DIR=".build/${CONFIG}"
 BUNDLE_DIR=".build/bundled/${PRODUCT}.app"
 
-echo "Building ${PRODUCT}..."
-swift build
+echo "Building ${PRODUCT} (${CONFIG})..."
+swift build -c "${CONFIG}"
 
 # Create bundle structure only if it doesn't exist yet.
 # DON'T rm -rf — that revokes macOS Accessibility permission.

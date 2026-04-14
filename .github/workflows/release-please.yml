@@ -28,8 +28,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
-      - run: swift build -c release
-      - run: bash scripts/bundle.sh
+      - run: bash scripts/bundle.sh release
+      - name: Copy CLI into bundle
+        run: cp .build/release/reel-msg .build/bundled/Reel.app/Contents/MacOS/
       - name: Zip app bundle
         run: |
           cd .build/bundled

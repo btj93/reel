@@ -174,7 +174,11 @@ floating = true
 
 ## CLI
 
-`reel-msg` sends commands to the running Reel instance over a Unix socket.
+`reel-msg` sends commands to the running Reel instance over a Unix socket. It's bundled inside `Reel.app` — to use it from your terminal, add it to your PATH:
+
+```bash
+ln -s /Applications/Reel.app/Contents/MacOS/reel-msg /usr/local/bin/reel-msg
+```
 
 ```bash
 reel-msg list-windows        # JSON list of managed windows
