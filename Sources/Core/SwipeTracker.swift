@@ -19,8 +19,8 @@ public struct SwipeTracker: Sendable {
     public private(set) var position: Double = 0
 
     /// Deceleration rates for momentum scrolling (per-millisecond velocity retain).
-    /// 0.9988 ≈ velocity halves every ~580ms — close to iOS normal deceleration.
-    public static let decelerationTouchpad: Double = 0.9988
+    /// 0.9975 ≈ velocity halves every ~277ms — tighter than iOS, less coast.
+    public static let decelerationTouchpad: Double = 0.9975
     public static let decelerationMouse: Double = 0.992
 
     public init() {}

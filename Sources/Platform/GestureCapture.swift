@@ -43,6 +43,10 @@ public final class GestureCapture: @unchecked Sendable {
     /// Whether a gesture is currently active.
     private var isGesturing: Bool = false
 
+    /// Set when the swipe direction was decided as not-horizontal.
+    /// Stays true until the gesture ends so we don't re-evaluate mid-swipe.
+    private var gestureRejected: Bool = false
+
     public init() {}
 
     deinit {
@@ -111,7 +115,7 @@ public final class GestureCapture: @unchecked Sendable {
         let dbgPhase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
         let hasFn = flags.contains(.maskSecondaryFn)
         let hasShift = flags.contains(.maskShift)
-        print("[ScrollEvt] cont=\(isContinuous) mom=\(momentumPhase) phase=\(dbgPhase) fn=\(hasFn) shift=\(hasShift) ptY=\(dbgAxis1) ptX=\(dbgAxis2) intY=\(dbgIntAxis1) intX=\(dbgIntAxis2)")
+        // print("[ScrollEvt] cont=\(isContinuous) mom=\(momentumPhase) phase=\(dbgPhase) fn=\(hasFn) shift=\(hasShift) ptY=\(dbgAxis1) ptX=\(dbgAxis2) intY=\(dbgIntAxis1) intX=\(dbgIntAxis2)")
         fflush(stdout)
         #endif
 
@@ -163,9 +167,12 @@ public final class GestureCapture: @unchecked Sendable {
         // Only use horizontal axis for strip motion
         let delta = rawDeltaX * 2.0
 
-        // Only capture clearly horizontal swipes — horizontal delta must be at
-        // least 2x vertical. Once a gesture is locked in, keep it.
-        if !isGesturing && abs(rawDeltaX) < abs(rawDeltaY) * 2.0 {
+        // Once we've rejected this gesture as non-horizontal, stay rejected
+        // until the gesture ends. Prevents mid-swipe direction changes from
+        // accidentally triggering strip scrolling.
+        if gestureRejected {
+            // Let end/cancel through to reset the flag
+            if phase == 4 || phase == 8 { gestureRejected = false }
             return false
         }
 
@@ -178,6 +185,7 @@ public final class GestureCapture: @unchecked Sendable {
             if !isGesturing {
                 // First real movement — only capture if clearly horizontal (2:1 ratio)
                 if abs(rawDeltaX) < abs(rawDeltaY) * 2.0 {
+                    gestureRejected = true
                     return false  // not clearly horizontal, pass through
                 }
                 // Horizontal swipe — start the gesture
@@ -204,6 +212,7 @@ public final class GestureCapture: @unchecked Sendable {
             return false
 
         case 4:  // kCGScrollPhaseEnded
+            gestureRejected = false
             if !isGesturing {
                 return false  // was a vertical swipe we never captured
             }
@@ -221,6 +230,7 @@ public final class GestureCapture: @unchecked Sendable {
             return true
 
         case 8:  // kCGScrollPhaseCancelled
+            gestureRejected = false
             if !isGesturing { return false }
             let wasFocusSwitch = gestureMode == .focusSwitch
             isGesturing = false

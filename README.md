@@ -4,6 +4,8 @@ A scrollable tiling window manager for macOS, inspired by [niri](https://github.
 
 Instead of cramming every window into the visible screen, Reel places them on an **infinite horizontal strip**. The focused window and its neighbors stay visible; everything else is parked off-screen. Scroll left and right to navigate — like a film reel.
 
+Keyboard, trackpad, and mouse are all first-class citizens. Hotkeys for fast navigation, trackpad swipes for fluid scrolling, mouse clicks and drag-to-reorder for direct manipulation — pick whichever feels natural, or mix all three. A CLI tool (`reel-msg`) exposes every action over a Unix socket for scripting and programmatic control.
+
 No SIP disable required. Pure Swift + Accessibility API.
 
 <!-- TODO: add demo gif -->
@@ -12,7 +14,7 @@ No SIP disable required. Pure Swift + Accessibility API.
 
 - **Infinite horizontal strip** — windows tile left to right, one per column. No limit.
 - **Spring-based scrolling** — physics-based animation with velocity compounding. Rapid keypresses feel natural.
-- **Trackpad gestures** — hold `fn` + swipe to scroll. Snaps to columns on release.
+- **Trackpad, keyboard, and mouse** — swipe to scroll, hotkeys to jump, click or drag to focus and reorder. All three input methods are equally supported.
 - **Per-display strips** — each monitor gets its own independent strip.
 - **Space-aware** — switching macOS Spaces saves and restores strip state automatically.
 - **Position memory** — windows reopen in their previous strip position across app restarts.
@@ -28,6 +30,14 @@ No SIP disable required. Pure Swift + Accessibility API.
 
 ## Getting Started
 
+Download the latest `Reel.app.zip` from the [Releases](../../releases/latest) page, unzip, and move `Reel.app` to `/Applications`.
+
+macOS will prompt for Accessibility permission on first launch — grant it once.
+
+An icon appears in the menu bar. Open some windows — they tile automatically.
+
+### Building from Source
+
 ```bash
 git clone https://github.com/user/reel.git
 cd reel
@@ -35,9 +45,7 @@ swift build
 .build/debug/Reel &
 ```
 
-macOS will prompt for Accessibility permission — grant it once, and it persists across rebuilds at `.build/debug/Reel`.
-
-A icon appears in the menu bar. Open some windows — they tile automatically.
+When running from source, Accessibility permission persists at `.build/debug/Reel` across rebuilds.
 
 ### .app Bundle
 
