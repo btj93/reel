@@ -30,6 +30,17 @@ No SIP disable required. Pure Swift + Accessibility API.
 
 ## Getting Started
 
+### Homebrew
+
+```bash
+brew tap btj93/tap
+brew install --cask reel
+```
+
+This installs `Reel.app` to `/Applications` and links the `reel-msg` CLI to your PATH.
+
+### Shell Script
+
 > Always [review the script](scripts/install.sh) before piping from the internet to your shell.
 
 ```bash
@@ -38,7 +49,9 @@ curl -fsSL https://raw.githubusercontent.com/btj93/reel/main/scripts/install.sh 
 
 This downloads the latest release, installs `Reel.app` to `/Applications`, and links the `reel-msg` CLI to `/usr/local/bin`.
 
-Or download `Reel.app.zip` manually from the [Releases](../../releases/latest) page.
+### Manual Download
+
+Download `Reel.app.zip` from the [Releases](../../releases/latest) page.
 
 macOS will prompt for Accessibility permission on first launch — grant it once.
 
