@@ -205,9 +205,23 @@ public final class TitleBarInteraction: @unchecked Sendable {
         switch state {
         case .armed(_, _, let startPoint, let timer):
             timer.cancel()
-            reInjectMouseDown(at: startPoint)
             state = .idle
-            return event
+            // Return the synthetic mouseDown from the callback (delivered first)
+            // and post the real mouseUp for later delivery (delivered second).
+            // The previous approach returned the mouseUp and posted the mouseDown
+            // async, which caused the window to receive mouseUp before mouseDown —
+            // breaking button tracking (buttons stuck in pressed state).
+            guard let syntheticDown = CGEvent(
+                mouseEventSource: nil,
+                mouseType: .leftMouseDown,
+                mouseCursorPosition: startPoint,
+                mouseButton: .left
+            ) else {
+                return event
+            }
+            syntheticDown.setIntegerValueField(.eventSourceUserData, value: Self.reelSentinel)
+            event.post(tap: .cghidEventTap)
+            return syntheticDown
 
         case .dragging(let columnIndex, _):
             teardownEscapeTap()
@@ -300,17 +314,6 @@ public final class TitleBarInteraction: @unchecked Sendable {
             }
         }
         return nil
-    }
-
-    private func reInjectMouseDown(at point: CGPoint) {
-        guard let event = CGEvent(
-            mouseEventSource: nil,
-            mouseType: .leftMouseDown,
-            mouseCursorPosition: point,
-            mouseButton: .left
-        ) else { return }
-        event.setIntegerValueField(.eventSourceUserData, value: Self.reelSentinel)
-        event.post(tap: .cghidEventTap)
     }
 
     public func cancelIfActive() {
