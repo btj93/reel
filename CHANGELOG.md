@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/btj93/reel/compare/v0.2.2...v0.2.3) (2026-04-14)
+
+
+### Bug Fixes
+
+* read version from release-please manifest in bundle.sh ([459e8ce](https://github.com/btj93/reel/commit/459e8cef60356c6b1044f26ee4055ec0d77cbd7f))
+
 ## [0.2.2](https://github.com/btj93/reel/compare/v0.2.1...v0.2.2) (2026-04-14)
 
 
