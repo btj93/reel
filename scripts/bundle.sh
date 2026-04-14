@@ -7,7 +7,10 @@ CONFIG="${1:-debug}"
 BUILD_DIR=".build/${CONFIG}"
 BUNDLE_DIR=".build/bundled/${PRODUCT}.app"
 
-echo "Building ${PRODUCT} (${CONFIG})..."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VERSION=$(grep -o '"[0-9][0-9.]*"' "${SCRIPT_DIR}/../.release-please-manifest.json" | tr -d '"')
+
+echo "Building ${PRODUCT} ${VERSION} (${CONFIG})..."
 swift build -c "${CONFIG}"
 
 # Create bundle structure only if it doesn't exist yet.
@@ -16,8 +19,10 @@ if [ ! -d "${BUNDLE_DIR}/Contents/MacOS" ]; then
     echo "Creating app bundle..."
     mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
     mkdir -p "${BUNDLE_DIR}/Contents/Resources"
+fi
 
-    cat > "${BUNDLE_DIR}/Contents/Info.plist" << 'PLIST'
+# Always rewrite Info.plist so the version stays current.
+cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -29,9 +34,9 @@ if [ ! -d "${BUNDLE_DIR}/Contents/MacOS" ]; then
     <key>CFBundleDisplayName</key>
     <string>Reel</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
@@ -45,7 +50,6 @@ if [ ! -d "${BUNDLE_DIR}/Contents/MacOS" ]; then
 </dict>
 </plist>
 PLIST
-fi
 
 # Only replace the binary — preserves macOS permissions on the .app bundle
 cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
@@ -58,7 +62,6 @@ for bundle in "${BUILD_DIR}"/*.bundle; do
 done
 
 # Copy icon
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ICON_SRC="${SCRIPT_DIR}/../Resources/Reel.icns"
 if [ -f "${ICON_SRC}" ]; then
     cp "${ICON_SRC}" "${BUNDLE_DIR}/Contents/Resources/"
