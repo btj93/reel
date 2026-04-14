@@ -16,24 +16,25 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v17
         id: release
         with:
-          release-type: simple
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
   build:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: swift build -c release
       - run: bash scripts/bundle.sh
       - name: Zip app bundle
         run: |
           cd .build/bundled
           zip -r Reel.app.zip Reel.app
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release-please.outputs.tag_name }}
           files: .build/bundled/Reel.app.zip

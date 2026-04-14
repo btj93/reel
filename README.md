@@ -1,6 +1,6 @@
 # Reel
 
-A scrollable tiling window manager for macOS, inspired by [niri](https://github.com/YaLTeR/niri).
+A scrollable tiling window manager for macOS, inspired by [niri](https://github.com/niri-wm/niri).
 
 Instead of cramming every window into the visible screen, Reel places them on an **infinite horizontal strip**. The focused window and its neighbors stay visible; everything else is parked off-screen. Scroll left and right to navigate — like a film reel.
 
