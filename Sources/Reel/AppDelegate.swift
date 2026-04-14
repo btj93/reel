@@ -39,8 +39,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        setupMenuBar()
         startWindowManager()
+        setupMenuBar()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
