@@ -18,6 +18,10 @@ public final class TitleBarInteraction: @unchecked Sendable {
     public var longPressDelayMs: Int = 300
     public var dragThresholdPx: Double = 5.0
     public var titleBarHeight: Double = 28.0
+    /// Horizontal inset at each end of the title-bar hit region, reserved for macOS's
+    /// native corner-resize. Events that land within this inset pass through so the
+    /// window manager doesn't steal top-corner resize from vanilla macOS.
+    public var titleBarCornerInsetPx: Double = 8.0
     /// Modifier that must be held for title-bar drag/long-press to activate.
     public var requiredModifier: CGEventFlags = .maskSecondaryFn
 
@@ -281,10 +285,12 @@ public final class TitleBarInteraction: @unchecked Sendable {
     ) -> (columnIndex: Int, tileID: TileID)? {
 
         for (tileID, frame) in frames {
+            // Reserve a small inset at each end for macOS's native corner-resize.
+            let inset = min(titleBarCornerInsetPx, frame.width / 2)
             let titleBarRect = CGRect(
-                x: frame.origin.x,
+                x: frame.origin.x + inset,
                 y: frame.origin.y,
-                width: frame.width,
+                width: max(0, frame.width - inset * 2),
                 height: titleBarHeight
             )
             if titleBarRect.contains(cgPoint) {

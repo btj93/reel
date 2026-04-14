@@ -1395,14 +1395,15 @@ do {
     check(strip.columnData[0].widthAnimation != nil, "animation created with params")
 }
 
-// MARK: - TrackpadConfig
+// MARK: - CursorConfig
 
-section("TrackpadConfig — defaults")
+section("CursorConfig — defaults")
 do {
-    let config = TrackpadConfig()
+    let config = CursorConfig()
     assertEq(config.longPressDelayMs, 300, "default long press delay")
     assertClose(config.dragThresholdPx, 5.0, tolerance: 0.01, "default drag threshold")
     assertClose(config.swipeThresholdPx, 50.0, tolerance: 0.01, "default swipe threshold")
+    assertClose(config.titleBarCornerInsetPx, 8.0, tolerance: 0.01, "default title bar corner inset")
 }
 
 section("ReorderOverlayConfig — defaults")

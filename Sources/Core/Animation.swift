@@ -116,10 +116,13 @@ public struct SpringParams: Sendable {
         }
     }
 
-    /// Horizontal scroll animation.
+    /// Horizontal scroll animation (snap-to-column).
     /// Epsilon raised from niri's 0.0001 to 0.5 because each AX call costs 0.5-5ms.
     /// Sub-pixel precision wastes hundreds of frames nobody can see.
     public static let horizontalScroll = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+
+    /// Free-scroll momentum — lower stiffness for a gradual, iOS-like coast.
+    public static let freeScrollMomentum = SpringParams(dampingRatio: 1.0, stiffness: 200, epsilon: 0.5)
 
     /// Window movement animation.
     public static let windowMovement = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)

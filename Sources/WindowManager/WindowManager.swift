@@ -169,13 +169,14 @@ public final class WindowManager: @unchecked Sendable {
         // Gesture modifier
         if let gc = gestureCapture {
             gc.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
-            gc.swipeThresholdPx = config.trackpad.swipeThresholdPx
+            gc.swipeThresholdPx = config.cursor.swipeThresholdPx
         }
 
         // Trackpad config
         if let tb = titleBarInteraction {
-            tb.longPressDelayMs = config.trackpad.longPressDelayMs
-            tb.dragThresholdPx = config.trackpad.dragThresholdPx
+            tb.longPressDelayMs = config.cursor.longPressDelayMs
+            tb.dragThresholdPx = config.cursor.dragThresholdPx
+            tb.titleBarCornerInsetPx = config.cursor.titleBarCornerInsetPx
             tb.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
         }
         // Terminal path is read directly from config when spawning
@@ -306,7 +307,7 @@ public final class WindowManager: @unchecked Sendable {
         gestureCapture.onGestureCancel = { [weak self] in
             self?.stripController.handleGestureCancel()
         }
-        gestureCapture.swipeThresholdPx = config.trackpad.swipeThresholdPx
+        gestureCapture.swipeThresholdPx = config.cursor.swipeThresholdPx
         gestureCapture.onFocusSwipe = { [weak self] velocity in
             guard let sc = self?.stripController else { return }
             if velocity < 0 {
@@ -320,8 +321,9 @@ public final class WindowManager: @unchecked Sendable {
 
         // Title bar interaction setup
         let titleBar = TitleBarInteraction()
-        titleBar.longPressDelayMs = config.trackpad.longPressDelayMs
-        titleBar.dragThresholdPx = config.trackpad.dragThresholdPx
+        titleBar.longPressDelayMs = config.cursor.longPressDelayMs
+        titleBar.dragThresholdPx = config.cursor.dragThresholdPx
+        titleBar.titleBarCornerInsetPx = config.cursor.titleBarCornerInsetPx
         titleBar.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
         titleBar.onNeedsManagedFrames = { [weak self] () -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat) in
             guard let sc = self?.stripController else {

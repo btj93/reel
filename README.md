@@ -61,7 +61,7 @@ The bundle is ad-hoc signed with a stable identifier so macOS won't revoke Acces
 | Float/unfloat | `Alt-Space` | Toggle window in/out of strip |
 | Close window | `Alt-W` | Close focused window |
 
-> **Note:** `Alt` (Option) key bindings consume special character input (e.g., `Alt-H` produces `˙`). Rebind in config if this conflicts with your workflow.
+> **Note:** `Alt` (Option) key bindings consume special character input (e.g., `Alt-H` produces `˙`). Rebind in config if this conflicts with your workflow. `hyper` (Ctrl+Opt+Cmd+Shift) is supported as a modifier — e.g., `hyper-h`.
 
 **Trackpad:** hold `fn` + swipe horizontally to scroll the strip.
 
@@ -121,6 +121,20 @@ Modifiers: `ctrl`, `shift`, `cmd`, `alt`/`opt`, `fn`, `hyper` (ctrl+shift+cmd+al
 modifier = "fn"   # hold this key + trackpad swipe to scroll
 snap = true       # snap to columns on release (false = free scroll)
 ```
+
+### Cursor
+
+Applies to mouse and trackpad input on windows. Hold the gesture modifier (default `fn`) and click a title bar to bring up the pill action menu; hold + drag to enter drag-to-reorder. Top-bar corners are left untouched so macOS's native corner-resize keeps working.
+
+```toml
+[cursor]
+long_press_delay_ms = 300         # hold time before the action menu appears
+drag_threshold_px = 5             # cursor movement to disambiguate drag vs long-press
+swipe_threshold_px = 50           # min 3-finger trackpad swipe distance to switch focus
+title_bar_corner_inset_px = 8     # px at each top-corner passed through for macOS corner-resize
+```
+
+Set `title_bar_corner_inset_px = 0` to reclaim the corners for Reel's title-bar gestures (you'll lose native top-corner resize on managed windows).
 
 ### Focus Indicator
 
@@ -183,6 +197,10 @@ Reel (app) ──→ WindowManager ──→ Platform ──→ Core
 | **WindowManager** | Orchestration. One `StripController` per display. Window tracking, space switching, position memory. |
 | **Config** | TOML config via TOMLKit. File watching with auto-reload. |
 | **IPC** | Unix socket server + CLI client. |
+
+## Logs
+
+When running as an `.app` bundle, Reel writes debug output to `~/Library/Logs/Reel/reel.log`. The log is rotated on launch when it exceeds 1 MB (one backup kept as `reel.log.1`). When running the bare binary (`.build/debug/Reel`), output goes to the terminal as usual.
 
 ## Building
 

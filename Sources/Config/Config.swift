@@ -46,7 +46,7 @@ public struct ReelConfig: Sendable {
 
     // MARK: - Trackpad
 
-    public var trackpad = TrackpadConfig()
+    public var cursor = CursorConfig()
 
     // MARK: - Reorder Overlay
 
@@ -105,14 +105,18 @@ public struct StrutsConfig: Sendable {
     }
 }
 
-/// Configuration for trackpad interactions.
-public struct TrackpadConfig: Sendable {
+/// Configuration for pointer (mouse + trackpad) interactions on windows.
+public struct CursorConfig: Sendable {
     /// Milliseconds to hold before showing action menu (vs starting drag).
     public var longPressDelayMs: Int = 300
     /// Pixels of movement to disambiguate drag from long-press.
     public var dragThresholdPx: Double = 5.0
-    /// Minimum 3-finger swipe distance to trigger focus switch.
+    /// Minimum 3-finger swipe distance to trigger focus switch (trackpad only).
     public var swipeThresholdPx: Double = 50.0
+    /// Horizontal inset at each end of the title-bar hit region reserved for
+    /// macOS's native top-corner resize. Modifier+click within this inset is
+    /// passed through instead of triggering our title-bar gestures.
+    public var titleBarCornerInsetPx: Double = 8.0
     public init() {}
 }
 
@@ -325,11 +329,12 @@ extension ReelConfig {
             if let v = readBool(gesture["snap"]) { config.gestureSnap = v }
         }
 
-        // [trackpad]
-        if let trackpad = readTable(table["trackpad"]) {
-            if let v = readInt(trackpad["long_press_delay_ms"]) { config.trackpad.longPressDelayMs = max(50, v) }
-            if let v = readDouble(trackpad["drag_threshold_px"]), v.isFinite { config.trackpad.dragThresholdPx = max(0, v) }
-            if let v = readDouble(trackpad["swipe_threshold_px"]), v.isFinite { config.trackpad.swipeThresholdPx = max(0, v) }
+        // [cursor]
+        if let cursor = readTable(table["cursor"]) {
+            if let v = readInt(cursor["long_press_delay_ms"]) { config.cursor.longPressDelayMs = max(50, v) }
+            if let v = readDouble(cursor["drag_threshold_px"]), v.isFinite { config.cursor.dragThresholdPx = max(0, v) }
+            if let v = readDouble(cursor["swipe_threshold_px"]), v.isFinite { config.cursor.swipeThresholdPx = max(0, v) }
+            if let v = readDouble(cursor["title_bar_corner_inset_px"]), v.isFinite { config.cursor.titleBarCornerInsetPx = max(0, v) }
         }
 
         // [reorder_overlay]

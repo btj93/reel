@@ -934,7 +934,7 @@ public final class StripController: @unchecked Sendable {
                     to: state.currentOffset + momentumDelta,
                     initialVelocity: velocity,
                     startTime: time,
-                    params: .horizontalScroll
+                    params: .freeScrollMomentum
                 )
                 strip.viewOffset = .animation(anim)
             }

@@ -11,6 +11,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowManager: WindowManager?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        redirectLogsToFile()
         #if DEBUG
         print("[Reel] applicationDidFinishLaunching")
         fflush(stdout)
@@ -228,6 +229,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() {
         windowManager?.shutdown()
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Log File Redirect
+
+    /// When running as .app bundle, redirect stdout/stderr to ~/Library/Logs/Reel/reel.log.
+    /// Keeps one rotated backup (reel.log.1) at 1 MB.
+    private func redirectLogsToFile() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+
+        let fm = FileManager.default
+        let logDir = NSHomeDirectory() + "/Library/Logs/Reel"
+        let logPath = logDir + "/reel.log"
+        let backupPath = logDir + "/reel.log.1"
+
+        try? fm.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+
+        // Rotate if over 1 MB
+        if let attrs = try? fm.attributesOfItem(atPath: logPath),
+           let size = attrs[.size] as? UInt64, size > 1_000_000 {
+            try? fm.removeItem(atPath: backupPath)
+            try? fm.moveItem(atPath: logPath, toPath: backupPath)
+        }
+
+        freopen(logPath, "a", stdout)
+        freopen(logPath, "a", stderr)
     }
 
     // MARK: - Key String → NSMenuItem Key Equivalent

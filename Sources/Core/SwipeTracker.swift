@@ -13,8 +13,9 @@ public struct SwipeTracker: Sendable {
     /// Time window for velocity calculation (150ms).
     public static let historyWindow: Double = 0.150
 
-    /// Deceleration rates for momentum scrolling.
-    public static let decelerationTouchpad: Double = 0.997
+    /// Deceleration rates for momentum scrolling (per-millisecond velocity retain).
+    /// 0.9988 ≈ velocity halves every ~580ms — close to iOS normal deceleration.
+    public static let decelerationTouchpad: Double = 0.9988
     public static let decelerationMouse: Double = 0.992
 
     public struct GestureEvent: Sendable {
