@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/btj93/reel/compare/v0.2.1...v0.2.2) (2026-04-14)
+
+
+### Bug Fixes
+
+* bundle resource files and strip quarantine for distribution ([9aea851](https://github.com/btj93/reel/commit/9aea851af3dde58f2ce7c1f8b6f40a93852a229d))
+
 ## [0.2.1](https://github.com/btj93/reel/compare/v0.2.0...v0.2.1) (2026-04-14)
 
 
