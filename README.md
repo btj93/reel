@@ -30,6 +30,8 @@ No SIP disable required. Pure Swift + Accessibility API.
 
 ## Getting Started
 
+> Always [review the script](scripts/install.sh) before piping from the internet to your shell.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/btj93/reel/main/scripts/install.sh | bash
 ```
