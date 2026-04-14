@@ -287,6 +287,8 @@ public final class WindowManager: @unchecked Sendable {
             sc.animationEnabled = config.animationEnabled
             sc.gestureSnap = config.gestureSnap
             sc.widthSpringParams = config.widthSpringParams
+            sc.focusIndicator.reloadConfig(config.focusIndicator)
+            sc.focusIndicator.springParams = config.widthSpringParams
         }
         #if DEBUG
             print("[WM] animation: enabled (\(stripControllers.count) displays)")
@@ -307,6 +309,10 @@ public final class WindowManager: @unchecked Sendable {
         gestureCapture.onGestureCancel = { [weak self] in
             self?.stripController.handleGestureCancel()
         }
+        gestureCapture.onDiscreteScroll = { [weak self] deltaX, time in
+            self?.stripController.handleDiscreteScroll(deltaX: deltaX, time: time)
+        }
+        gestureCapture.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
         gestureCapture.swipeThresholdPx = config.cursor.swipeThresholdPx
         gestureCapture.onFocusSwipe = { [weak self] velocity in
             guard let sc = self?.stripController else { return }

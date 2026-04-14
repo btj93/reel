@@ -15,6 +15,9 @@ public final class GestureCapture: @unchecked Sendable {
     public var onGestureEnd: ((Double) -> Void)?         // timestamp
     public var onGestureCancel: (() -> Void)?
 
+    /// Called for discrete mouse scroll events (deltaX in points, timestamp).
+    public var onDiscreteScroll: ((Double, Double) -> Void)?
+
     /// Gesture mode: locked at gesture begin based on finger count.
     enum GestureMode {
         case pan
@@ -96,66 +99,114 @@ public final class GestureCapture: @unchecked Sendable {
     // MARK: - Event Handling
 
     fileprivate func handleScrollEvent(_ event: CGEvent) -> Bool {
-        // Check if our modifier is held
         let flags = event.flags
+        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+        let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
+
+        #if DEBUG
+        let dbgAxis1 = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+        let dbgAxis2 = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
+        let dbgIntAxis1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        let dbgIntAxis2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
+        let dbgPhase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
+        let hasFn = flags.contains(.maskSecondaryFn)
+        let hasShift = flags.contains(.maskShift)
+        print("[ScrollEvt] cont=\(isContinuous) mom=\(momentumPhase) phase=\(dbgPhase) fn=\(hasFn) shift=\(hasShift) ptY=\(dbgAxis1) ptX=\(dbgAxis2) intY=\(dbgIntAxis1) intX=\(dbgIntAxis2)")
+        fflush(stdout)
+        #endif
+
+        // All scroll handling requires the configured modifier (fn by default).
+        // Shift+scroll wheel: macOS converts vertical→horizontal and marks as
+        // continuous with phase=0. Detect this so fn+shift+scroll works.
+        let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
+        let isShiftConverted = flags.contains(.maskShift) && isContinuous && phase == 0 && momentumPhase == 0
+
         guard flags.contains(requiredModifier) else {
-            // If we were gesturing and modifier was released, end the gesture
             if isGesturing {
                 endGesture(event)
             }
-            return false  // pass event through
-        }
-
-        // Get scroll phase info
-        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
-        let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
-        let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
-
-        // Suppress macOS momentum events — we handle our own
-        if momentumPhase != 0 {
-            return true  // consume
-        }
-
-        // Only handle continuous (trackpad) events
-        guard isContinuous else {
-            // Discrete mouse wheel with modifier: treat as focus left/right
             return false
+        }
+
+        // Discrete mouse scroll or shift-converted discrete: pan the strip.
+        // Only horizontal — vertical scroll (without shift) passes through to apps.
+        if !isContinuous || isShiftConverted {
+            if momentumPhase != 0 { return true }
+            let deltaX = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
+            let deltaY = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+            // Shift-converted events always have the delta on axis2; for native
+            // horizontal scroll wheels, axis2 dominates. Pass through vertical-only.
+            if !isShiftConverted && abs(deltaY) > abs(deltaX) {
+                return false
+            }
+            let delta = abs(deltaX) >= abs(deltaY) ? deltaX : deltaY
+            if abs(delta) > 0 {
+                let timestamp = TimeUtil.now()
+                onDiscreteScroll?(delta * 1.0, timestamp)
+            }
+            return true
+        }
+
+
+
+        // Suppress macOS momentum events only if we captured the gesture.
+        // Vertical swipes we didn't capture should keep their native momentum.
+        if momentumPhase != 0 {
+            if !isGesturing { return false }  // pass through
+            return true  // consume our gesture's momentum
         }
 
         let timestamp = TimeUtil.now()
 
-        // Use both axes — vertical scroll (axis1) is the natural two-finger gesture direction
-        let deltaX = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
-        let deltaY = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
-        // Pick whichever axis has more movement; vertical scroll maps to horizontal strip motion
-        // 2x multiplier so light swipes move the strip meaningfully
-        let delta = (abs(deltaX) >= abs(deltaY) ? deltaX : deltaY) * 2.0
+        let rawDeltaX = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
+        let rawDeltaY = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+        // Only use horizontal axis for strip motion
+        let delta = rawDeltaX * 2.0
+
+        // Only capture clearly horizontal swipes — horizontal delta must be at
+        // least 2x vertical. Once a gesture is locked in, keep it.
+        if !isGesturing && abs(rawDeltaX) < abs(rawDeltaY) * 2.0 {
+            return false
+        }
 
         switch phase {
         case 1:  // kCGScrollPhaseBegan
-            isGesturing = true
-            let fingerCount = event.getIntegerValueField(CGEventField(rawValue: 111)!)
-            if fingerCount >= 3 {
-                gestureMode = .focusSwitch
-                focusSwipeTracker.reset()
-                focusCumulativeDelta = 0
-            } else {
-                gestureMode = .pan
-                onGestureBegin?(timestamp)
-            }
+            // Pass through — direction not known yet. We'll decide on phase=2.
+            return false
 
         case 2:  // kCGScrollPhaseChanged
+            if !isGesturing {
+                // First real movement — only capture if clearly horizontal (2:1 ratio)
+                if abs(rawDeltaX) < abs(rawDeltaY) * 2.0 {
+                    return false  // not clearly horizontal, pass through
+                }
+                // Horizontal swipe — start the gesture
+                isGesturing = true
+                let fingerCount = event.getIntegerValueField(CGEventField(rawValue: 111)!)
+                if fingerCount >= 3 {
+                    gestureMode = .focusSwitch
+                    focusSwipeTracker.reset()
+                    focusCumulativeDelta = 0
+                } else {
+                    gestureMode = .pan
+                    onGestureBegin?(timestamp)
+                }
+            }
             if isGesturing {
                 if gestureMode == .focusSwitch {
                     focusCumulativeDelta += delta
                     focusSwipeTracker.push(delta: delta, timestamp: timestamp)
                 } else {
-                    // Negate delta: trackpad scroll right/down = content moves left = negative offset change
                     onGestureUpdate?(-delta, timestamp)
                 }
+                return true
             }
+            return false
 
         case 4:  // kCGScrollPhaseEnded
+            if !isGesturing {
+                return false  // was a vertical swipe we never captured
+            }
             if gestureMode == .focusSwitch {
                 if abs(focusCumulativeDelta) > swipeThresholdPx {
                     onFocusSwipe?(focusSwipeTracker.velocity())
@@ -167,8 +218,10 @@ public final class GestureCapture: @unchecked Sendable {
                 endGesture(event)
                 gestureMode = nil
             }
+            return true
 
         case 8:  // kCGScrollPhaseCancelled
+            if !isGesturing { return false }
             let wasFocusSwitch = gestureMode == .focusSwitch
             isGesturing = false
             gestureMode = nil
@@ -176,12 +229,11 @@ public final class GestureCapture: @unchecked Sendable {
             if !wasFocusSwitch {
                 onGestureCancel?()
             }
+            return true
 
         default:
-            break
+            return false
         }
-
-        return true  // consume the event
     }
 
     private func endGesture(_ event: CGEvent) {

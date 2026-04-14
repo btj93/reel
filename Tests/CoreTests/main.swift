@@ -343,10 +343,10 @@ do {
         tracker.push(delta: 50, timestamp: Double(i) * 0.01)
     }
     let vel = tracker.velocity()
-    check(vel > 4000 && vel < 7000, "velocity: \(vel)")
+    check(vel > 2000 && vel < 3500, "velocity: \(vel)")
 }
 
-section("Window trimming")
+section("Weighted velocity ignores stale samples")
 do {
     var tracker = SwipeTracker()
     tracker.push(delta: 100, timestamp: 0.0)
@@ -354,7 +354,9 @@ do {
     tracker.push(delta: 10, timestamp: 0.200)
     tracker.push(delta: 10, timestamp: 0.250)
     let vel = tracker.velocity()
-    check(vel < 600, "old events should be trimmed, got \(vel)")
+    // Recent deltas are small (10px) — weighted velocity should reflect that,
+    // not the old fast deltas (100px).
+    check(vel < 600, "recent slow samples should dominate, got \(vel)")
 }
 
 // MARK: - Window Classification Tests

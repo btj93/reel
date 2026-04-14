@@ -94,6 +94,22 @@ public struct Strip: Sendable {
         columnX(at: activeColumnIndex, time: time) + viewOffset.current(at: time)
     }
 
+    /// Valid viewOffset range that keeps edge columns fully visible:
+    /// - Left bound: first column's right edge aligns with viewport's right edge
+    /// - Right bound: last column's left edge aligns with viewport's left edge
+    public func viewOffsetBounds(at time: Double) -> ClosedRange<Double> {
+        guard !columnData.isEmpty else { return 0...0 }
+        let activeX = columnX(at: activeColumnIndex, time: time)
+        let screenWidth = workingArea.width
+        let firstColWidth = columnData[0].currentWidth(at: time)
+        let lastColX = columnX(at: columnData.count - 1, time: time)
+
+        let minOffset = (firstColWidth - screenWidth) - activeX
+        let maxBound = lastColX - activeX
+        let maxOffset = max(minOffset, maxBound)
+        return minOffset...maxOffset
+    }
+
     // MARK: - Column Mutations
 
     /// Add a new column to the right of the active column.

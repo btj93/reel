@@ -35,6 +35,10 @@ public final class StripController: @unchecked Sendable {
     /// Used to defer focus changes until the animation settles.
     private var gestureAnimating: Bool = false
 
+    /// Timestamp when gesture momentum settled — used to suppress AX focus echoes
+    /// that arrive after the settle re-anchors activeColumnIndex.
+    private var gestureSettleTime: Double = 0
+
     /// Saved strip states per Space, keyed by a fingerprint of on-screen window IDs.
     private var savedSpaces: [Set<UInt32>: SavedStripState] = [:]
 
@@ -609,6 +613,26 @@ public final class StripController: @unchecked Sendable {
 
     /// Scroll the strip to make a specific window visible.
     public func scrollToWindow(tileID: TileID, mode: ScrollMode = .center) {
+        // Suppress external focus-triggered scrolls during gesture momentum and
+        // shortly after settle — the re-anchor triggers AX focus events that
+        // would snap the view away from where the gesture left it.
+        if mode == .incrementalSnap {
+            if gestureAnimating {
+                #if DEBUG
+                print("[Gesture] SUPPRESSED scrollToWindow (gestureAnimating) tileID=\(tileID.rawValue)")
+                fflush(stdout)
+                #endif
+                return
+            }
+            let elapsed = TimeUtil.now() - gestureSettleTime
+            if elapsed < 0.3 {
+                #if DEBUG
+                print("[Gesture] SUPPRESSED scrollToWindow (settle echo, \(String(format: "%.0f", elapsed * 1000))ms) tileID=\(tileID.rawValue)")
+                fflush(stdout)
+                #endif
+                return
+            }
+        }
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
         #if DEBUG
         let window = windowMap[tileID]
@@ -774,8 +798,13 @@ public final class StripController: @unchecked Sendable {
                 // switching activeColumnIndex, so there's no visual jump.
                 if gestureAnimating {
                     gestureAnimating = false
+                    gestureSettleTime = time
                     let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + finalOffset
                     let newActive = columnUnderCursor(gestureOffset: finalOffset)
+                    #if DEBUG
+                    print("[Gesture] SETTLE oldActive=\(strip.activeColumnIndex) newActive=\(newActive) finalOffset=\(String(format: "%.1f", finalOffset)) adjustedOffset=\(String(format: "%.1f", viewPos - strip.columnX(at: newActive, time: time)))")
+                    fflush(stdout)
+                    #endif
                     strip.activeColumnIndex = newActive
                     let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
                     strip.viewOffset = .static(adjustedOffset)
@@ -861,6 +890,10 @@ public final class StripController: @unchecked Sendable {
     /// Begin a trackpad gesture scroll.
     public func handleGestureBegin(time: Double) {
         let current = strip.viewOffset.current(at: time)
+        #if DEBUG
+        print("[Gesture] BEGIN offset=\(String(format: "%.1f", current)) snap=\(gestureSnap)")
+        fflush(stdout)
+        #endif
         strip.viewOffset = .gesture(GestureState(currentOffset: current, isTouchpad: true))
         frameLoop?.resume()
     }
@@ -868,8 +901,13 @@ public final class StripController: @unchecked Sendable {
     /// Update during an active gesture.
     public func handleGestureUpdate(deltaX: Double, time: Double) {
         guard case .gesture(var state) = strip.viewOffset else { return }
-        state.currentOffset += deltaX
-        state.tracker.push(delta: deltaX, timestamp: time)
+        let bounds = strip.viewOffsetBounds(at: time)
+        let oldOffset = state.currentOffset
+        state.currentOffset = min(max(oldOffset + deltaX, bounds.lowerBound), bounds.upperBound)
+        // Feed the tracker the actual offset change (not raw deltaX) so velocity
+        // doesn't inflate when clamped at a boundary.
+        let actualDelta = state.currentOffset - oldOffset
+        state.tracker.push(delta: actualDelta, timestamp: time)
         strip.viewOffset = .gesture(state)
     }
 
@@ -878,7 +916,12 @@ public final class StripController: @unchecked Sendable {
     /// (in handleFrameTick) to avoid a visual jump from shifting the coordinate reference.
     public func handleGestureEnd(time: Double) {
         guard case .gesture(let state) = strip.viewOffset else { return }
-        let velocity = state.tracker.velocity()
+        let velocity = state.tracker.velocity(at: time)
+        #if DEBUG
+        let bounds = strip.viewOffsetBounds(at: time)
+        print("[Gesture] END offset=\(String(format: "%.1f", state.currentOffset)) vel=\(String(format: "%.1f", velocity)) snap=\(gestureSnap) bounds=[\(String(format: "%.1f", bounds.lowerBound)),\(String(format: "%.1f", bounds.upperBound))]")
+        fflush(stdout)
+        #endif
 
         if abs(velocity) > 50 {
             let projected = state.tracker.projectedEndPosition(isTouchpad: state.isTouchpad)
@@ -929,9 +972,28 @@ public final class StripController: @unchecked Sendable {
                 // but currentOffset includes the pre-gesture viewOffset. Add the
                 // momentum delta so the target is in the same coordinate space.
                 let momentumDelta = projected - state.tracker.position
+                let fsBounds = strip.viewOffsetBounds(at: time)
+                let rawTarget = state.currentOffset + momentumDelta
+                let clampedTarget = min(max(rawTarget, fsBounds.lowerBound), fsBounds.upperBound)
+                #if DEBUG
+                print("[Gesture] FREE-SCROLL from=\(String(format: "%.1f", state.currentOffset)) rawTarget=\(String(format: "%.1f", rawTarget)) clamped=\(String(format: "%.1f", clampedTarget)) vel=\(String(format: "%.1f", velocity)) momentumDelta=\(String(format: "%.1f", momentumDelta))")
+                fflush(stdout)
+                #endif
+                // If clamped target ≈ current position (at boundary), just stop —
+                // a spring from X to X with velocity creates a visible bounce-back.
+                if abs(clampedTarget - state.currentOffset) < 1.0 {
+                    #if DEBUG
+                    print("[Gesture] FREE-SCROLL at boundary, stopping immediately")
+                    fflush(stdout)
+                    #endif
+                    strip.viewOffset = .static(state.currentOffset)
+                    clearCommittedFrames()
+                    applyLayout()
+                    return
+                }
                 let anim = SpringAnimation(
                     from: state.currentOffset,
-                    to: state.currentOffset + momentumDelta,
+                    to: clampedTarget,
                     initialVelocity: velocity,
                     startTime: time,
                     params: .freeScrollMomentum
@@ -943,14 +1005,53 @@ public final class StripController: @unchecked Sendable {
             // Frame loop continues to tick
         } else {
             // No significant velocity — just stop, then re-anchor focus to cursor column
-            let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + state.currentOffset
-            let newActive = columnUnderCursor(gestureOffset: state.currentOffset)
+            let bounds = strip.viewOffsetBounds(at: time)
+            let clampedOffset = min(max(state.currentOffset, bounds.lowerBound), bounds.upperBound)
+            let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + clampedOffset
+            let newActive = columnUnderCursor(gestureOffset: clampedOffset)
             strip.activeColumnIndex = newActive
             let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
             strip.viewOffset = .static(adjustedOffset)
             clearCommittedFrames()
             applyLayout()
         }
+    }
+
+    /// Handle a discrete mouse scroll tick — smooth spring animation, no momentum.
+    /// Consecutive ticks retarget the in-flight spring so they blend smoothly.
+    public func handleDiscreteScroll(deltaX: Double, time: Double) {
+        guard !strip.columns.isEmpty else { return }
+        let bounds = strip.viewOffsetBounds(at: time)
+        let current = strip.viewOffset.current(at: time)
+        // Accumulate onto the current target (not current position) so rapid
+        // ticks compound rather than fighting the in-flight spring.
+        let baseTarget: Double
+        if case .animation(let existing) = strip.viewOffset {
+            baseTarget = existing.to
+        } else {
+            baseTarget = current
+        }
+        let target = min(max(baseTarget - deltaX, bounds.lowerBound), bounds.upperBound)
+        #if DEBUG
+        print("[Gesture] DISCRETE delta=\(String(format: "%.1f", deltaX)) from=\(String(format: "%.1f", current)) to=\(String(format: "%.1f", target)) bounds=[\(String(format: "%.1f", bounds.lowerBound)),\(String(format: "%.1f", bounds.upperBound))]")
+        fflush(stdout)
+        #endif
+        if case .animation(let existing) = strip.viewOffset {
+            let retargeted = existing.retargeted(to: target, at: time)
+            strip.viewOffset = .animation(retargeted)
+        } else {
+            let anim = SpringAnimation(
+                from: current,
+                to: target,
+                initialVelocity: 0,
+                startTime: time,
+                params: .horizontalScroll
+            )
+            strip.viewOffset = .animation(anim)
+        }
+        scrollWidthSettled = false
+        gestureAnimating = true
+        frameLoop?.resume()
     }
 
     /// Cancel a gesture (e.g., another event interrupted it).
