@@ -1,6 +1,6 @@
 [apps.Reel]
 product = "Reel"
-version = "0.2.0" # x-release-please-version
+version = "0.2.1" # x-release-please-version
 icon = "Resources/Reel.icns"
 
 [apps.Reel.plist]
