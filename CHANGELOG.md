@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/btj93/reel/compare/v0.2.0...v0.2.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* intercepting button on menu bar ([2d6675f](https://github.com/btj93/reel/commit/2d6675ff5573c15e9b95c86c429b8ddf71214d2c))
+* menu bar show keyboard shortcut ([4a73554](https://github.com/btj93/reel/commit/4a735547db37f35824e0ec617ab0e36e63a4dfb0))
+
 ## [0.2.0](https://github.com/btj93/reel/compare/v0.1.0...v0.2.0) (2026-04-14)
 
 
