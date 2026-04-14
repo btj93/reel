@@ -30,7 +30,13 @@ No SIP disable required. Pure Swift + Accessibility API.
 
 ## Getting Started
 
-Download the latest `Reel.app.zip` from the [Releases](../../releases/latest) page, unzip, and move `Reel.app` to `/Applications`.
+```bash
+curl -fsSL https://raw.githubusercontent.com/btj93/reel/main/scripts/install.sh | bash
+```
+
+This downloads the latest release, installs `Reel.app` to `/Applications`, and links the `reel-msg` CLI to `/usr/local/bin`.
+
+Or download `Reel.app.zip` manually from the [Releases](../../releases/latest) page.
 
 macOS will prompt for Accessibility permission on first launch — grant it once.
 
@@ -39,7 +45,7 @@ An icon appears in the menu bar. Open some windows — they tile automatically.
 ### Building from Source
 
 ```bash
-git clone https://github.com/user/reel.git
+git clone https://github.com/btj93/reel.git
 cd reel
 swift build
 .build/debug/Reel &
