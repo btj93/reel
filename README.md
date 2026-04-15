@@ -28,6 +28,17 @@ No SIP disable required. Pure Swift + Accessibility API.
 - Accessibility permission (prompted on first launch)
 - Swift 5.10+
 
+## Permissions
+
+| Permission | Purpose |
+|---|---|
+| **Accessibility** (System Settings → Privacy & Security → Accessibility) | Required for all core functionality. Reel uses the Accessibility API to discover, move, resize, and observe windows. Global hotkeys and trackpad gesture capture also operate through this permission via `CGEventTap`. |
+| **Screen Recording** (optional) (System Settings → Privacy & Security → Screen & System Audio Recording) | Optional. Enables screenshot thumbnails in the drag-to-reorder overlay. Without this permission, the overlay falls back to app icon mode. |
+
+macOS prompts for Accessibility access on first launch. Grant it once — the permission persists across rebuilds when running the debug binary (`.build/debug/Reel`). The `.app` bundle uses a stable code-signing identifier to avoid re-prompting.
+
+No SIP disable required.
+
 ## Getting Started
 
 ### Homebrew
