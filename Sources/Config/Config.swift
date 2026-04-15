@@ -2,6 +2,24 @@ import Foundation
 import TOMLKit
 import Core
 
+/// Resource bundle accessor that works both in SwiftPM builds and .app bundles.
+/// SwiftPM's auto-generated Bundle.module looks at Bundle.main.bundleURL (the .app root),
+/// but bundle.sh places the resource bundle in Contents/Resources/ (standard .app layout).
+private let resourceBundle: Bundle = {
+    // SwiftPM default: Bundle.main.bundleURL/Reel_Config.bundle (works for bare binary)
+    let swiftPMPath = Bundle.main.bundleURL.appendingPathComponent("Reel_Config.bundle").path
+    if let bundle = Bundle(path: swiftPMPath) { return bundle }
+
+    // .app bundle: Contents/Resources/Reel_Config.bundle
+    if let resourceURL = Bundle.main.resourceURL {
+        let appPath = resourceURL.appendingPathComponent("Reel_Config.bundle").path
+        if let bundle = Bundle(path: appPath) { return bundle }
+    }
+
+    // Fallback to SwiftPM's generated accessor (works in dev builds)
+    return Bundle.module
+}()
+
 /// Reel configuration, loaded from ~/.config/reel/config.toml.
 public struct ReelConfig: Sendable {
 
@@ -178,7 +196,7 @@ extension ReelConfig {
 
     /// Load defaults from bundled config.default.toml.
     private static let cachedDefaults: ReelConfig = {
-        guard let url = Bundle.module.url(forResource: "config.default", withExtension: "toml"),
+        guard let url = resourceBundle.url(forResource: "config.default", withExtension: "toml"),
               let content = try? String(contentsOf: url, encoding: .utf8),
               let table = try? TOMLTable(string: content) else {
             #if DEBUG
@@ -420,7 +438,7 @@ extension ReelConfig {
         let dir = configDir
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
-        guard let url = Bundle.module.url(forResource: "config.default", withExtension: "toml"),
+        guard let url = resourceBundle.url(forResource: "config.default", withExtension: "toml"),
               let defaultConfig = try? String(contentsOf: url, encoding: .utf8) else {
             #if DEBUG
             print("[Config] Error: could not load bundled config.default.toml")

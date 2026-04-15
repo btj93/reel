@@ -54,10 +54,9 @@ PLIST
 # Only replace the binary — preserves macOS permissions on the .app bundle
 cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
 
-# Copy SwiftPM resource bundles into the .app.
-# Bundle.module resolves via Bundle.main inside an .app, searching Contents/Resources/.
-# SwiftPM resource bundles contain broken relative symlinks outside the build tree,
-# so we reconstruct Reel_Config.bundle with the real source files.
+# Copy SwiftPM resource bundle into the .app.
+# Place in Contents/Resources/ (standard .app location). The Config module's
+# resourceBundle accessor checks both this path and SwiftPM's default path.
 CONFIG_BUNDLE="${BUNDLE_DIR}/Contents/Resources/Reel_Config.bundle"
 mkdir -p "${CONFIG_BUNDLE}"
 cp "${SCRIPT_DIR}/../Sources/Config/config.default.toml" "${CONFIG_BUNDLE}/"
