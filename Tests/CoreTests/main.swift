@@ -1997,6 +1997,62 @@ do {
 }
 
 // ============================================================
+
+// MARK: - Animated raiseOffset in computeTargetFrames
+
+print("Animated raiseOffset in computeTargetFrames Tests")
+
+section("raiseHeight with per-column animation — mid-animation Y offset")
+do {
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+
+    // Column 0 is active (at ceiling), column 1 just lost focus (animating 0 → 20)
+    var cd0 = ColumnData(cachedWidth: 720)
+    cd0.cachedRaiseTarget = 0
+    var cd1 = ColumnData(cachedWidth: 720, raiseAnimation: SpringAnimation(from: 0, to: 20, startTime: 0, params: params))
+    cd1.cachedRaiseTarget = 20
+
+    let col0 = Column(tiles: [TileID(1)], width: .fixed(720))
+    let col1 = Column(tiles: [TileID(2)], width: .fixed(720))
+    let strip = Strip(columns: [col0, col1], columnData: [cd0, cd1], activeColumnIndex: 0, viewOffset: .static(0), snapIndices: [0, 0], gap: 16, workingArea: wa)
+
+    // At time 0.001 — col1's animation just started, Y offset should be near 0
+    let frames = computeTargetFrames(strip: strip, time: 0.001, raiseHeight: 20)
+    // Col 0 (active, no animation, target=0): y = wa.minY
+    assertClose(Double(frames[0].frame.minY), Double(wa.minY), tolerance: 1, "active col at ceiling")
+    // Col 1 (non-active, mid-animation): y between wa.minY and wa.minY+20
+    let col1Y = Double(frames[1].frame.minY)
+    check(col1Y >= Double(wa.minY) - 1, "col1 y not above ceiling, got \(col1Y)")
+    check(col1Y < Double(wa.minY) + 15, "col1 y should be early in animation (close to ceiling), got \(col1Y)")
+    // Both columns have same reduced height
+    assertClose(Double(frames[0].frame.height), Double(wa.height) - 20, tolerance: 1, "col0 reduced height")
+    assertClose(Double(frames[1].frame.height), Double(wa.height) - 20, tolerance: 1, "col1 reduced height")
+}
+
+section("raiseHeight with no animations — same as static raiseOffset")
+do {
+    let strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 1, viewOffset: 0)
+    // With no raise animations, cachedRaiseTarget is 0 for all columns (default).
+    // The animated path (raiseHeight > 0) will read currentRaiseOffset = 0 for all,
+    // producing y = wa.minY for all. The static path (raiseOffset > 0) produces
+    // y = wa.minY for active and y = wa.minY + 20 for non-active.
+    // So these are NOT the same WITHOUT cachedRaiseTarget being set appropriately.
+    // The sync of cachedRaiseTarget happens in StripController.applyLayout (Task 4).
+    // For this test, manually set the targets to simulate post-sync state.
+    var strip2 = strip
+    for i in 0..<strip2.columnData.count {
+        strip2.columnData[i].cachedRaiseTarget = (i == strip2.activeColumnIndex) ? 0 : 20
+    }
+    let staticFrames = computeTargetFrames(strip: strip, time: 0, raiseOffset: 20)
+    let animFrames = computeTargetFrames(strip: strip2, time: 0, raiseHeight: 20)
+    for i in 0..<staticFrames.count {
+        assertClose(Double(staticFrames[i].frame.minY), Double(animFrames[i].frame.minY), tolerance: 1, "frame \(i) y matches")
+        assertClose(Double(staticFrames[i].frame.height), Double(animFrames[i].frame.height), tolerance: 1, "frame \(i) height matches")
+    }
+}
+
+// ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 if failed == 0 {
