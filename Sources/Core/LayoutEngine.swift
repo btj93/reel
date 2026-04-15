@@ -46,7 +46,8 @@ public func computeTargetFrames(
     time: Double,
     sliverWidth: Double = 1,
     nearBufferColumns: Int = 2,
-    mode: LayoutMode = .normal
+    mode: LayoutMode = .normal,
+    raiseOffset: Double = 0
 ) -> [TargetFrame] {
     guard !strip.columns.isEmpty else { return [] }
 
@@ -108,13 +109,21 @@ public func computeTargetFrames(
         let isVisible = zone == .visible
         let isPartiallyVisible = (screenX + colWidth > wa.minX) && (screenX < wa.maxX)
 
+        // Raise offset: non-active columns get a shorter working area anchored to bottom
+        let tileWA: CGRect
+        if raiseOffset > 0 && i != strip.activeColumnIndex {
+            tileWA = CGRect(x: wa.minX, y: wa.minY + raiseOffset, width: wa.width, height: wa.height - raiseOffset)
+        } else {
+            tileWA = wa
+        }
+
         // Compute tile frames within the column (vertical stacking)
         computeTileFrames(
             into: &results,
             column: column,
             screenX: screenX,
             colWidth: colWidth,
-            workingArea: wa,
+            workingArea: tileWA,
             gap: strip.gap,
             isVisible: isVisible,
             isPartiallyVisible: isPartiallyVisible,

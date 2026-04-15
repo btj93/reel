@@ -1854,6 +1854,86 @@ do {
     }
 }
 
+// MARK: - Raise Focus Indicator Offset
+
+print("Raise Focus Indicator Offset Tests")
+
+section("raiseOffset — active column full height, others shorter")
+do {
+    let strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 1, viewOffset: 0)
+    let wa = strip.workingArea  // y=25, height=875
+    let raiseOffset: Double = 20
+    let frames = computeTargetFrames(strip: strip, time: 0, raiseOffset: raiseOffset)
+
+    // Column 0 (not active): y shifted down, height reduced
+    assertClose(Double(frames[0].frame.minY), Double(wa.minY) + raiseOffset, tolerance: 1, "col 0 y shifted down")
+    assertClose(Double(frames[0].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "col 0 height reduced")
+
+    // Column 1 (active): full height, original y
+    assertClose(Double(frames[1].frame.minY), Double(wa.minY), tolerance: 1, "active col y unchanged")
+    assertClose(Double(frames[1].frame.height), Double(wa.height), tolerance: 1, "active col full height")
+
+    // Column 2 (not active): y shifted down, height reduced
+    assertClose(Double(frames[2].frame.minY), Double(wa.minY) + raiseOffset, tolerance: 1, "col 2 y shifted down")
+    assertClose(Double(frames[2].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "col 2 height reduced")
+}
+
+section("raiseOffset = 0 — no change from normal layout")
+do {
+    let strip = makeLayoutStrip(widths: [720, 720], activeIndex: 0, viewOffset: 0)
+    let normalFrames = computeTargetFrames(strip: strip, time: 0)
+    let raiseFrames = computeTargetFrames(strip: strip, time: 0, raiseOffset: 0)
+    for i in 0..<normalFrames.count {
+        assertEq(normalFrames[i].frame, raiseFrames[i].frame, "frame \(i) unchanged with zero offset")
+    }
+}
+
+section("raiseOffset — single column (active) stays full height")
+do {
+    let strip = makeLayoutStrip(widths: [720], activeIndex: 0, viewOffset: -360)
+    let wa = strip.workingArea
+    let frames = computeTargetFrames(strip: strip, time: 0, raiseOffset: 30)
+    assertClose(Double(frames[0].frame.minY), Double(wa.minY), tolerance: 1, "single active col at ceiling")
+    assertClose(Double(frames[0].frame.height), Double(wa.height), tolerance: 1, "single active col full height")
+}
+
+section("raiseOffset — multi-tile column splits reduced height")
+do {
+    // 2-tile non-active column should split the reduced height evenly
+    let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let col0 = Column(tiles: [TileID(1), TileID(2)], width: .fixed(720))
+    let col1 = Column(tiles: [TileID(3)], width: .fixed(720))
+    let strip = Strip(columns: [col0, col1], columnData: [ColumnData(cachedWidth: 720), ColumnData(cachedWidth: 720)], activeColumnIndex: 1, viewOffset: .static(0), snapIndices: [0, 0], gap: 16, workingArea: wa)
+    let raiseOffset: Double = 20
+    // frames[0] and frames[1] are col0's two tiles (non-active), frames[2] is col1 (active)
+    let frames = computeTargetFrames(strip: strip, time: 0, raiseOffset: raiseOffset)
+    assertEq(frames.count, 3)
+
+    let reducedHeight = Double(wa.height) - raiseOffset
+    let expectedTileHeight = (reducedHeight - 16) / 2.0  // 2 tiles, 1 gap
+    assertClose(Double(frames[0].frame.minY), Double(wa.minY) + raiseOffset, tolerance: 1, "multi-tile col top tile y")
+    assertClose(Double(frames[0].frame.height), expectedTileHeight, tolerance: 1, "multi-tile col top tile height")
+    assertClose(Double(frames[1].frame.minY), Double(wa.minY) + raiseOffset + expectedTileHeight + 16, tolerance: 1, "multi-tile col bottom tile y")
+    assertClose(Double(frames[1].frame.height), expectedTileHeight, tolerance: 1, "multi-tile col bottom tile height")
+
+    // Active column (col1) — full height
+    assertClose(Double(frames[2].frame.minY), Double(wa.minY), tolerance: 1, "active col full y")
+    assertClose(Double(frames[2].frame.height), Double(wa.height), tolerance: 1, "active col full height")
+}
+
+section("raiseOffset — off-screen non-active column sliver inherits offset")
+do {
+    // 3 columns, only first ~2 visible; column 2 is off-screen and non-active
+    let strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 0, viewOffset: 0)
+    let wa = strip.workingArea
+    let raiseOffset: Double = 20
+    let frames = computeTargetFrames(strip: strip, time: 0, sliverWidth: 1, raiseOffset: raiseOffset)
+    // Column 2 should be off-screen
+    check(frames[2].isOffScreen, "col 2 should be off-screen")
+    // Its sliver frame height should be the reduced height
+    assertClose(Double(frames[2].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "off-screen sliver uses reduced height")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
