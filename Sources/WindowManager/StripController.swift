@@ -113,7 +113,8 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         let scrollSettled = strip.viewOffset.isSettled(at: time)
         let widthSettled = !strip.columnData.contains(where: { $0.widthAnimation != nil })
-        return scrollSettled && widthSettled && !focusIndicator.isAnimating
+        let raiseSettled = !strip.columnData.contains(where: { $0.raiseAnimation != nil })
+        return scrollSettled && widthSettled && raiseSettled && !focusIndicator.isAnimating
     }
 
     // MARK: - Window Registration
@@ -193,7 +194,7 @@ public final class StripController: @unchecked Sendable {
             // Pre-position the new window immediately before the full layout pass.
             // This eliminates the flicker where the window briefly appears at its
             // native/app-default position before snapping to the strip position.
-            let frames = computeTargetFrames(strip: strip, time: TimeUtil.now(), raiseOffset: raiseOffset)
+            let frames = computeTargetFrames(strip: strip, time: TimeUtil.now(), raiseHeight: raiseHeight)
             if let target = frames.first(where: { $0.tileID == window.tileID }) {
                 _ = window.setFrame(target.frame)
                 lastCommittedFrames[window.tileID] = target.frame
@@ -241,13 +242,16 @@ public final class StripController: @unchecked Sendable {
 
     public func focusLeft() {
         let time = TimeUtil.now()
+        let oldActive = strip.activeColumnIndex
         if animationEnabled {
             if let _ = strip.navigateLeft(at: time) {
+                startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
                 scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
             strip.navigateLeftInstant(at: time)
+            startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
             applyLayout()
         }
         userActiveTileID = strip.activeColumn?.activeTile
@@ -258,13 +262,16 @@ public final class StripController: @unchecked Sendable {
 
     public func focusRight() {
         let time = TimeUtil.now()
+        let oldActive = strip.activeColumnIndex
         if animationEnabled {
             if let _ = strip.navigateRight(at: time) {
+                startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
                 scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
             strip.navigateRightInstant(at: time)
+            startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
             applyLayout()
         }
         userActiveTileID = strip.activeColumn?.activeTile
@@ -277,14 +284,17 @@ public final class StripController: @unchecked Sendable {
 
     func focusLeftAnimated(velocity: Double) {
         let time = TimeUtil.now()
+        let oldActive = strip.activeColumnIndex
         if animationEnabled {
             let clampedVelocity = max(-5000, min(5000, velocity))
             if let _ = strip.navigateLeft(at: time, velocity: clampedVelocity) {
+                startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
                 scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
             strip.navigateLeftInstant(at: time)
+            startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
             applyLayout()
         }
         userActiveTileID = strip.activeColumn?.activeTile
@@ -294,14 +304,17 @@ public final class StripController: @unchecked Sendable {
 
     func focusRightAnimated(velocity: Double) {
         let time = TimeUtil.now()
+        let oldActive = strip.activeColumnIndex
         if animationEnabled {
             let clampedVelocity = max(-5000, min(5000, velocity))
             if let _ = strip.navigateRight(at: time, velocity: clampedVelocity) {
+                startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
                 scrollWidthSettled = false
                 frameLoop?.resume()
             }
         } else {
             strip.navigateRightInstant(at: time)
+            startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
             applyLayout()
         }
         userActiveTileID = strip.activeColumn?.activeTile
@@ -643,7 +656,9 @@ public final class StripController: @unchecked Sendable {
 
         switch mode {
         case .center:
+            let oldActive = strip.activeColumnIndex
             strip.activeColumnIndex = colIndex
+            startRaiseAnimations(oldColumn: oldActive, newColumn: colIndex, at: time)
             strip.snapIndices[colIndex] = strip.defaultSnapIndex
 
             let snapPoint = strip.snapPoints[strip.snapIndices[colIndex]]
@@ -656,11 +671,13 @@ public final class StripController: @unchecked Sendable {
             applyLayout()
 
         case .incrementalSnap:
+            let oldActive = strip.activeColumnIndex
             let result = strip.focusColumnIncremental(
                 colIndex: colIndex,
                 at: time,
                 animated: animationEnabled
             )
+            startRaiseAnimations(oldColumn: oldActive, newColumn: strip.activeColumnIndex, at: time)
             switch result {
             case .noChange:
                 return
@@ -688,18 +705,58 @@ public final class StripController: @unchecked Sendable {
 
     private var currentLayoutMode: LayoutMode { .normal }
 
-    private var raiseOffset: Double {
+    private var raiseHeight: Double {
         focusIndicator.style == .raise ? Double(focusIndicator.raiseHeight) : 0
+    }
+
+    /// Start raise animations when focus changes between columns.
+    /// Old active column: spring toward raiseHeight (fall to bottom).
+    /// New active column: spring toward 0 (rise to ceiling).
+    /// Resumes the frame loop so the springs get ticked.
+    private func startRaiseAnimations(oldColumn: Int, newColumn: Int, at time: Double) {
+        let rh = raiseHeight
+        guard rh > 0, oldColumn != newColumn else { return }
+
+        // Old column falls to bottom
+        if oldColumn >= 0, oldColumn < strip.columnData.count {
+            strip.columnData[oldColumn].cachedRaiseTarget = rh
+            if let existing = strip.columnData[oldColumn].raiseAnimation, !existing.isDone(at: time) {
+                strip.columnData[oldColumn].raiseAnimation = existing.retargeted(to: rh, at: time)
+            } else {
+                strip.columnData[oldColumn].raiseAnimation = SpringAnimation(from: 0, to: rh, startTime: time, params: widthSpringParams)
+            }
+        }
+
+        // New column rises to ceiling
+        if newColumn >= 0, newColumn < strip.columnData.count {
+            strip.columnData[newColumn].cachedRaiseTarget = 0
+            if let existing = strip.columnData[newColumn].raiseAnimation, !existing.isDone(at: time) {
+                strip.columnData[newColumn].raiseAnimation = existing.retargeted(to: 0, at: time)
+            } else {
+                strip.columnData[newColumn].raiseAnimation = SpringAnimation(from: rh, to: 0, startTime: time, params: widthSpringParams)
+            }
+        }
+
+        frameLoop?.resume()
     }
 
     /// Compute target frames and apply to real windows.
     /// This is the Phase 1 "instant" mode.
     public func applyLayout() {
+        // Sync raise targets for columns without in-flight animations.
+        // Handles startup, config reload, space restore, and new window insertion.
+        let rh = raiseHeight
+        if rh > 0 {
+            for i in 0..<strip.columnData.count where strip.columnData[i].raiseAnimation == nil {
+                strip.columnData[i].cachedRaiseTarget = (i == strip.activeColumnIndex) ? 0 : rh
+            }
+        }
+
         // Record timestamp so echo AX events can be suppressed
         let time = TimeUtil.now()
         lastLayoutTime = time
 
-        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode, raiseOffset: raiseOffset)
+        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode, raiseHeight: raiseHeight)
 
         // Hot-path logging removed — fires at 120Hz during animation
 
@@ -782,6 +839,7 @@ public final class StripController: @unchecked Sendable {
 
         // Settle any completed width animations (single pass: settle + check)
         let widthSettled = !strip.settleWidthAnimations(at: time)
+        let raiseSettled = !strip.settleRaiseAnimations(at: time)
         let scrollSettled = strip.viewOffset.isSettled(at: time)
 
         // Settle latch: once scroll+width settle, do one-shot work then hold until fully settled
@@ -798,12 +856,14 @@ public final class StripController: @unchecked Sendable {
                     gestureAnimating = false
                     gestureSettleTime = time
                     let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + finalOffset
+                    let oldActive = strip.activeColumnIndex
                     let newActive = columnUnderCursor(gestureOffset: finalOffset)
                     #if DEBUG
                     print("[Gesture] SETTLE oldActive=\(strip.activeColumnIndex) newActive=\(newActive) finalOffset=\(String(format: "%.1f", finalOffset)) adjustedOffset=\(String(format: "%.1f", viewPos - strip.columnX(at: newActive, time: time)))")
                     fflush(stdout)
                     #endif
                     strip.activeColumnIndex = newActive
+                    startRaiseAnimations(oldColumn: oldActive, newColumn: newActive, at: time)
                     let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
                     strip.viewOffset = .static(adjustedOffset)
                 } else {
@@ -817,18 +877,22 @@ public final class StripController: @unchecked Sendable {
                 // lastCommittedFrames, so applyLayout() will detect the change
                 // and dispatch the off-screen move.
                 applyLayout()
-            } else if focusIndicator.isAnimating {
-                // Scroll and width are done but indicator is still animating — keep ticking
-                let frames = computeTargetFrames(strip: strip, time: time, raiseOffset: raiseOffset)
-                updateFocusIndicator(frames: frames)
             }
-            return
+            if raiseSettled {
+                // Everything settled — only tick focus indicator if needed
+                if focusIndicator.isAnimating {
+                    let frames = computeTargetFrames(strip: strip, time: time, raiseHeight: raiseHeight)
+                    updateFocusIndicator(frames: frames)
+                }
+                return
+            }
+            // Raise still animating — fall through to main animation loop below
+        } else {
+            scrollWidthSettled = false
         }
 
-        scrollWidthSettled = false
-
         // Compute frames with animation evaluated at this timestamp
-        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode, raiseOffset: raiseOffset)
+        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode, raiseHeight: raiseHeight)
 
         // Dispatch position updates to per-app threads IN PARALLEL.
         // This prevents a slow Electron app from blocking a fast native app.
@@ -851,8 +915,8 @@ public final class StripController: @unchecked Sendable {
             case .visible, .nearBuffer:
                 let tileID = target.tileID
                 if let app = apps[window.pid] {
-                    if widthSettled {
-                        // Width done, only position changing — position-only is cheaper
+                    if widthSettled && raiseSettled {
+                        // Width and raise done, only horizontal position changing — position-only is cheaper
                         let position = target.frame.origin
                         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
                             let result = app.dispatchSetPosition(window, position: position)
@@ -1006,8 +1070,10 @@ public final class StripController: @unchecked Sendable {
             let bounds = strip.viewOffsetBounds(at: time)
             let clampedOffset = min(max(state.currentOffset, bounds.lowerBound), bounds.upperBound)
             let viewPos = strip.columnX(at: strip.activeColumnIndex, time: time) + clampedOffset
+            let oldActive = strip.activeColumnIndex
             let newActive = columnUnderCursor(gestureOffset: clampedOffset)
             strip.activeColumnIndex = newActive
+            startRaiseAnimations(oldColumn: oldActive, newColumn: newActive, at: time)
             let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
             strip.viewOffset = .static(adjustedOffset)
             clearCommittedFrames()
@@ -1160,7 +1226,7 @@ public final class StripController: @unchecked Sendable {
     /// Wrapper for WindowManager — shows the indicator when a managed app activates.
     public func showIndicator() {
         let time = TimeUtil.now()
-        let frames = computeTargetFrames(strip: strip, time: time, raiseOffset: raiseOffset)
+        let frames = computeTargetFrames(strip: strip, time: time, raiseHeight: raiseHeight)
         updateFocusIndicator(frames: frames)
     }
 
@@ -1192,6 +1258,7 @@ public final class StripController: @unchecked Sendable {
         // would evaluate incorrectly when restored later.
         for i in 0..<strip.columnData.count {
             strip.columnData[i].widthAnimation = nil
+            strip.columnData[i].raiseAnimation = nil
         }
 
         // Use confirmedUserActiveTileID to determine the correct active column.
@@ -1243,6 +1310,12 @@ public final class StripController: @unchecked Sendable {
             strip.columns = saved.columns
             strip.columnData = saved.columnData
             strip.activeColumnIndex = saved.activeColumnIndex
+            // Nil any stale raise animations from saved state; sync targets
+            let rh = raiseHeight
+            for i in 0..<strip.columnData.count {
+                strip.columnData[i].raiseAnimation = nil
+                strip.columnData[i].cachedRaiseTarget = (i == strip.activeColumnIndex) ? 0 : rh
+            }
             strip.viewOffset = saved.viewOffset
             // Restore snap indices with migration fallback
             if saved.snapIndices.count == saved.columns.count {
