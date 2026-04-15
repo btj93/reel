@@ -15,6 +15,7 @@ public final class FocusIndicator: @unchecked Sendable {
     public private(set) var color: NSColor = .controlAccentColor
     public private(set) var width: CGFloat = 3
     public private(set) var cornerRadius: CGFloat = 10
+    public private(set) var raiseHeight: CGFloat = 20
 
     // MARK: - Animation state
 
@@ -79,6 +80,7 @@ public final class FocusIndicator: @unchecked Sendable {
         color = NSColor.from(configString: config.color)
         width = CGFloat(config.width)
         cornerRadius = CGFloat(config.cornerRadius)
+        raiseHeight = CGFloat(config.raiseHeight)
 
         // Update overlay appearance if it exists
         if let view = overlayWindow?.contentView as? FocusIndicatorView {

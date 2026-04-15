@@ -157,6 +157,7 @@ public struct FocusIndicatorConfig: Sendable {
     public var color: String = "auto"    // "auto" or hex "#RRGGBB" / "#RGB"
     public var width: Double = 3
     public var cornerRadius: Double = 10
+    public var raiseHeight: Double = 20  // pixels unfocused windows shrink in raise mode
 
     public init() {}
 }
@@ -404,6 +405,7 @@ extension ReelConfig {
             if let v = readString(fi["color"]) { config.focusIndicator.color = v }
             if let v = readDouble(fi["width"]), v.isFinite { config.focusIndicator.width = max(0.5, v) }
             if let v = readDouble(fi["corner_radius"]), v.isFinite { config.focusIndicator.cornerRadius = max(0, v) }
+            if let v = readDouble(fi["raise_height"]), v.isFinite { config.focusIndicator.raiseHeight = max(0, v) }
         }
 
         return config

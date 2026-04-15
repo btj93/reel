@@ -52,6 +52,7 @@ snap = true  # Set to false to let gestures move freely without snapping to colu
 # color = "auto"        # "auto" (system accent) or hex "#RRGGBB" / "#RGB"
 # width = 3             # border width in points (ring mode only)
 # corner_radius = 10    # corner radius in points (ring mode only)
+# raise_height = 20     # pixels unfocused windows shrink (raise mode only)
 
 # Window rules: match by app bundle ID or title regex
 # [[rules]]
