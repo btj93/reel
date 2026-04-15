@@ -739,6 +739,7 @@ public struct Strip: Sendable {
     public mutating func toggleFullWidth() {
         guard !columns.isEmpty else { return }
         columnData[activeColumnIndex].widthAnimation = nil
+        columnData[activeColumnIndex].raiseAnimation = nil
         let isCurrentlyFull = columns[activeColumnIndex].isFullWidth
         columns[activeColumnIndex].isFullWidth = !isCurrentlyFull
         if !isCurrentlyFull {
@@ -755,6 +756,7 @@ public struct Strip: Sendable {
     public mutating func recalculateWidths() {
         for i in 0..<columns.count {
             columnData[i].widthAnimation = nil
+            columnData[i].raiseAnimation = nil
             if columns[i].isFullWidth {
                 columnData[i].cachedWidth = workingArea.width
             } else {
@@ -773,6 +775,21 @@ public struct Strip: Sendable {
             if let anim = columnData[i].widthAnimation {
                 if anim.isDone(at: time) {
                     columnData[i].widthAnimation = nil
+                } else {
+                    anyActive = true
+                }
+            }
+        }
+        return anyActive
+    }
+
+    /// Settle completed raise animations. Returns true if any are still in flight.
+    public mutating func settleRaiseAnimations(at time: Double) -> Bool {
+        var anyActive = false
+        for i in 0..<columnData.count {
+            if let anim = columnData[i].raiseAnimation {
+                if anim.isDone(at: time) {
+                    columnData[i].raiseAnimation = nil
                 } else {
                     anyActive = true
                 }

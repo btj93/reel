@@ -1972,6 +1972,30 @@ do {
     assertClose(lateVal, 20, tolerance: 1, "converged to cachedRaiseTarget")
 }
 
+// MARK: - Strip settleRaiseAnimations
+
+print("Strip settleRaiseAnimations Tests")
+
+section("settleRaiseAnimations — nils converged springs")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    var strip = makeLayoutStrip(widths: [720, 720], activeIndex: 0, viewOffset: 0)
+    strip.columnData[1].raiseAnimation = SpringAnimation(from: 0, to: 20, startTime: 0, params: params)
+    let anyActive = strip.settleRaiseAnimations(at: 5.0)
+    check(!anyActive, "all converged, none active")
+    check(strip.columnData[1].raiseAnimation == nil, "converged spring should be nil")
+}
+
+section("settleRaiseAnimations — keeps in-flight springs")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    var strip = makeLayoutStrip(widths: [720, 720], activeIndex: 0, viewOffset: 0)
+    strip.columnData[1].raiseAnimation = SpringAnimation(from: 0, to: 20, startTime: 10.0, params: params)
+    let anyActive = strip.settleRaiseAnimations(at: 10.001)
+    check(anyActive, "in-flight spring should still be active")
+    check(strip.columnData[1].raiseAnimation != nil, "in-flight spring should not be nil")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
