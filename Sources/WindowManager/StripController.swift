@@ -132,10 +132,8 @@ public final class StripController: @unchecked Sendable {
 
     /// Register a window and add it to the strip.
     public func addWindow(_ window: AXWindow, app: AXApp) {
-        #if DEBUG
-        print("[Strip] addWindow: tileID=\(window.tileID.rawValue) pid=\(window.pid) title=\(window.getTitle() ?? "?")")
+        print("[Strip] addWindow: tileID=\(window.tileID.rawValue) pid=\(window.pid) app=\(app.bundleIdentifier ?? "?") title=\(logTitle(window.getTitle()))")
         fflush(stdout)
-        #endif
         windowMap[window.tileID] = window
         apps[window.pid] = app
 
@@ -634,11 +632,9 @@ public final class StripController: @unchecked Sendable {
             }
         }
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
-        #if DEBUG
         let window = windowMap[tileID]
-        print("[Strip] scrollTo wid=\(window?.windowID ?? 0) tileID=\(tileID.rawValue) col=\(colIndex) mode=\(mode) title=\(window?.getTitle() ?? "?")")
+        print("[Strip] scrollTo wid=\(window?.windowID ?? 0) tileID=\(tileID.rawValue) col=\(colIndex) mode=\(mode) app=\(window.flatMap { apps[$0.pid]?.bundleIdentifier } ?? "?") title=\(logTitle(window?.getTitle()))")
         fflush(stdout)
-        #endif
 
         let time = TimeUtil.now()
         // Clear any width animation on the target — snap offsets use current width,
@@ -768,10 +764,8 @@ public final class StripController: @unchecked Sendable {
     public func focusActiveWindow() {
         guard let activeTile = strip.activeColumn?.activeTile,
               let window = windowMap[activeTile] else { return }
-        #if DEBUG
-        print("[Strip] focus wid=\(window.windowID) tileID=\(activeTile.rawValue) col=\(strip.activeColumnIndex) title=\(window.getTitle() ?? "?")")
+        print("[Strip] focus wid=\(window.windowID) tileID=\(activeTile.rawValue) col=\(strip.activeColumnIndex) app=\(apps[window.pid]?.bundleIdentifier ?? "?") title=\(logTitle(window.getTitle()))")
         fflush(stdout)
-        #endif
         window.focus()
     }
 

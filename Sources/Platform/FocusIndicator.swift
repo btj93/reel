@@ -325,10 +325,8 @@ extension NSColor {
         }
 
         guard hex.count == 6, let value = UInt64(hex, radix: 16) else {
-            #if DEBUG
             print("[FocusIndicator] Invalid color '\(configString)', falling back to accent color")
             fflush(stdout)
-            #endif
             return .controlAccentColor
         }
 

@@ -67,10 +67,8 @@ public final class GestureCapture: @unchecked Sendable {
             callback: scrollCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            #if DEBUG
             print("[GestureCapture] Failed to create CGEventTap")
             fflush(stdout)
-            #endif
             return false
         }
 
@@ -79,10 +77,8 @@ public final class GestureCapture: @unchecked Sendable {
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
-        #if DEBUG
         print("[GestureCapture] Started (modifier: fn)")
         fflush(stdout)
-        #endif
         return true
     }
 

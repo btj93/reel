@@ -304,10 +304,8 @@ public class StripSnapshotStore {
             try data.write(to: filePath, options: .atomic)
             isDirty = false
         } catch {
-            #if DEBUG
-                print("[SnapshotStore] Failed to persist: \(error)")
-                fflush(stdout)
-            #endif
+            print("[SnapshotStore] Failed to persist: \(error)")
+            fflush(stdout)
         }
     }
 
@@ -329,22 +327,16 @@ public class StripSnapshotStore {
             let data = try Data(contentsOf: filePath)
             let file = try JSONDecoder().decode(SnapshotFile.self, from: data)
             guard file.version == 2 else {
-                #if DEBUG
-                    print("[SnapshotStore] Unknown file version \(file.version), starting fresh")
-                    fflush(stdout)
-                #endif
+                print("[SnapshotStore] Unknown file version \(file.version), starting fresh")
+                fflush(stdout)
                 return
             }
             diskEntries = file.snapshots
-            #if DEBUG
-                print("[SnapshotStore] Loaded \(diskEntries.count) snapshot entries from disk")
-                fflush(stdout)
-            #endif
+            print("[SnapshotStore] Loaded \(diskEntries.count) snapshot entries from disk")
+            fflush(stdout)
         } catch {
-            #if DEBUG
-                print("[SnapshotStore] Failed to load (starting fresh): \(error)")
-                fflush(stdout)
-            #endif
+            print("[SnapshotStore] Failed to load (starting fresh): \(error)")
+            fflush(stdout)
         }
     }
 
@@ -394,15 +386,11 @@ public class StripSnapshotStore {
             persistToDisk()
             try? FileManager.default.removeItem(at: legacyFilePath)
 
-            #if DEBUG
-                print("[SnapshotStore] Migrated \(file.entries.count) legacy entries → \(diskEntries.count) snapshots")
-                fflush(stdout)
-            #endif
+            print("[SnapshotStore] Migrated \(file.entries.count) legacy entries → \(diskEntries.count) snapshots")
+            fflush(stdout)
         } catch {
-            #if DEBUG
-                print("[SnapshotStore] Legacy migration failed: \(error)")
-                fflush(stdout)
-            #endif
+            print("[SnapshotStore] Legacy migration failed: \(error)")
+            fflush(stdout)
         }
     }
 

@@ -97,10 +97,8 @@ public final class WindowTracker: @unchecked Sendable {
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            #if DEBUG
             print("[Tracker] Space changed — re-discovering windows")
             fflush(stdout)
-            #endif
             self?.onEvent?(.spaceChanged)
         })
 
@@ -108,10 +106,8 @@ public final class WindowTracker: @unchecked Sendable {
         for app in NSWorkspace.shared.runningApplications {
             guard app.activationPolicy == .regular else { continue }
             let wins = getAppWindows(pid: app.processIdentifier)
-            #if DEBUG
             print("[Tracker] app: \(app.localizedName ?? "?") pid=\(app.processIdentifier) bundleID=\(app.bundleIdentifier ?? "?") windows=\(wins.count)")
             fflush(stdout)
-            #endif
             registerApp(pid: app.processIdentifier, bundleID: app.bundleIdentifier)
         }
     }
@@ -200,10 +196,8 @@ public final class WindowTracker: @unchecked Sendable {
         let ruleResult = applyRules(props)
         let classification = ruleResult ?? classifyWindow(props)
 
-        #if DEBUG
-        print("[Tracker] registerWindow wid=\(wid) role='\(props.role ?? "nil")' subrole='\(props.subrole ?? "nil")' resizable=\(props.isResizable) closeBtn=\(props.hasCloseButton) layer=\(props.windowLayer) isMin=\(props.isMinimized) isFS=\(props.isFullscreen) → \(classification) title=\(props.title ?? "nil")")
+        print("[Tracker] registerWindow wid=\(wid) app=\(bundleID ?? "?") role='\(props.role ?? "nil")' subrole='\(props.subrole ?? "nil")' resizable=\(props.isResizable) closeBtn=\(props.hasCloseButton) layer=\(props.windowLayer) isMin=\(props.isMinimized) isFS=\(props.isFullscreen) → \(classification) title=\(logTitle(props.title))")
         fflush(stdout)
-        #endif
 
         switch classification {
         case .tile:

@@ -31,10 +31,8 @@ public final class SocketServer: @unchecked Sendable {
         // Create socket
         listenerFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard listenerFD >= 0 else {
-            #if DEBUG
             print("[IPC] Failed to create socket")
             fflush(stdout)
-            #endif
             return false
         }
 
@@ -56,10 +54,8 @@ public final class SocketServer: @unchecked Sendable {
         }
 
         guard bindResult == 0 else {
-            #if DEBUG
             print("[IPC] Failed to bind to \(socketPath): \(String(cString: strerror(errno)))")
             fflush(stdout)
-            #endif
             close(listenerFD)
             return false
         }
@@ -69,10 +65,8 @@ public final class SocketServer: @unchecked Sendable {
 
         // Listen
         guard listen(listenerFD, 5) == 0 else {
-            #if DEBUG
             print("[IPC] Failed to listen")
             fflush(stdout)
-            #endif
             close(listenerFD)
             return false
         }
@@ -92,10 +86,8 @@ public final class SocketServer: @unchecked Sendable {
         acceptSource = source
         isRunning = true
 
-        #if DEBUG
         print("[IPC] Listening on \(socketPath)")
         fflush(stdout)
-        #endif
         return true
     }
 
@@ -163,12 +155,10 @@ public final class SocketServer: @unchecked Sendable {
             responseStr.withCString { ptr in
                 let len = strlen(ptr)
                 let written = write(clientFD, ptr, len)
-                #if DEBUG
                 if written < 0 {
                     print("[IPC] Write failed: \(String(cString: strerror(errno)))")
                     fflush(stdout)
                 }
-                #endif
             }
         }
 

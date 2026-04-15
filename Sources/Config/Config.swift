@@ -199,10 +199,8 @@ extension ReelConfig {
         guard let url = resourceBundle.url(forResource: "config.default", withExtension: "toml"),
               let content = try? String(contentsOf: url, encoding: .utf8),
               let table = try? TOMLTable(string: content) else {
-            #if DEBUG
             print("[Config] Warning: could not load bundled config.default.toml, using hardcoded defaults")
             fflush(stdout)
-            #endif
             return ReelConfig()
         }
         return parse(table: table, base: ReelConfig())
@@ -276,10 +274,8 @@ extension ReelConfig {
                         case "middle": points.append(.middle)
                         case "right": points.append(.right)
                         default:
-                            #if DEBUG
                             print("[Config] Unknown snap point: \(str)")
                             fflush(stdout)
-                            #endif
                         }
                     }
                 }
@@ -291,10 +287,8 @@ extension ReelConfig {
 
             // Validation
             if config.snapPoints.isEmpty {
-                #if DEBUG
                 print("[Config] Warning: snap is empty, defaulting to [middle]")
                 fflush(stdout)
-                #endif
                 config.snapPoints = [.middle]
             }
             if let v = readBool(layout["animation_enabled"]) { config.animationEnabled = v }
@@ -311,10 +305,8 @@ extension ReelConfig {
                     if let v = readDouble(item), v > 0, v <= 1 {
                         presets.append(.proportion(v))
                     } else {
-                        #if DEBUG
                         print("[Config] Warning: skipping invalid width_preset value")
                         fflush(stdout)
-                        #endif
                     }
                 }
                 if !presets.isEmpty {
@@ -378,20 +370,16 @@ extension ReelConfig {
                         if (try? NSRegularExpression(pattern: pattern)) != nil {
                             rc.appIDRegex = pattern
                         } else {
-                            #if DEBUG
                             print("[Config] Warning: invalid app_id_regex '\(pattern)', ignoring")
                             fflush(stdout)
-                            #endif
                         }
                     }
                     if let pattern = readString(rule["title_regex"]) {
                         if (try? NSRegularExpression(pattern: pattern)) != nil {
                             rc.titleRegex = pattern
                         } else {
-                            #if DEBUG
                             print("[Config] Warning: invalid title_regex '\(pattern)', ignoring")
                             fflush(stdout)
-                            #endif
                         }
                     }
                     if let v = readBool(rule["floating"]) { rc.floating = v }
@@ -409,10 +397,8 @@ extension ReelConfig {
                 if let style = FocusIndicatorConfig.Style(rawValue: v) {
                     config.focusIndicator.style = style
                 } else {
-                    #if DEBUG
                     print("[Config] Unknown focus_indicator style: \(v)")
                     fflush(stdout)
-                    #endif
                 }
             }
             if let v = readString(fi["color"]) { config.focusIndicator.color = v }
@@ -440,18 +426,14 @@ extension ReelConfig {
 
         guard let url = resourceBundle.url(forResource: "config.default", withExtension: "toml"),
               let defaultConfig = try? String(contentsOf: url, encoding: .utf8) else {
-            #if DEBUG
             print("[Config] Error: could not load bundled config.default.toml")
             fflush(stdout)
-            #endif
             return
         }
 
         try? defaultConfig.write(toFile: configPath, atomically: true, encoding: .utf8)
-        #if DEBUG
         print("[Config] Created default config at \(configPath)")
         fflush(stdout)
-        #endif
     }
 }
 
@@ -474,10 +456,8 @@ public final class ConfigWatcher: @unchecked Sendable {
 
         fileDescriptor = open(path, O_EVTONLY)
         guard fileDescriptor >= 0 else {
-            #if DEBUG
             print("[Config] Cannot watch \(path) — file not found")
             fflush(stdout)
-            #endif
             return
         }
 
@@ -503,10 +483,8 @@ public final class ConfigWatcher: @unchecked Sendable {
 
         source.resume()
         self.source = source
-        #if DEBUG
         print("[Config] Watching \(path) for changes")
         fflush(stdout)
-        #endif
     }
 
     /// Stop watching.
@@ -518,16 +496,12 @@ public final class ConfigWatcher: @unchecked Sendable {
     private func reload() {
         let (config, error) = ReelConfig.load()
         if let error = error {
-            #if DEBUG
             print("[Config] Reload error: \(error)")
             fflush(stdout)
-            #endif
             return
         }
-        #if DEBUG
         print("[Config] Reloaded successfully")
         fflush(stdout)
-        #endif
         onConfigChanged?(config)
     }
 }

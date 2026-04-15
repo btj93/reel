@@ -1,9 +1,22 @@
 import AppKit
 import Config
 import Core
+import CryptoKit
 import Foundation
 import IPC
 import Platform
+
+/// Returns a privacy-safe window title for logging.
+/// DEBUG: raw title. Release: SHA-256 hash prefix (8 hex chars).
+func logTitle(_ title: String?) -> String {
+    guard let title = title else { return "?" }
+    #if DEBUG
+    return title
+    #else
+    let hash = SHA256.hash(data: Data(title.utf8))
+    return hash.prefix(4).map { String(format: "%02x", $0) }.joined()
+    #endif
+}
 
 /// Central coordinator for Reel.
 /// Connects WindowTracker (discovery) → StripController (layout) → Platform APIs.
@@ -85,10 +98,8 @@ public final class WindowManager: @unchecked Sendable {
         let (loadedConfig, configError) = ReelConfig.load()
         self.config = loadedConfig
         if let err = configError {
-            #if DEBUG
-                print("[WM] Config warning: \(err)")
-                fflush(stdout)
-            #endif
+            print("[WM] Config warning: \(err)")
+            fflush(stdout)
         }
 
         self.tracker = WindowTracker()
@@ -181,12 +192,10 @@ public final class WindowManager: @unchecked Sendable {
         }
         // Terminal path is read directly from config when spawning
 
-        #if DEBUG
-            print(
-                "[WM] Config applied (gap=\(config.gap), snap=\(config.snapPoints), gestureSnap=\(config.gestureSnap), animation=\(config.animationEnabled))"
-            )
-            fflush(stdout)
-        #endif
+        print(
+            "[WM] Config applied (gap=\(config.gap), snap=\(config.snapPoints), gestureSnap=\(config.gestureSnap), animation=\(config.animationEnabled))"
+        )
+        fflush(stdout)
     }
 
     // MARK: - Lifecycle
@@ -249,25 +258,19 @@ public final class WindowManager: @unchecked Sendable {
             fflush(stdout)
         #endif
         tracker.startObserving()
-        #if DEBUG
-            print("[WM] tracked \(tracker.windows.count) windows, \(tracker.apps.count) apps")
-            fflush(stdout)
-        #endif
+        print("[WM] tracked \(tracker.windows.count) windows, \(tracker.apps.count) apps")
+        fflush(stdout)
         for (_, sc) in stripControllers { sc.finishBatch() }
         startupOnScreenIDs = nil
-        #if DEBUG
-            print("[WM] batch finished, strip has \(stripController.strip.columns.count) cols")
-            fflush(stdout)
-        #endif
+        print("[WM] batch finished, strip has \(stripController.strip.columns.count) cols")
+        fflush(stdout)
 
         // No per-removal callback needed — snapshot model uses debounced strip capture
 
         hotkeyManager.registerFromConfig(config.keybindings)
         let hotkeyOk = hotkeyManager.start()
-        #if DEBUG
-            print("[WM] hotkeys: \(hotkeyOk)")
-            fflush(stdout)
-        #endif
+        print("[WM] hotkeys: \(hotkeyOk)")
+        fflush(stdout)
 
         // Phase 2: Frame loop for smooth animation — shared across all strips
         let fl = FrameLoop()
@@ -290,10 +293,8 @@ public final class WindowManager: @unchecked Sendable {
             sc.focusIndicator.reloadConfig(config.focusIndicator)
             sc.focusIndicator.springParams = config.widthSpringParams
         }
-        #if DEBUG
-            print("[WM] animation: enabled (\(stripControllers.count) displays)")
-            fflush(stdout)
-        #endif
+        print("[WM] animation: enabled (\(stripControllers.count) displays)")
+        fflush(stdout)
 
         // Phase 2: Gesture capture for trackpad scrolling
         let gestureCapture = GestureCapture()
@@ -444,14 +445,10 @@ public final class WindowManager: @unchecked Sendable {
 
         let titleBarOk = titleBar.start()
         self.titleBarInteraction = titleBar
-        #if DEBUG
-            print("[WM] title bar interaction: \(titleBarOk)")
-            fflush(stdout)
-        #endif
-        #if DEBUG
-            print("[WM] gesture capture: \(gestureOk)")
-            fflush(stdout)
-        #endif
+        print("[WM] title bar interaction: \(titleBarOk)")
+        fflush(stdout)
+        print("[WM] gesture capture: \(gestureOk)")
+        fflush(stdout)
 
         // Start periodic state persistence (every 5 seconds)
         stateWriteTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) {
@@ -460,10 +457,8 @@ public final class WindowManager: @unchecked Sendable {
             self?.snapshotStore?.persistToDisk()
         }
 
-        #if DEBUG
-            print("[WM] Config loaded from \(ReelConfig.configPath)")
-            fflush(stdout)
-        #endif
+        print("[WM] Config loaded from \(ReelConfig.configPath)")
+        fflush(stdout)
 
         // IPC socket server
         let server = SocketServer()
@@ -494,10 +489,8 @@ public final class WindowManager: @unchecked Sendable {
         }
         let ipcOk = server.start()
         self.ipcServer = server
-        #if DEBUG
-            print("[WM] IPC server: \(ipcOk)")
-            fflush(stdout)
-        #endif
+        print("[WM] IPC server: \(ipcOk)")
+        fflush(stdout)
 
         // Periodic window health check — detect closed windows that AX observer missed.
         // kAXUIElementDestroyedNotification is unreliable for some apps.
@@ -518,14 +511,12 @@ public final class WindowManager: @unchecked Sendable {
             }
         }
 
-        #if DEBUG
-            print("[Reel] Window manager started")
-            print("[Reel] Tracked windows: \(tracker.windows.count)")
-            print("[Reel] Tracked apps: \(tracker.apps.count)")
-            print("[Reel] Strip columns: \(stripController.strip.columns.count)")
-            print("[Reel] Strip working area: \(stripController.strip.workingArea)")
-            fflush(stdout)
-        #endif
+        print("[Reel] Window manager started")
+        print("[Reel] Tracked windows: \(tracker.windows.count)")
+        print("[Reel] Tracked apps: \(tracker.apps.count)")
+        print("[Reel] Strip columns: \(stripController.strip.columns.count)")
+        print("[Reel] Strip working area: \(stripController.strip.workingArea)")
+        fflush(stdout)
 
         // Retry layout after a short delay — some AX observers may not have
         // delivered their initial window list yet at startup
@@ -541,12 +532,10 @@ public final class WindowManager: @unchecked Sendable {
                     self.stripController.clearCommittedFrames()
                     self.stripController.applyLayout()
                 }
-                #if DEBUG
-                    print(
-                        "[Reel] Startup retry @\(delay)s: \(self.stripController.strip.columns.count) cols"
-                    )
-                    fflush(stdout)
-                #endif
+                print(
+                    "[Reel] Startup retry @\(delay)s: \(self.stripController.strip.columns.count) cols"
+                )
+                fflush(stdout)
             }
         }
     }
@@ -562,10 +551,8 @@ public final class WindowManager: @unchecked Sendable {
 
     /// Stop and restore all windows.
     public func shutdown() {
-        #if DEBUG
-            print("[WM] Shutting down — restoring windows")
-            fflush(stdout)
-        #endif
+        print("[WM] Shutting down — restoring windows")
+        fflush(stdout)
         isPaused = true
         stateWriteTimer?.invalidate()
         healthCheckTimer?.invalidate()
@@ -602,10 +589,8 @@ public final class WindowManager: @unchecked Sendable {
     public func togglePause() {
         isPaused = !isPaused
         if isPaused {
-            #if DEBUG
-                print("[WM] Paused")
-                fflush(stdout)
-            #endif
+            print("[WM] Paused")
+            fflush(stdout)
             hotkeyManager.suspended = true
             if let tap = hotkeyManager.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: false)
@@ -613,10 +598,8 @@ public final class WindowManager: @unchecked Sendable {
             for (_, sc) in stripControllers { sc.focusIndicator.hide() }
             restoreAllWindows()
         } else {
-            #if DEBUG
-                print("[WM] Resumed")
-                fflush(stdout)
-            #endif
+            print("[WM] Resumed")
+            fflush(stdout)
             hotkeyManager.suspended = false
             if let tap = hotkeyManager.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
@@ -636,10 +619,8 @@ public final class WindowManager: @unchecked Sendable {
     public func reloadConfig() {
         let (newConfig, error) = ReelConfig.load()
         if let err = error {
-            #if DEBUG
-                print("[WM] Config reload error: \(err)")
-                fflush(stdout)
-            #endif
+            print("[WM] Config reload error: \(err)")
+            fflush(stdout)
             return
         }
 
@@ -659,12 +640,10 @@ public final class WindowManager: @unchecked Sendable {
         stripController.clearCommittedFrames()
         stripController.applyLayout()
 
-        #if DEBUG
-            print(
-                "[WM] Config reloaded (gestureSnap=\(config.gestureSnap), snap=\(config.snapPoints))"
-            )
-            fflush(stdout)
-        #endif
+        print(
+            "[WM] Config reloaded (gestureSnap=\(config.gestureSnap), snap=\(config.snapPoints))"
+        )
+        fflush(stdout)
     }
 
     // MARK: - Event Handling
@@ -766,10 +745,8 @@ public final class WindowManager: @unchecked Sendable {
                 if let app = tracker.apps[window.pid] {
                     let (displayID, sc) = stripControllerEntryForWindow(window)
                     let saved = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
-                    #if DEBUG
-                        print("[WM] windowAdded wid=\(window.windowID) pid=\(window.pid) restored=\(saved != nil)")
-                        fflush(stdout)
-                    #endif
+                    print("[WM] windowAdded wid=\(window.windowID) pid=\(window.pid) app=\(app.bundleIdentifier ?? "?") restored=\(saved != nil)")
+                    fflush(stdout)
                     sc.addWindow(window, app: app, restoredPosition: saved)
                     scheduleSnapshotSave(sc: sc)
                 }
@@ -780,10 +757,8 @@ public final class WindowManager: @unchecked Sendable {
             }
 
         case .windowRemoved(let windowID, let tileID):
-            #if DEBUG
-                print("[WM] windowRemoved tileID=\(tileID.rawValue)")
-                fflush(stdout)
-            #endif
+            print("[WM] windowRemoved tileID=\(tileID.rawValue)")
+            fflush(stdout)
             userToggledFloats.remove(windowID)
             // Remove from whichever strip has it
             for (_, sc) in stripControllers {
@@ -855,25 +830,19 @@ public final class WindowManager: @unchecked Sendable {
             }
 
         case .windowMinimized(let windowID):
-            #if DEBUG
-                print("[WM] windowMinimized wid=\(windowID)")
-                fflush(stdout)
-            #endif
+            print("[WM] windowMinimized wid=\(windowID)")
+            fflush(stdout)
             stripController.removeWindow(tileID: TileID(windowID))
             scheduleSnapshotSave()
 
         case .windowDeminimized(let windowID):
-            #if DEBUG
-                print("[WM] windowDeminimized wid=\(windowID)")
-                fflush(stdout)
-            #endif
+            print("[WM] windowDeminimized wid=\(windowID)")
+            fflush(stdout)
             if userToggledFloats.contains(windowID) {
                 // Was floating before minimize — restore as floating, macOS handles the frame
                 tracker.markFloating(windowID)
-                #if DEBUG
-                    print("[WM] windowDeminimized wid=\(windowID) restored as floating")
-                    fflush(stdout)
-                #endif
+                print("[WM] windowDeminimized wid=\(windowID) restored as floating")
+                fflush(stdout)
             } else if let window = tracker.windows[windowID],
                 let app = tracker.apps[window.pid]
             {
@@ -911,12 +880,10 @@ public final class WindowManager: @unchecked Sendable {
         let onScreenWindows = getAllWindowInfo()
         let onScreenIDs = Set(
             onScreenWindows.filter { $0.layer == 0 && $0.isOnScreen }.map(\.windowID))
-        #if DEBUG
-            let leavingTile = stripController.userActiveTileID ?? stripController.strip.activeColumn?.activeTile
-            let leavingWindow = leavingTile.flatMap { stripController.windowMap[$0] }
-            print("[WM] spaceChanged leaving wid=\(leavingWindow?.windowID ?? 0) title=\(leavingWindow?.getTitle() ?? "none") onScreenIDs=\(onScreenIDs)")
-            fflush(stdout)
-        #endif
+        let leavingTile = stripController.userActiveTileID ?? stripController.strip.activeColumn?.activeTile
+        let leavingWindow = leavingTile.flatMap { stripController.windowMap[$0] }
+        print("[WM] spaceChanged leaving wid=\(leavingWindow?.windowID ?? 0) app=\(leavingWindow.flatMap { tracker.apps[$0.pid]?.bundleIdentifier } ?? "?") title=\(logTitle(leavingWindow?.getTitle())) onScreenIDs=\(onScreenIDs)")
+        fflush(stdout)
 
         // Save snapshot for the leaving space before switching
         saveSnapshotImmediate(sc: stripController)
@@ -956,22 +923,16 @@ public final class WindowManager: @unchecked Sendable {
                         let saved = resolveSnapshotPosition(
                             for: window, on: targetSC, displayID: displayID)
                         targetSC.addWindow(window, app: app, restoredPosition: saved)
-                        #if DEBUG
-                            print("[WM] space: adopted new wid=\(window.windowID) pid=\(window.pid)")
-                            fflush(stdout)
-                        #endif
+                        print("[WM] space: adopted new wid=\(window.windowID) pid=\(window.pid)")
+                        fflush(stdout)
                     }
                 }
 
-                #if DEBUG
-                    print("[WM] space restored + \(newWindowIDs.count) new windows")
-                    fflush(stdout)
-                #endif
+                print("[WM] space restored + \(newWindowIDs.count) new windows")
+                fflush(stdout)
             } else {
-                #if DEBUG
-                    print("[WM] space restored: \(stripController.strip.columns.count) cols")
-                    fflush(stdout)
-                #endif
+                print("[WM] space restored: \(stripController.strip.columns.count) cols")
+                fflush(stdout)
             }
 
             // Decide focus target: prefer a recent app activation (dock click that
@@ -1004,9 +965,7 @@ public final class WindowManager: @unchecked Sendable {
                 stripController.applyLayout()
             }
 
-            #if DEBUG
-                fflush(stdout)
-            #endif
+            fflush(stdout)
             return
         }
 
@@ -1041,12 +1000,10 @@ public final class WindowManager: @unchecked Sendable {
         // space change within the 500ms TTL.
         recentAppActivation = nil
 
-        #if DEBUG
-            print(
-                "[WM] space changed: new strip with \(stripController.strip.columns.count) cols"
-            )
-            fflush(stdout)
-        #endif
+        print(
+            "[WM] space changed: new strip with \(stripController.strip.columns.count) cols"
+        )
+        fflush(stdout)
     }
 
     public func performAction(_ action: HotkeyAction) {
@@ -1092,18 +1049,14 @@ public final class WindowManager: @unchecked Sendable {
                 let restored = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
                 stripController.unfloatWindow(window, app: app, restoredPosition: restored)
                 scheduleSnapshotSave()
-                #if DEBUG
-                    print("[WM] Window \(focusedWID) is now tiled (unfloated)")
-                    fflush(stdout)
-                #endif
+                print("[WM] Window \(focusedWID) is now tiled (unfloated)")
+                fflush(stdout)
             } else if let window = stripController.toggleFloating() {
                 saveSnapshotImmediate(sc: stripController)
                 tracker.markFloating(window.windowID)
                 userToggledFloats.insert(window.windowID)
-                #if DEBUG
-                    print("[WM] Window \(window.tileID.rawValue) is now floating")
-                    fflush(stdout)
-                #endif
+                print("[WM] Window \(window.tileID.rawValue) is now floating")
+                fflush(stdout)
             }
         case .closeWindow:
             stripController.closeActiveWindow()
@@ -1225,10 +1178,8 @@ public final class WindowManager: @unchecked Sendable {
                         presetIndex: col.presetIndex, isFullWidth: col.isFullWidth, date: now)
                 }
 
-                #if DEBUG
-                    print("[HealthCheck] Removing dead window wid=\(window.windowID) tileID=\(tileID.rawValue)")
-                    fflush(stdout)
-                #endif
+                print("[HealthCheck] Removing dead window wid=\(window.windowID) tileID=\(tileID.rawValue)")
+                fflush(stdout)
                 stripController.removeWindow(tileID: tileID)
                 scheduleSnapshotSave()
                 tracker.untrackWindow(window.windowID)
@@ -1321,11 +1272,8 @@ public final class WindowManager: @unchecked Sendable {
                 // Fix B: Track adoption time for grace period
                 recentlyAdoptedWindows[window.windowID] = Date()
                 adopted = true
-                #if DEBUG
-                    print(
-                        "[HealthCheck] Adopted unmanaged window wid=\(window.windowID) pid=\(pid)")
-                    fflush(stdout)
-                #endif
+                print("[HealthCheck] Adopted unmanaged window wid=\(window.windowID) pid=\(pid)")
+                fflush(stdout)
             }
         }
 
@@ -1363,10 +1311,8 @@ public final class WindowManager: @unchecked Sendable {
             return
         }
 
-        #if DEBUG
-            print("[WM] Found crash recovery state — checking for orphaned windows")
-            fflush(stdout)
-        #endif
+        print("[WM] Found crash recovery state — checking for orphaned windows")
+        fflush(stdout)
 
         // Check if any windows are in weird positions and restore them
         // (This is a best-effort recovery — exact matching is hard)

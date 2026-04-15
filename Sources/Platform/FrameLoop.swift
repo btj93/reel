@@ -30,10 +30,8 @@ public final class FrameLoop: @unchecked Sendable {
     public func start() {
         guard displayLink == nil else { return }
         guard let screen = NSScreen.main else {
-            #if DEBUG
             print("[FrameLoop] No main screen — cannot create display link")
             fflush(stdout)
-            #endif
             return
         }
 
@@ -55,10 +53,8 @@ public final class FrameLoop: @unchecked Sendable {
         link.add(to: .main, forMode: .common)
         displayLink = link
 
-        #if DEBUG
         print("[FrameLoop] Created (paused, waiting for animation)")
         fflush(stdout)
-        #endif
     }
 
     /// Remove the display link entirely.

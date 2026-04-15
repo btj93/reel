@@ -12,10 +12,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         redirectLogsToFile()
-        #if DEBUG
         print("[Reel] applicationDidFinishLaunching")
         fflush(stdout)
-        #endif
 
         // Hide from Dock (works without Info.plist LSUIElement, so we can run
         // the bare debug binary without a .app bundle)
@@ -29,10 +27,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Check Accessibility permission
         let trusted = AXIsProcessTrusted()
-        #if DEBUG
         print("[Reel] AXIsProcessTrusted = \(trusted)")
         fflush(stdout)
-        #endif
 
         if !trusted {
             promptForAccessibility()
@@ -136,19 +132,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         wm.start()
         windowManager = wm
         applyLoginItem(enabled: wm.config.startAtLogin)
-        #if DEBUG
         print("[Reel] Ready")
         fflush(stdout)
-        #endif
     }
 
     private func applyLoginItem(enabled: Bool) {
         guard Bundle.main.bundleIdentifier != nil else {
             if enabled {
-                #if DEBUG
                 print("[Reel] start_at_login requires running as .app bundle — ignoring")
                 fflush(stdout)
-                #endif
             }
             return
         }
@@ -156,22 +148,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             if enabled && service.status != .enabled {
                 try service.register()
-                #if DEBUG
                 print("[Reel] Registered as login item")
                 fflush(stdout)
-                #endif
             } else if !enabled && service.status == .enabled {
                 try service.unregister()
-                #if DEBUG
                 print("[Reel] Unregistered login item")
                 fflush(stdout)
-                #endif
             }
         } catch {
-            #if DEBUG
             print("[Reel] Login item error: \(error)")
             fflush(stdout)
-            #endif
         }
     }
 
@@ -231,10 +217,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func clearPositions() {
         windowManager?.snapshotStore?.clearAll()
         windowManager?.snapshotStore?.persistToDisk()
-        #if DEBUG
         print("[Reel] Cleared all saved positions")
         fflush(stdout)
-        #endif
     }
 
     @objc private func quit() {
