@@ -47,7 +47,6 @@ public func computeTargetFrames(
     sliverWidth: Double = 1,
     nearBufferColumns: Int = 2,
     mode: LayoutMode = .normal,
-    raiseOffset: Double = 0,
     raiseHeight: Double = 0
 ) -> [TargetFrame] {
     guard !strip.columns.isEmpty else { return [] }
@@ -110,20 +109,11 @@ public func computeTargetFrames(
         let isVisible = zone == .visible
         let isPartiallyVisible = (screenX + colWidth > wa.minX) && (screenX < wa.maxX)
 
-        // Raise offset: per-column Y offset (animated or static)
+        // Raise offset: per-column Y offset read from raiseAnimation/cachedRaiseTarget
         let tileWA: CGRect
         if raiseHeight > 0 {
-            // Animated path: read per-column spring or static cachedRaiseTarget
             let colOffset = strip.columnData[i].currentRaiseOffset(at: time)
             tileWA = CGRect(x: wa.minX, y: wa.minY + colOffset, width: wa.width, height: wa.height - raiseHeight)
-        } else if raiseOffset > 0 {
-            // Static path (non-animated fallback)
-            let reducedHeight = wa.height - raiseOffset
-            if i == strip.activeColumnIndex {
-                tileWA = CGRect(x: wa.minX, y: wa.minY, width: wa.width, height: reducedHeight)
-            } else {
-                tileWA = CGRect(x: wa.minX, y: wa.minY + raiseOffset, width: wa.width, height: reducedHeight)
-            }
         } else {
             tileWA = wa
         }

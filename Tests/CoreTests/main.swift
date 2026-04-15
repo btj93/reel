@@ -1858,62 +1858,72 @@ do {
 
 print("Raise Focus Indicator Offset Tests")
 
-section("raiseOffset — active hangs from ceiling, others sit at bottom, all same reduced height")
-do {
-    let strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 1, viewOffset: 0)
-    let wa = strip.workingArea  // y=25, height=875
-    let raiseOffset: Double = 20
-    let frames = computeTargetFrames(strip: strip, time: 0, raiseOffset: raiseOffset)
-
-    // Column 0 (not active): y shifted down, reduced height
-    assertClose(Double(frames[0].frame.minY), Double(wa.minY) + raiseOffset, tolerance: 1, "col 0 y shifted down")
-    assertClose(Double(frames[0].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "col 0 reduced height")
-
-    // Column 1 (active): hangs from ceiling, same reduced height
-    assertClose(Double(frames[1].frame.minY), Double(wa.minY), tolerance: 1, "active col at ceiling")
-    assertClose(Double(frames[1].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "active col reduced height")
-
-    // Column 2 (not active): y shifted down, reduced height
-    assertClose(Double(frames[2].frame.minY), Double(wa.minY) + raiseOffset, tolerance: 1, "col 2 y shifted down")
-    assertClose(Double(frames[2].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "col 2 reduced height")
-}
-
-section("raiseOffset = 0 — no change from normal layout")
-do {
-    let strip = makeLayoutStrip(widths: [720, 720], activeIndex: 0, viewOffset: 0)
-    let normalFrames = computeTargetFrames(strip: strip, time: 0)
-    let raiseFrames = computeTargetFrames(strip: strip, time: 0, raiseOffset: 0)
-    for i in 0..<normalFrames.count {
-        assertEq(normalFrames[i].frame, raiseFrames[i].frame, "frame \(i) unchanged with zero offset")
+// Helper: set cachedRaiseTarget on every column based on active index (matches applyLayout's sync).
+func syncRaiseTargets(_ strip: inout Strip, raiseHeight rh: Double) {
+    for i in 0..<strip.columnData.count where strip.columnData[i].raiseAnimation == nil {
+        strip.columnData[i].cachedRaiseTarget = (i == strip.activeColumnIndex) ? 0 : rh
     }
 }
 
-section("raiseOffset — single column (active) hangs from ceiling, reduced height")
+section("raiseHeight — active hangs from ceiling, others sit at bottom, all same reduced height")
 do {
-    let strip = makeLayoutStrip(widths: [720], activeIndex: 0, viewOffset: -360)
+    var strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 1, viewOffset: 0)
+    let wa = strip.workingArea  // y=25, height=875
+    let rh: Double = 20
+    syncRaiseTargets(&strip, raiseHeight: rh)
+    let frames = computeTargetFrames(strip: strip, time: 0, raiseHeight: rh)
+
+    // Column 0 (not active): y shifted down, reduced height
+    assertClose(Double(frames[0].frame.minY), Double(wa.minY) + rh, tolerance: 1, "col 0 y shifted down")
+    assertClose(Double(frames[0].frame.height), Double(wa.height) - rh, tolerance: 1, "col 0 reduced height")
+
+    // Column 1 (active): hangs from ceiling, same reduced height
+    assertClose(Double(frames[1].frame.minY), Double(wa.minY), tolerance: 1, "active col at ceiling")
+    assertClose(Double(frames[1].frame.height), Double(wa.height) - rh, tolerance: 1, "active col reduced height")
+
+    // Column 2 (not active): y shifted down, reduced height
+    assertClose(Double(frames[2].frame.minY), Double(wa.minY) + rh, tolerance: 1, "col 2 y shifted down")
+    assertClose(Double(frames[2].frame.height), Double(wa.height) - rh, tolerance: 1, "col 2 reduced height")
+}
+
+section("raiseHeight = 0 — no change from normal layout")
+do {
+    let strip = makeLayoutStrip(widths: [720, 720], activeIndex: 0, viewOffset: 0)
+    let normalFrames = computeTargetFrames(strip: strip, time: 0)
+    let raiseFrames = computeTargetFrames(strip: strip, time: 0, raiseHeight: 0)
+    for i in 0..<normalFrames.count {
+        assertEq(normalFrames[i].frame, raiseFrames[i].frame, "frame \(i) unchanged with zero raiseHeight")
+    }
+}
+
+section("raiseHeight — single column (active) hangs from ceiling, reduced height")
+do {
+    var strip = makeLayoutStrip(widths: [720], activeIndex: 0, viewOffset: -360)
     let wa = strip.workingArea
-    let frames = computeTargetFrames(strip: strip, time: 0, raiseOffset: 30)
+    syncRaiseTargets(&strip, raiseHeight: 30)
+    let frames = computeTargetFrames(strip: strip, time: 0, raiseHeight: 30)
     assertClose(Double(frames[0].frame.minY), Double(wa.minY), tolerance: 1, "single active col at ceiling")
     assertClose(Double(frames[0].frame.height), Double(wa.height) - 30, tolerance: 1, "single active col reduced height")
 }
 
-section("raiseOffset — multi-tile column splits reduced height")
+section("raiseHeight — multi-tile column splits reduced height")
 do {
     // 2-tile non-active column should split the reduced height evenly
     let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
     let col0 = Column(tiles: [TileID(1), TileID(2)], width: .fixed(720))
     let col1 = Column(tiles: [TileID(3)], width: .fixed(720))
-    let strip = Strip(columns: [col0, col1], columnData: [ColumnData(cachedWidth: 720), ColumnData(cachedWidth: 720)], activeColumnIndex: 1, viewOffset: .static(0), snapIndices: [0, 0], gap: 16, workingArea: wa)
-    let raiseOffset: Double = 20
+    var strip = Strip(columns: [col0, col1], columnData: [ColumnData(cachedWidth: 720), ColumnData(cachedWidth: 720)], activeColumnIndex: 1, viewOffset: .static(0), snapIndices: [0, 0], gap: 16, workingArea: wa)
+    let rh: Double = 20
+    syncRaiseTargets(&strip, raiseHeight: rh)
     // frames[0] and frames[1] are col0's two tiles (non-active), frames[2] is col1 (active)
-    let frames = computeTargetFrames(strip: strip, time: 0, raiseOffset: raiseOffset)
+    let frames = computeTargetFrames(strip: strip, time: 0, raiseHeight: rh)
     assertEq(frames.count, 3)
 
-    let reducedHeight = Double(wa.height) - raiseOffset
+    let reducedHeight = Double(wa.height) - rh
     let expectedTileHeight = (reducedHeight - 16) / 2.0  // 2 tiles, 1 gap
-    assertClose(Double(frames[0].frame.minY), Double(wa.minY) + raiseOffset, tolerance: 1, "multi-tile col top tile y")
+    assertClose(Double(frames[0].frame.minY), Double(wa.minY) + rh, tolerance: 1, "multi-tile col top tile y")
     assertClose(Double(frames[0].frame.height), expectedTileHeight, tolerance: 1, "multi-tile col top tile height")
-    assertClose(Double(frames[1].frame.minY), Double(wa.minY) + raiseOffset + expectedTileHeight + 16, tolerance: 1, "multi-tile col bottom tile y")
+    assertClose(Double(frames[1].frame.minY), Double(wa.minY) + rh + expectedTileHeight + 16, tolerance: 1, "multi-tile col bottom tile y")
     assertClose(Double(frames[1].frame.height), expectedTileHeight, tolerance: 1, "multi-tile col bottom tile height")
 
     // Active column (col1) — hangs from ceiling, reduced height
@@ -1921,17 +1931,18 @@ do {
     assertClose(Double(frames[2].frame.height), reducedHeight, tolerance: 1, "active col reduced height")
 }
 
-section("raiseOffset — off-screen non-active column sliver inherits offset")
+section("raiseHeight — off-screen non-active column sliver inherits offset")
 do {
     // 3 columns, only first ~2 visible; column 2 is off-screen and non-active
-    let strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 0, viewOffset: 0)
+    var strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 0, viewOffset: 0)
     let wa = strip.workingArea
-    let raiseOffset: Double = 20
-    let frames = computeTargetFrames(strip: strip, time: 0, sliverWidth: 1, raiseOffset: raiseOffset)
+    let rh: Double = 20
+    syncRaiseTargets(&strip, raiseHeight: rh)
+    let frames = computeTargetFrames(strip: strip, time: 0, sliverWidth: 1, raiseHeight: rh)
     // Column 2 should be off-screen
     check(frames[2].isOffScreen, "col 2 should be off-screen")
     // Its sliver frame height should be the reduced height
-    assertClose(Double(frames[2].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "off-screen sliver uses reduced height")
+    assertClose(Double(frames[2].frame.height), Double(wa.height) - rh, tolerance: 1, "off-screen sliver uses reduced height")
 }
 
 // MARK: - ColumnData raiseAnimation
@@ -2030,25 +2041,14 @@ do {
     assertClose(Double(frames[1].frame.height), Double(wa.height) - 20, tolerance: 1, "col1 reduced height")
 }
 
-section("raiseHeight with no animations — same as static raiseOffset")
+section("raiseHeight — default cachedRaiseTarget (0) places all columns at ceiling")
 do {
-    let strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 1, viewOffset: 0)
-    // With no raise animations, cachedRaiseTarget is 0 for all columns (default).
-    // The animated path (raiseHeight > 0) will read currentRaiseOffset = 0 for all,
-    // producing y = wa.minY for all. The static path (raiseOffset > 0) produces
-    // y = wa.minY for active and y = wa.minY + 20 for non-active.
-    // So these are NOT the same WITHOUT cachedRaiseTarget being set appropriately.
-    // The sync of cachedRaiseTarget happens in StripController.applyLayout (Task 4).
-    // For this test, manually set the targets to simulate post-sync state.
-    var strip2 = strip
-    for i in 0..<strip2.columnData.count {
-        strip2.columnData[i].cachedRaiseTarget = (i == strip2.activeColumnIndex) ? 0 : 20
-    }
-    let staticFrames = computeTargetFrames(strip: strip, time: 0, raiseOffset: 20)
-    let animFrames = computeTargetFrames(strip: strip2, time: 0, raiseHeight: 20)
-    for i in 0..<staticFrames.count {
-        assertClose(Double(staticFrames[i].frame.minY), Double(animFrames[i].frame.minY), tolerance: 1, "frame \(i) y matches")
-        assertClose(Double(staticFrames[i].frame.height), Double(animFrames[i].frame.height), tolerance: 1, "frame \(i) height matches")
+    // Before applyLayout() sync, all columns have cachedRaiseTarget = 0 (default).
+    // Verifies that computeTargetFrames doesn't assume activeColumnIndex — it reads per-column state.
+    let strip = makeLayoutStrip(widths: [720, 720], activeIndex: 0, viewOffset: 0)
+    let frames = computeTargetFrames(strip: strip, time: 0, raiseHeight: 20)
+    for i in 0..<frames.count {
+        assertClose(Double(frames[i].frame.minY), Double(strip.workingArea.minY), tolerance: 1, "frame \(i) default at ceiling")
     }
 }
 

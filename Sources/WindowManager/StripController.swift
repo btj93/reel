@@ -712,6 +712,8 @@ public final class StripController: @unchecked Sendable {
     /// Start raise animations when focus changes between columns.
     /// Old active column: spring toward raiseHeight (fall to bottom).
     /// New active column: spring toward 0 (rise to ceiling).
+    /// Reads the live offset via currentRaiseOffset so interrupted animations
+    /// or intermediate positions animate smoothly without pops.
     /// Resumes the frame loop so the springs get ticked.
     private func startRaiseAnimations(oldColumn: Int, newColumn: Int, at time: Double) {
         let rh = raiseHeight
@@ -719,22 +721,24 @@ public final class StripController: @unchecked Sendable {
 
         // Old column falls to bottom
         if oldColumn >= 0, oldColumn < strip.columnData.count {
-            strip.columnData[oldColumn].cachedRaiseTarget = rh
             if let existing = strip.columnData[oldColumn].raiseAnimation, !existing.isDone(at: time) {
                 strip.columnData[oldColumn].raiseAnimation = existing.retargeted(to: rh, at: time)
             } else {
-                strip.columnData[oldColumn].raiseAnimation = SpringAnimation(from: 0, to: rh, startTime: time, params: widthSpringParams)
+                let fromOld = strip.columnData[oldColumn].currentRaiseOffset(at: time)
+                strip.columnData[oldColumn].raiseAnimation = SpringAnimation(from: fromOld, to: rh, startTime: time, params: widthSpringParams)
             }
+            strip.columnData[oldColumn].cachedRaiseTarget = rh
         }
 
         // New column rises to ceiling
         if newColumn >= 0, newColumn < strip.columnData.count {
-            strip.columnData[newColumn].cachedRaiseTarget = 0
             if let existing = strip.columnData[newColumn].raiseAnimation, !existing.isDone(at: time) {
                 strip.columnData[newColumn].raiseAnimation = existing.retargeted(to: 0, at: time)
             } else {
-                strip.columnData[newColumn].raiseAnimation = SpringAnimation(from: rh, to: 0, startTime: time, params: widthSpringParams)
+                let fromNew = strip.columnData[newColumn].currentRaiseOffset(at: time)
+                strip.columnData[newColumn].raiseAnimation = SpringAnimation(from: fromNew, to: 0, startTime: time, params: widthSpringParams)
             }
+            strip.columnData[newColumn].cachedRaiseTarget = 0
         }
 
         frameLoop?.resume()
