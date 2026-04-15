@@ -1,6 +1,12 @@
-# Reel
+<p align="center"><img src="assets/banner.png" alt="Reel — scrollable tiling window manager for macOS"></p>
 
-A scrollable tiling window manager for macOS, inspired by [niri](https://github.com/niri-wm/niri).
+<p align="center">
+  <a href="https://github.com/btj93/reel/releases/latest"><img src="https://img.shields.io/github/v/release/btj93/reel?style=flat-square&color=00E5FF" alt="Latest Release"></a>
+  <img src="https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple" alt="macOS 14+">
+  <img src="https://img.shields.io/badge/Swift-5.10%2B-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 5.10+">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/btj93/reel?style=flat-square" alt="License"></a>
+  <a href="https://github.com/btj93/tap"><img src="https://img.shields.io/badge/homebrew-btj93%2Ftap-FBB040?style=flat-square&logo=homebrew&logoColor=white" alt="Homebrew"></a>
+</p>
 
 Instead of cramming every window into the visible screen, Reel places them on an **infinite horizontal strip**. The focused window and its neighbors stay visible; everything else is parked off-screen. Scroll left and right to navigate — like a film reel.
 
@@ -8,7 +14,39 @@ Keyboard, trackpad, and mouse are all first-class citizens. Hotkeys for fast nav
 
 No SIP disable required. Pure Swift + Accessibility API.
 
-<!-- TODO: add demo gif -->
+## Demo
+
+<!-- TODO: Record and add demo GIFs. Suggested recordings below. -->
+
+### Strip Scrolling
+
+<!-- Keyboard scrolling through 4-5 windows, showing spring animation and velocity compounding on rapid keypresses. -->
+
+<p align="center"><em>🎬 GIF: Keyboard scrolling through windows with spring physics</em></p>
+
+### Trackpad Gestures
+
+<!-- fn + trackpad horizontal swipe to scroll, showing fluid gesture tracking and snap-to-column on release. -->
+
+<p align="center"><em>🎬 GIF: Trackpad swipe scrolling with snap-to-column</em></p>
+
+### Drag to Reorder
+
+<!-- fn + drag a window title bar to reorder columns, showing the overlay with screenshot thumbnails. -->
+
+<p align="center"><em>🎬 GIF: Drag-to-reorder with overlay preview</em></p>
+
+### Width Cycling & Float Toggle
+
+<!-- Alt-R to cycle column widths (33% → 50% → 67%), then Alt-Space to float/unfloat a window. -->
+
+<p align="center"><em>🎬 GIF: Cycling column widths and toggling float mode</em></p>
+
+### Focus Indicator Styles
+
+<!-- Side-by-side or sequential comparison of ring, raise, and flash focus indicator styles. -->
+
+<p align="center"><em>🎬 GIF: Ring, raise, and flash focus indicators</em></p>
 
 ## Features
 
@@ -239,7 +277,7 @@ Reel (app) ──→ WindowManager ──→ Platform ──→ Core
 | **Core** | Pure layout logic. `Strip` model, spring animation solver, `computeTargetFrames`. Foundation + CoreGraphics only — fully unit-testable, no AppKit. |
 | **Platform** | macOS API wrappers: Accessibility (per-app background threads), CGEventTap hotkeys, CADisplayLink frame loop, display management, focus indicator, gesture capture. |
 | **WindowManager** | Orchestration. One `StripController` per display. Window tracking, space switching, position memory. |
-| **Config** | TOML config via TOMLKit. File watching with auto-reload. |
+| **Config** | TOML config via TOMLKit. Reload via menu bar button. |
 | **IPC** | Unix socket server + CLI client. |
 
 ## Logs
@@ -254,6 +292,53 @@ swift run RunTests             # run test suite (no Xcode needed)
 make run-debug                 # kill existing, bundle, run with stderr
 make run                       # kill existing, bundle, open .app
 ```
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Windows not tiling | Grant Accessibility permission in System Settings > Privacy & Security > Accessibility, then relaunch Reel. |
+| Hotkeys not working | Another app may have claimed the same key combo. Check for conflicts or rebind in `~/.config/reel/config.toml`. |
+| Permission re-prompted on every launch | You're running the `.app` bundle during development. Use `.build/debug/Reel` instead — AX permission persists across rebuilds. |
+| Windows stuck off-screen | Run `reel-msg recover` to move all managed windows back on-screen. |
+| Special characters when pressing hotkeys | `Alt` key combos produce characters like `˙` (Alt-H). Rebind to `hyper-` (Ctrl+Opt+Cmd+Shift) in config to avoid this. |
+
+## Uninstall
+
+### Homebrew
+
+```bash
+brew uninstall --cask reel
+```
+
+### Manual
+
+```bash
+rm -rf /Applications/Reel.app
+rm -f /usr/local/bin/reel-msg
+rm -rf ~/.config/reel                # optional: remove config
+```
+
+## Alternatives
+
+Reel takes a different approach from other macOS tiling window managers:
+
+| | Reel | [yabai](https://github.com/koekeishiya/yabai) | [AeroSpace](https://github.com/nikitabobko/AeroSpace) | [Amethyst](https://github.com/ianyh/Amethyst) |
+|---|---|---|---|---|
+| Layout model | Infinite horizontal strip | BSP / stacking / float | i3-like tree | Fixed layouts (tall, wide, etc.) |
+| SIP disable | No | Yes (for some features) | No | No |
+| Scrolling | Spring physics, trackpad + keyboard | N/A | N/A | N/A |
+| Config | TOML | Shell + skhd | TOML | GUI + TOML |
+
+## Contributing
+
+Contributions are welcome. Before submitting a PR:
+
+```bash
+swift run RunTests   # ensure tests pass
+```
+
+The test suite is a standalone executable (`Tests/CoreTests/main.swift`), not XCTest — no Xcode required.
 
 ## License
 
