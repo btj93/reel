@@ -2009,9 +2009,9 @@ do {
 
 // ============================================================
 
-// MARK: - Animated raiseOffset in computeTargetFrames
+// MARK: - Animated raiseHeight in computeTargetFrames
 
-print("Animated raiseOffset in computeTargetFrames Tests")
+print("Animated raiseHeight in computeTargetFrames Tests")
 
 section("raiseHeight with per-column animation — mid-animation Y offset")
 do {
