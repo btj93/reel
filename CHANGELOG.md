@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.3.0](https://github.com/btj93/reel/compare/v0.2.5...v0.3.0) (2026-04-15)
+
+
+### Features
+
+* **config:** add raise_height to focus indicator config ([b118674](https://github.com/btj93/reel/commit/b11867482ff93e6c81902901a4ddcaa99837ba03))
+* **core:** add raiseAnimation and cachedRaiseTarget to ColumnData ([be291cc](https://github.com/btj93/reel/commit/be291ccef2355215f4bcff41d6662de2da15ead9))
+* **core:** add raiseHeight param for animated per-column Y offset ([01bb5cf](https://github.com/btj93/reel/commit/01bb5cf9fdaea2e8ba1c5e5f0a998c306f21a322))
+* **core:** add raiseOffset to computeTargetFrames ([7c90da8](https://github.com/btj93/reel/commit/7c90da86c4c87e39f6994ed4f8d636c9245b0a15))
+* **core:** add settleRaiseAnimations to Strip ([fb232d1](https://github.com/btj93/reel/commit/fb232d1c9db5449098fbef3ccd967293e379ebf2))
+* enhance logging ([571ad15](https://github.com/btj93/reel/commit/571ad157adba1c22ad4b63fcd21d227dc35d4be3))
+* new icon ([b9a37ff](https://github.com/btj93/reel/commit/b9a37ffa3f83f738d0375b2be7e058665a737d51))
+* start at login ([84fcff6](https://github.com/btj93/reel/commit/84fcff67b746f79d2891b796400bb20467499d0f))
+* **wm:** animate raise offset on focus change ([3378215](https://github.com/btj93/reel/commit/3378215fad54ac6626271319ad1af65db2d8a37f))
+* **wm:** wire raiseOffset through all computeTargetFrames call sites ([c077a1e](https://github.com/btj93/reel/commit/c077a1e08ad7bc3e769470797613646bd27897a6))
+
+
+### Bug Fixes
+
+* window height for raise ([e1b59e0](https://github.com/btj93/reel/commit/e1b59e0319312ea9157ab2f503c6f4bbac8ef517))
+
 ## [0.2.5](https://github.com/btj93/reel/compare/v0.2.4...v0.2.5) (2026-04-15)
 
 
