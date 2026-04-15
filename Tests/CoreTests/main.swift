@@ -1858,24 +1858,24 @@ do {
 
 print("Raise Focus Indicator Offset Tests")
 
-section("raiseOffset — active column full height, others shorter")
+section("raiseOffset — active hangs from ceiling, others sit at bottom, all same reduced height")
 do {
     let strip = makeLayoutStrip(widths: [720, 720, 720], activeIndex: 1, viewOffset: 0)
     let wa = strip.workingArea  // y=25, height=875
     let raiseOffset: Double = 20
     let frames = computeTargetFrames(strip: strip, time: 0, raiseOffset: raiseOffset)
 
-    // Column 0 (not active): y shifted down, height reduced
+    // Column 0 (not active): y shifted down, reduced height
     assertClose(Double(frames[0].frame.minY), Double(wa.minY) + raiseOffset, tolerance: 1, "col 0 y shifted down")
-    assertClose(Double(frames[0].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "col 0 height reduced")
+    assertClose(Double(frames[0].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "col 0 reduced height")
 
-    // Column 1 (active): full height, original y
-    assertClose(Double(frames[1].frame.minY), Double(wa.minY), tolerance: 1, "active col y unchanged")
-    assertClose(Double(frames[1].frame.height), Double(wa.height), tolerance: 1, "active col full height")
+    // Column 1 (active): hangs from ceiling, same reduced height
+    assertClose(Double(frames[1].frame.minY), Double(wa.minY), tolerance: 1, "active col at ceiling")
+    assertClose(Double(frames[1].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "active col reduced height")
 
-    // Column 2 (not active): y shifted down, height reduced
+    // Column 2 (not active): y shifted down, reduced height
     assertClose(Double(frames[2].frame.minY), Double(wa.minY) + raiseOffset, tolerance: 1, "col 2 y shifted down")
-    assertClose(Double(frames[2].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "col 2 height reduced")
+    assertClose(Double(frames[2].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "col 2 reduced height")
 }
 
 section("raiseOffset = 0 — no change from normal layout")
@@ -1888,13 +1888,13 @@ do {
     }
 }
 
-section("raiseOffset — single column (active) stays full height")
+section("raiseOffset — single column (active) hangs from ceiling, reduced height")
 do {
     let strip = makeLayoutStrip(widths: [720], activeIndex: 0, viewOffset: -360)
     let wa = strip.workingArea
     let frames = computeTargetFrames(strip: strip, time: 0, raiseOffset: 30)
     assertClose(Double(frames[0].frame.minY), Double(wa.minY), tolerance: 1, "single active col at ceiling")
-    assertClose(Double(frames[0].frame.height), Double(wa.height), tolerance: 1, "single active col full height")
+    assertClose(Double(frames[0].frame.height), Double(wa.height) - 30, tolerance: 1, "single active col reduced height")
 }
 
 section("raiseOffset — multi-tile column splits reduced height")
@@ -1916,9 +1916,9 @@ do {
     assertClose(Double(frames[1].frame.minY), Double(wa.minY) + raiseOffset + expectedTileHeight + 16, tolerance: 1, "multi-tile col bottom tile y")
     assertClose(Double(frames[1].frame.height), expectedTileHeight, tolerance: 1, "multi-tile col bottom tile height")
 
-    // Active column (col1) — full height
-    assertClose(Double(frames[2].frame.minY), Double(wa.minY), tolerance: 1, "active col full y")
-    assertClose(Double(frames[2].frame.height), Double(wa.height), tolerance: 1, "active col full height")
+    // Active column (col1) — hangs from ceiling, reduced height
+    assertClose(Double(frames[2].frame.minY), Double(wa.minY), tolerance: 1, "active col at ceiling")
+    assertClose(Double(frames[2].frame.height), reducedHeight, tolerance: 1, "active col reduced height")
 }
 
 section("raiseOffset — off-screen non-active column sliver inherits offset")

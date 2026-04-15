@@ -38,6 +38,8 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 - `ViewOffset`: scroll state machine — `.static(Double)` / `.animation(SpringAnimation)` / `.gesture(GestureState)`. Everything evaluates via `viewOffset.current(at: time)`.
 - `computeTargetFrames(strip:, time:)`: the core pure function. Takes Strip + timestamp, returns `[TargetFrame]` with screen positions, visibility, and off-screen handling. Already animation-aware.
 - `SpringAnimation`: analytical damped harmonic oscillator (3 regimes). `retargeted(to:at:)` preserves velocity for rapid keypress compounding.
+- `SwipeTracker`: weighted-sample velocity tracker (macOS-style). Used for trackpad gesture momentum.
+- `SnapPoint`: `.left` / `.middle` / `.right` — configurable per-column snap alignment targets. `snapIndices` (parallel to columns) tracks the current snap milestone per column for incremental scroll.
 
 **Platform** — macOS API wrappers.
 - `AXApp`: **one Thread + CFRunLoop per app** for AX observers. Prevents hung apps from blocking main thread.
@@ -46,11 +48,15 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 - `DisplayManager`: converts NSScreen (AppKit bottom-left coords) to CG (top-left coords) via `primaryScreenHeight - visibleFrame.maxY`.
 - `HotkeyManager`: CGEventTap + key string parser (`"hyper-h"` → modifiers + keyCode).
 - `FocusIndicator`: visual highlight for active window (ring/raise/flash styles).
+- `GestureCapture`: CGEventTap for trackpad scroll gestures (separate from HotkeyManager). Modifier-gated (default: fn). Suppresses macOS momentum — we handle our own via `SwipeTracker`.
+- `TitleBarInteraction`: fn+click/drag state machine (idle→armed→dragging/menu). Corner inset (`titleBarCornerInsetPx`) preserves macOS native resize at window corners.
 
 **WindowManager** — Orchestration, main thread.
 - `WindowManager`: holds `stripControllers: [CGDirectDisplayID: StripController]` — one per monitor. `stripController` (computed) returns the active display's strip.
 - `StripController`: two modes — `applyLayout()` (instant) and `handleFrameTick(time:)` (animated). `animationEnabled` toggles between them.
 - `WindowTracker`: AX observers + NSWorkspace notifications. Periodic 1s health check catches missed `kAXUIElementDestroyedNotification`.
+- `StripSnapshotStore` (in `PositionMemory.swift`): replaces the old position memory. Stores ordered strip snapshots keyed by `(displayID, spaceFingerprint)`. Live snapshots use exact keys; disk-loaded entries use fuzzy Jaccard matching (>0.5) on fingerprints.
+- `ReorderOverlayController` + `ReorderOverlayWindow`: drag-to-reorder UI. Background screenshot capture → overlay shows column thumbnails → cursor tracking computes insertion index → ghost-settle animation on drop. `isReady` flag + buffered cursor positions handle the race between async capture and early cursor events.
 
 **Config** — `~/.config/reel/config.toml` via TOMLKit. Reload via menu bar button.
 
@@ -73,6 +79,12 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 **Rubber-band bounce**: at strip edges, creates underdamped spring (ratio=0.6) with kick velocity that overshoots then bounces back.
 
 **Private API**: One private API is used (no SIP required): `_AXUIElementGetWindow` (AXUIElement→CGWindowID mapping). Validated stable across macOS 10.12–15 by AeroSpace/Amethyst.
+
+**Visibility zones**: `computeTargetFrames` tags each tile with a `VisibilityZone` (.visible / .nearBuffer / .far). Visible tiles update every frame; near-buffer at low priority; far tiles only on settle. This keeps AX call volume proportional to what the user can see.
+
+**Gesture momentum**: `SwipeTracker` uses weighted-sample velocity (macOS `NSScrollView` weights: 0.15/0.65/0.20) to compute flick velocity at lift-off. StripController then converts to a retargeted spring animation. `gestureSnap` snaps to the nearest column boundary on release.
+
+**Logging**: `logTitle()` in WindowManager uses raw window titles in DEBUG, SHA-256 hash prefix (8 hex) in release — keeps logs useful without leaking window content.
 
 **Threading**: AX calls are dispatched to per-app background threads via `AXApp`. Layout computation and `computeTargetFrames` run on main thread during frame ticks.
 

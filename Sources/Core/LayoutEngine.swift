@@ -109,10 +109,15 @@ public func computeTargetFrames(
         let isVisible = zone == .visible
         let isPartiallyVisible = (screenX + colWidth > wa.minX) && (screenX < wa.maxX)
 
-        // Raise offset: non-active columns get a shorter working area anchored to bottom
+        // Raise offset: all columns get reduced height; active hangs from ceiling, others sit at bottom
         let tileWA: CGRect
-        if raiseOffset > 0 && i != strip.activeColumnIndex {
-            tileWA = CGRect(x: wa.minX, y: wa.minY + raiseOffset, width: wa.width, height: wa.height - raiseOffset)
+        if raiseOffset > 0 {
+            let reducedHeight = wa.height - raiseOffset
+            if i == strip.activeColumnIndex {
+                tileWA = CGRect(x: wa.minX, y: wa.minY, width: wa.width, height: reducedHeight)
+            } else {
+                tileWA = CGRect(x: wa.minX, y: wa.minY + raiseOffset, width: wa.width, height: reducedHeight)
+            }
         } else {
             tileWA = wa
         }
