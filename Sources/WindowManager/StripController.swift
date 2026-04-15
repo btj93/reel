@@ -193,7 +193,7 @@ public final class StripController: @unchecked Sendable {
             // Pre-position the new window immediately before the full layout pass.
             // This eliminates the flicker where the window briefly appears at its
             // native/app-default position before snapping to the strip position.
-            let frames = computeTargetFrames(strip: strip, time: TimeUtil.now())
+            let frames = computeTargetFrames(strip: strip, time: TimeUtil.now(), raiseOffset: raiseOffset)
             if let target = frames.first(where: { $0.tileID == window.tileID }) {
                 _ = window.setFrame(target.frame)
                 lastCommittedFrames[window.tileID] = target.frame
@@ -688,6 +688,10 @@ public final class StripController: @unchecked Sendable {
 
     private var currentLayoutMode: LayoutMode { .normal }
 
+    private var raiseOffset: Double {
+        focusIndicator.style == .raise ? Double(focusIndicator.raiseHeight) : 0
+    }
+
     /// Compute target frames and apply to real windows.
     /// This is the Phase 1 "instant" mode.
     public func applyLayout() {
@@ -695,7 +699,7 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         lastLayoutTime = time
 
-        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode)
+        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode, raiseOffset: raiseOffset)
 
         // Hot-path logging removed — fires at 120Hz during animation
 
@@ -815,7 +819,7 @@ public final class StripController: @unchecked Sendable {
                 applyLayout()
             } else if focusIndicator.isAnimating {
                 // Scroll and width are done but indicator is still animating — keep ticking
-                let frames = computeTargetFrames(strip: strip, time: time)
+                let frames = computeTargetFrames(strip: strip, time: time, raiseOffset: raiseOffset)
                 updateFocusIndicator(frames: frames)
             }
             return
@@ -824,7 +828,7 @@ public final class StripController: @unchecked Sendable {
         scrollWidthSettled = false
 
         // Compute frames with animation evaluated at this timestamp
-        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode)
+        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode, raiseOffset: raiseOffset)
 
         // Dispatch position updates to per-app threads IN PARALLEL.
         // This prevents a slow Electron app from blocking a fast native app.
@@ -1156,7 +1160,7 @@ public final class StripController: @unchecked Sendable {
     /// Wrapper for WindowManager — shows the indicator when a managed app activates.
     public func showIndicator() {
         let time = TimeUtil.now()
-        let frames = computeTargetFrames(strip: strip, time: time)
+        let frames = computeTargetFrames(strip: strip, time: time, raiseOffset: raiseOffset)
         updateFocusIndicator(frames: frames)
     }
 
