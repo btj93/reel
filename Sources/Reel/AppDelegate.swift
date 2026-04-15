@@ -83,7 +83,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         } else {
             let isPaused = windowManager?.isPaused ?? false
-            menu.addItem(NSMenuItem(title: "Reel v0.2.4", action: nil, keyEquivalent: "")) // x-release-please-version
+            menu.addItem(NSMenuItem(title: "Reel v0.2.5", action: nil, keyEquivalent: "")) // x-release-please-version
             menu.addItem(NSMenuItem.separator())
 
             // Keybinding actions
