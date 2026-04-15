@@ -117,6 +117,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(pauseItem)
             menu.addItem(NSMenuItem(title: "Reload Config", action: #selector(reloadConfig), keyEquivalent: "r"))
             menu.addItem(NSMenuItem(title: "Open Config", action: #selector(openConfig), keyEquivalent: ","))
+
+            let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+            loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+            menu.addItem(loginItem)
+
             menu.addItem(NSMenuItem.separator())
             menu.addItem(NSMenuItem(title: "Recover Windows", action: #selector(recoverWindows), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Clear Saved Positions", action: #selector(clearPositions), keyEquivalent: ""))
@@ -168,6 +173,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             fflush(stdout)
             #endif
         }
+    }
+
+    @objc private func toggleLoginItem() {
+        let newState = SMAppService.mainApp.status != .enabled
+        applyLoginItem(enabled: newState)
+        setupMenuBar()
     }
 
     @objc private func openAccessibilitySettings() {
