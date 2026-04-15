@@ -1934,6 +1934,44 @@ do {
     assertClose(Double(frames[2].frame.height), Double(wa.height) - raiseOffset, tolerance: 1, "off-screen sliver uses reduced height")
 }
 
+// MARK: - ColumnData raiseAnimation
+
+print("ColumnData raiseAnimation Tests")
+
+section("currentRaiseOffset — no animation returns cachedRaiseTarget")
+do {
+    var cd = ColumnData(cachedWidth: 720)
+    // Default cachedRaiseTarget is 0
+    assertClose(cd.currentRaiseOffset(at: 0), 0, tolerance: 0.1, "default target 0")
+    // Set target to 20 (non-active column)
+    cd.cachedRaiseTarget = 20
+    assertClose(cd.currentRaiseOffset(at: 0), 20, tolerance: 0.1, "target 20")
+}
+
+section("currentRaiseOffset — mid-animation returns interpolated value")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    // Animate from 0 (ceiling) to 20 (bottom) — column losing focus
+    let anim = SpringAnimation(from: 0, to: 20, startTime: 0, params: params)
+    var cd = ColumnData(cachedWidth: 720, raiseAnimation: anim)
+    cd.cachedRaiseTarget = 20
+    // At time 0.001: should be near the start value (0)
+    let earlyVal = cd.currentRaiseOffset(at: 0.001)
+    check(earlyVal < 10, "early in animation should be closer to 0, got \(earlyVal)")
+    check(earlyVal > -1, "should not be negative")
+}
+
+section("currentRaiseOffset — done animation returns cachedRaiseTarget")
+do {
+    let params = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+    let anim = SpringAnimation(from: 0, to: 20, startTime: 0, params: params)
+    var cd = ColumnData(cachedWidth: 720, raiseAnimation: anim)
+    cd.cachedRaiseTarget = 20
+    // At time 5s: spring is long converged
+    let lateVal = cd.currentRaiseOffset(at: 5.0)
+    assertClose(lateVal, 20, tolerance: 1, "converged to cachedRaiseTarget")
+}
+
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

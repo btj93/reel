@@ -46,6 +46,13 @@ public struct ColumnData: Sendable {
     /// Non-nil when the width is animating (e.g., during resize).
     public var widthAnimation: SpringAnimation?
 
+    /// Non-nil when the raise Y-offset is animating (focus change in raise mode).
+    public var raiseAnimation: SpringAnimation?
+
+    /// Target raise offset: 0 for active column (ceiling), raiseHeight for non-active (bottom).
+    /// Set when starting a raise animation; read on convergence.
+    public var cachedRaiseTarget: Double = 0
+
     /// Current effective width at a given time (reads animation if active).
     public func currentWidth(at time: Double) -> Double {
         if let anim = widthAnimation {
@@ -55,8 +62,19 @@ public struct ColumnData: Sendable {
         return cachedWidth
     }
 
-    public init(cachedWidth: Double, widthAnimation: SpringAnimation? = nil) {
+    /// Current raise Y-offset at a given time.
+    /// Returns the animated offset if a spring is in flight, otherwise cachedRaiseTarget.
+    public func currentRaiseOffset(at time: Double) -> Double {
+        if let anim = raiseAnimation {
+            let (value, done) = anim.evaluateWithStatus(at: time)
+            return done ? cachedRaiseTarget : value
+        }
+        return cachedRaiseTarget
+    }
+
+    public init(cachedWidth: Double, widthAnimation: SpringAnimation? = nil, raiseAnimation: SpringAnimation? = nil) {
         self.cachedWidth = cachedWidth
         self.widthAnimation = widthAnimation
+        self.raiseAnimation = raiseAnimation
     }
 }
