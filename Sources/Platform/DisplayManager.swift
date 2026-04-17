@@ -69,10 +69,25 @@ public final class DisplayManager: @unchecked Sendable {
 
     /// Refresh the display list from NSScreen.
     public func refresh() {
-        // Primary screen height is needed for AppKit→CG coordinate conversion
-        if let primary = NSScreen.screens.first {
-            primaryScreenHeight = primary.frame.height
+        // Primary screen height anchors AppKit→CG coordinate conversion.
+        // Use CGMainDisplayID(), not screens[0], which is not guaranteed to be primary.
+        // Preserve the last valid value if the lookup chain returns nil (transient
+        // during hot-plug reconfigure): a 0 height would silently corrupt every
+        // subsequent Y conversion.
+        let mainID = CGMainDisplayID()
+        let primary: NSScreen? = NSScreen.screens.first(where: {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == mainID
+        }) ?? NSScreen.main ?? NSScreen.screens.first
+
+        if let h = primary?.frame.height {
+            primaryScreenHeight = h
         }
+        #if DEBUG
+        if primary == nil {
+            print("[DisplayManager] refresh(): no primary screen resolved; keeping primaryScreenHeight=\(primaryScreenHeight)")
+            fflush(stdout)
+        }
+        #endif
         var newDisplays: [CGDirectDisplayID: DisplayInfo] = [:]
 
         for screen in NSScreen.screens {
