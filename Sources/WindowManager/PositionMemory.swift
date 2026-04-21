@@ -5,11 +5,12 @@ import Foundation
 // MARK: - Snapshot Key
 
 public struct SnapshotKey: Hashable, Codable {
-    public let displayID: UInt32
+    /// Sorted-ascending member display IDs of the group this snapshot belongs to.
+    public let groupID: [UInt32]
     public let spaceFingerprint: Set<UInt32>
 
-    public init(displayID: UInt32, spaceFingerprint: Set<UInt32>) {
-        self.displayID = displayID
+    public init(groupID: [UInt32], spaceFingerprint: Set<UInt32>) {
+        self.groupID = groupID.sorted()
         self.spaceFingerprint = spaceFingerprint
     }
 }
@@ -51,14 +52,27 @@ public struct RecentRemoval {
 // MARK: - Disk Format
 
 struct SnapshotFile: Codable {
-    let version: Int  // 2
+    let version: Int  // 3
     var snapshots: [SnapshotFileEntry]
 }
 
 struct SnapshotFileEntry: Codable {
-    let displayID: UInt32
+    /// Sorted-ascending member display IDs.
+    let groupID: [UInt32]
     let spaceSignature: [String]  // sorted bundleIDs — stable across restarts
     let snapshot: StripSnapshot   // slots with windowID nil'd out
+}
+
+/// V2 on-disk shape, kept only for migration in `loadNewFormat`.
+private struct SnapshotFileV2: Codable {
+    let version: Int
+    var snapshots: [SnapshotFileEntryV2]
+}
+
+private struct SnapshotFileEntryV2: Codable {
+    let displayID: UInt32
+    let spaceSignature: [String]
+    let snapshot: StripSnapshot
 }
 
 // MARK: - Legacy Disk Format (for migration)
@@ -123,15 +137,15 @@ public class StripSnapshotStore {
             return snap
         }
         // Try fuzzy match
-        return snapshotFuzzy(displayID: key.displayID, fingerprint: key.spaceFingerprint)
+        return snapshotFuzzy(groupID: key.groupID, fingerprint: key.spaceFingerprint)
     }
 
     /// Fuzzy lookup: Jaccard >0.5 on live fingerprints, then scan diskEntries by spaceSignature.
-    private func snapshotFuzzy(displayID: UInt32, fingerprint: Set<UInt32>) -> StripSnapshot? {
+    private func snapshotFuzzy(groupID: [UInt32], fingerprint: Set<UInt32>) -> StripSnapshot? {
         // 1. Check live snapshots with Jaccard similarity
         var bestLive: (key: SnapshotKey, snapshot: StripSnapshot, score: Double)?
         for (key, snap) in liveSnapshots {
-            guard key.displayID == displayID else { continue }
+            guard key.groupID == groupID else { continue }
             let score = jaccardSimilarity(key.spaceFingerprint, fingerprint)
             if score > 0.5, score > (bestLive?.score ?? 0) {
                 bestLive = (key, snap, score)
@@ -141,9 +155,9 @@ public class StripSnapshotStore {
             return best.snapshot
         }
 
-        // 2. Scan disk entries for this display (most recent wins, since we can't
+        // 2. Scan disk entries for this group (most recent wins, since we can't
         // compare windowID-based fingerprints against bundleID-based signatures)
-        let displayDiskEntries = diskEntries.filter { $0.displayID == displayID }
+        let displayDiskEntries = diskEntries.filter { $0.groupID == groupID }
         if displayDiskEntries.count == 1 {
             return displayDiskEntries[0].snapshot
         }
@@ -155,11 +169,11 @@ public class StripSnapshotStore {
     }
 
     /// Fuzzy lookup using bundleID set (for cross-session matching against disk entries).
-    public func snapshotFuzzyByBundleIDs(displayID: UInt32, fingerprint: Set<UInt32>, currentBundleIDs: Set<String>) -> StripSnapshot? {
+    public func snapshotFuzzyByBundleIDs(groupID: [UInt32], fingerprint: Set<UInt32>, currentBundleIDs: Set<String>) -> StripSnapshot? {
         // 1. Check live snapshots with Jaccard similarity on fingerprints
         var bestLive: (key: SnapshotKey, snapshot: StripSnapshot, score: Double)?
         for (key, snap) in liveSnapshots {
-            guard key.displayID == displayID else { continue }
+            guard key.groupID == groupID else { continue }
             let score = jaccardSimilarity(key.spaceFingerprint, fingerprint)
             if score > 0.5, score > (bestLive?.score ?? 0) {
                 bestLive = (key, snap, score)
@@ -172,13 +186,13 @@ public class StripSnapshotStore {
         // 2. Scan disk entries by spaceSignature Jaccard against currentBundleIDs
         var bestDisk: (index: Int, snapshot: StripSnapshot, score: Double)?
         for (i, entry) in diskEntries.enumerated() {
-            guard entry.displayID == displayID else { continue }
+            guard entry.groupID == groupID else { continue }
             let sigSet = Set(entry.spaceSignature)
             let score = jaccardSimilarityStrings(sigSet, currentBundleIDs)
-            // Special case: if only one disk entry for this display, use it regardless of score
-            let sameDisplayCount = diskEntries.count(where: { $0.displayID == displayID })
-            if sameDisplayCount == 1 || score > 0.5 {
-                let effectiveScore = sameDisplayCount == 1 ? 1.0 : score
+            // Special case: if only one disk entry for this group, use it regardless of score
+            let sameCount = diskEntries.count(where: { $0.groupID == groupID })
+            if sameCount == 1 || score > 0.5 {
+                let effectiveScore = sameCount == 1 ? 1.0 : score
                 if effectiveScore > (bestDisk?.score ?? 0) {
                     bestDisk = (i, entry.snapshot, effectiveScore)
                 }
@@ -191,13 +205,13 @@ public class StripSnapshotStore {
         return nil
     }
 
-    /// Remove the disk entry that was consumed by a live save (matched by displayID + spaceSignature).
-    public func consumeDiskEntry(displayID: UInt32, bundleIDs: Set<String>) {
+    /// Remove the disk entry that was consumed by a live save (matched by groupID + spaceSignature).
+    public func consumeDiskEntry(groupID: [UInt32], bundleIDs: Set<String>) {
         // Find the best-matching disk entry and remove it (requires Jaccard > 0.5)
         var bestIndex: Int?
         var bestScore: Double = 0.5  // minimum threshold to prevent cross-space consumption
         for (i, entry) in diskEntries.enumerated() {
-            guard entry.displayID == displayID else { continue }
+            guard entry.groupID == groupID else { continue }
             let sigSet = Set(entry.spaceSignature)
             let score = jaccardSimilarityStrings(sigSet, bundleIDs)
             if score > bestScore {
@@ -251,7 +265,7 @@ public class StripSnapshotStore {
         }
         for i in diskEntries.indices {
             diskEntries[i] = SnapshotFileEntry(
-                displayID: diskEntries[i].displayID,
+                groupID: diskEntries[i].groupID,
                 spaceSignature: diskEntries[i].spaceSignature.filter { $0 != bundleID },
                 snapshot: StripSnapshot(
                     slots: diskEntries[i].snapshot.slots.filter { $0.bundleID != bundleID },
@@ -277,7 +291,7 @@ public class StripSnapshotStore {
             let bundleIDs = Set(snapshot.slots.map(\.bundleID))
             let signature = bundleIDs.sorted()
             fileEntries.append(SnapshotFileEntry(
-                displayID: key.displayID,
+                groupID: key.groupID,
                 spaceSignature: signature,
                 snapshot: StripSnapshot(slots: diskSlots, lastUpdated: snapshot.lastUpdated)))
         }
@@ -287,7 +301,7 @@ public class StripSnapshotStore {
             // Skip if we already have a live entry for this display+signature
             let entrySig = Set(entry.spaceSignature)
             let alreadyCovered = fileEntries.contains {
-                $0.displayID == entry.displayID
+                $0.groupID == entry.groupID
                     && jaccardSimilarityStrings(Set($0.spaceSignature), entrySig) > 0.8
             }
             if !alreadyCovered {
@@ -295,7 +309,7 @@ public class StripSnapshotStore {
             }
         }
 
-        let file = SnapshotFile(version: 2, snapshots: fileEntries)
+        let file = SnapshotFile(version: 3, snapshots: fileEntries)
 
         do {
             let dir = filePath.deletingLastPathComponent()
@@ -325,15 +339,31 @@ public class StripSnapshotStore {
     private func loadNewFormat() {
         do {
             let data = try Data(contentsOf: filePath)
-            let file = try JSONDecoder().decode(SnapshotFile.self, from: data)
-            guard file.version == 2 else {
-                print("[SnapshotStore] Unknown file version \(file.version), starting fresh")
+            struct VersionHeader: Codable { let version: Int }
+            let header = try JSONDecoder().decode(VersionHeader.self, from: data)
+
+            if header.version == 3 {
+                let file = try JSONDecoder().decode(SnapshotFile.self, from: data)
+                diskEntries = file.snapshots
+                print("[SnapshotStore] Loaded \(diskEntries.count) v3 snapshot entries")
                 fflush(stdout)
-                return
+            } else if header.version == 2 {
+                let v2 = try JSONDecoder().decode(SnapshotFileV2.self, from: data)
+                diskEntries = v2.snapshots.map { entry in
+                    SnapshotFileEntry(
+                        groupID: [entry.displayID],
+                        spaceSignature: entry.spaceSignature,
+                        snapshot: entry.snapshot
+                    )
+                }
+                isDirty = true
+                persistToDisk()
+                print("[SnapshotStore] Migrated \(diskEntries.count) entries v2 → v3")
+                fflush(stdout)
+            } else {
+                print("[SnapshotStore] Unknown file version \(header.version), starting fresh")
+                fflush(stdout)
             }
-            diskEntries = file.snapshots
-            print("[SnapshotStore] Loaded \(diskEntries.count) snapshot entries from disk")
-            fflush(stdout)
         } catch {
             print("[SnapshotStore] Failed to load (starting fresh): \(error)")
             fflush(stdout)
@@ -374,7 +404,7 @@ public class StripSnapshotStore {
                 }
                 let bundleIDs = Set(slots.map(\.bundleID)).sorted()
                 diskEntries.append(SnapshotFileEntry(
-                    displayID: spaceKey.displayID,
+                    groupID: [spaceKey.displayID],
                     spaceSignature: bundleIDs,
                     snapshot: StripSnapshot(
                         slots: slots,

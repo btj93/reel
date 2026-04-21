@@ -95,8 +95,16 @@ public func classifyWindow(_ props: WindowProperties) -> WindowClassification {
         return .float
     }
 
-    // Standard windows that are resizable with a close button → tile
+    // Standard windows that are resizable with a close button → tile.
+    // Exception: an empty / nil title on an AXStandardWindow is almost always
+    // a transient popup (autocomplete menu, branch picker, command palette),
+    // even when the OS reports it as resizable with a close button. Float
+    // those so they don't get inserted as strip columns.
     if subrole == "AXStandardWindow" && props.isResizable && props.hasCloseButton {
+        let hasUsableTitle = !(props.title?.isEmpty ?? true)
+        if !hasUsableTitle {
+            return .float
+        }
         return .tile
     }
 

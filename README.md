@@ -53,7 +53,7 @@ No SIP disable required. Pure Swift + Accessibility API.
 - **Infinite horizontal strip** — windows tile left to right, one per column. No limit.
 - **Spring-based scrolling** — physics-based animation with velocity compounding. Rapid keypresses feel natural.
 - **Trackpad, keyboard, and mouse** — swipe to scroll, hotkeys to jump, click or drag to focus and reorder. All three input methods are equally supported.
-- **Per-display strips** — each monitor gets its own independent strip.
+- **Multi-monitor** — horizontally-aligned monitors share one continuous strip (columns flow across displays, sized to the monitor they're on); stacked or offset monitors get independent strips controlled by cursor position.
 - **Space-aware** — switching macOS Spaces saves and restores strip state automatically.
 - **Position memory** — windows reopen in their previous strip position across app restarts.
 - **Focus indicator** — configurable ring, raise, or flash highlight for the active window.
@@ -132,6 +132,8 @@ The bundle is ad-hoc signed with a stable identifier so macOS won't revoke Acces
 |---|---|---|
 | Focus left | `Alt-H` | Scroll to window on the left |
 | Focus right | `Alt-L` | Scroll to window on the right |
+| Focus up | `Alt-K` | Focus the nearest strip above (multi-monitor) |
+| Focus down | `Alt-J` | Focus the nearest strip below (multi-monitor) |
 | Move left | `Alt-Shift-H` | Swap focused column left |
 | Move right | `Alt-Shift-L` | Swap focused column right |
 | Cycle width | `Alt-R` | Cycle 33% → 50% → 67% |
@@ -182,6 +184,8 @@ bounce_damping_ratio = 0.6
 [keybindings]
 focus_left = "alt-h"
 focus_right = "alt-l"
+focus_up = "alt-k"         # multi-monitor: focus strip above
+focus_down = "alt-j"       # multi-monitor: focus strip below
 move_left = "alt-shift-h"
 move_right = "alt-shift-l"
 cycle_width = "alt-r"
@@ -224,6 +228,59 @@ width = 3             # border width (ring mode)
 corner_radius = 10    # corner radius (ring mode)
 ```
 
+### Multi-Monitor
+
+Reel groups displays into strips automatically:
+
+- **Horizontally-aligned displays merge into one shared strip.** Columns flow
+  across the seam; widths (including `.proportion` presets and full-width)
+  resolve against the display the column currently centers on, so a full-
+  width column on the external fills the external — not the combined span.
+  Heights blend by area as a column straddles two displays of different
+  heights.
+- **Stacked or offset displays stay independent.** Each display gets its own
+  `StripController`. Keyboard commands route to the strip under the cursor
+  automatically; `focus_up` / `focus_down` jump focus across strips.
+- **Hot-plug / rearrange** — adding, removing, or rearranging displays is
+  handled live. Groups merge, split, or dissolve without restart; columns
+  migrate by position.
+
+**Alignment rule (for auto-merging):** two displays merge iff they are
+X-adjacent (edges touch within 0.5 px) **and** have any non-zero Y-overlap.
+Vertically-stacked or edge-touching (zero-overlap) displays don't merge.
+
+#### Required macOS setting
+
+> **"Displays have separate Spaces" must be OFF** for shared-strip mode to
+> engage. Open System Settings → Desktop & Dock → Mission Control and toggle
+> "Displays have separate Spaces" off.
+
+Why: with separate Spaces enabled, each display has an independent Space
+stack, so the two halves of a merged strip could be on different Spaces with
+different window sets — Reel's snapshot store would silently discard layout
+memory on every Space switch. When Reel detects the setting is ON, it falls
+back to per-display strips (no merging) and shows a clickable warning in the
+menu-bar item that deep-links to the Mission Control pane.
+
+#### Mission Control drag
+
+Dragging a window to another monitor via Mission Control (or any method that
+moves its frame across displays) is detected: the window is removed from the
+source strip and adopted into the destination strip, with any saved position
+restored.
+
+#### Known limitations
+
+- Very tall external + short built-in: a column on the taller display
+  renders at the taller height but gets clipped to the shorter display's
+  working area when it straddles the seam.
+- Apps that refuse AX resize requests (e.g., System Settings with its
+  minimum-width constraint) may appear off-center on strips narrower than
+  their minimum width.
+- The reorder overlay captures a single display's screenshot — for a drag
+  across merged displays, the overlay renders on the display containing the
+  dragged column's current frame and may clip at the seam.
+
 ### Window Rules
 
 Auto-float windows by bundle ID or title pattern:
@@ -259,7 +316,13 @@ reel-msg recover             # move all windows back on-screen
 reel-msg quit                # graceful shutdown
 ```
 
-All commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
+All commands: `focus-left`, `focus-right`, `focus-up`, `focus-down`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
+
+`get-layout` returns a JSON payload covering **every** strip (one per display
+group), each strip's current columns with window metadata, stashed per-Space
+states the strip has seen this session, and persisted snapshot-store entries
+across all groups — useful for scripting and debugging multi-monitor
+behavior.
 
 ## Architecture
 
@@ -301,6 +364,8 @@ make run                       # kill existing, bundle, open .app
 | Hotkeys not working | Another app may have claimed the same key combo. Check for conflicts or rebind in `~/.config/reel/config.toml`. |
 | Permission re-prompted on every launch | You're running the `.app` bundle during development. Use `.build/debug/Reel` instead — AX permission persists across rebuilds. |
 | Windows stuck off-screen | Run `reel-msg recover` to move all managed windows back on-screen. |
+| Aligned displays aren't merging into one strip | macOS "Displays have separate Spaces" is ON — turn it off in System Settings → Desktop & Dock → Mission Control. The menu-bar item also shows a clickable warning that deep-links there. |
+| Hotkey goes to the wrong monitor | Hotkey commands route to the strip **under the cursor**. Move the cursor over the display you mean to affect, then press the shortcut. Or use `focus-up` / `focus-down` to switch the active strip. |
 | Special characters when pressing hotkeys | `Alt` key combos produce characters like `˙` (Alt-H). Rebind to `hyper-` (Ctrl+Opt+Cmd+Shift) in config to avoid this. |
 
 ## Uninstall

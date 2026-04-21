@@ -6,6 +6,8 @@ import Core
 public enum HotkeyAction: Sendable {
     case focusLeft
     case focusRight
+    case focusUp
+    case focusDown
     case moveColumnLeft
     case moveColumnRight
     case cycleWidthPreset
@@ -58,6 +60,8 @@ public final class HotkeyManager: @unchecked Sendable {
         let actionMap: [String: HotkeyAction] = [
             "focus_left": .focusLeft,
             "focus_right": .focusRight,
+            "focus_up": .focusUp,
+            "focus_down": .focusDown,
             "move_left": .moveColumnLeft,
             "move_right": .moveColumnRight,
             "cycle_width": .cycleWidthPreset,
@@ -85,6 +89,8 @@ public final class HotkeyManager: @unchecked Sendable {
         registerFromConfig([
             "focus_left": "alt-h",
             "focus_right": "alt-l",
+            "focus_up": "alt-k",
+            "focus_down": "alt-j",
             "move_left": "alt-shift-h",
             "move_right": "alt-shift-l",
             "cycle_width": "alt-r",

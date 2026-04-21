@@ -35,6 +35,11 @@ bounce_damping_ratio = 0.6
 # Hyper = Ctrl+Shift+Cmd+Opt (all four modifiers)
 focus_left = "alt-h"
 focus_right = "alt-l"
+# focus_up / focus_down switch focus to the nearest strip above / below the
+# cursor's strip (by group midpoint Y). Useful when you have a vertically
+# arranged secondary monitor that isn't merged into the shared strip.
+focus_up = "alt-k"
+focus_down = "alt-j"
 move_left = "alt-shift-h"
 move_right = "alt-shift-l"
 cycle_width = "alt-r"
@@ -43,7 +48,7 @@ toggle_floating = "alt-space"
 close_window = "alt-w"
 
 [gesture]
-modifier = "fn"  # Hold this key + trackpad scroll to pan the strip
+modifier = "fn"  # Hold this key + horizontal scroll to pan the strip
 snap = true  # Set to false to let gestures move freely without snapping to columns
 
 # Focus indicator: visual highlight for the active window

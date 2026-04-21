@@ -25,6 +25,20 @@ public struct DisplayInfo: Sendable {
             height: visibleFrame.height - struts.top - struts.bottom
         )
     }
+
+    public init(
+        displayID: CGDirectDisplayID,
+        frame: CGRect,
+        visibleFrame: CGRect,
+        isMain: Bool,
+        refreshRate: Double
+    ) {
+        self.displayID = displayID
+        self.frame = frame
+        self.visibleFrame = visibleFrame
+        self.isMain = isMain
+        self.refreshRate = refreshRate
+    }
 }
 
 /// Configurable insets that shrink the working area (for external bars like SketchyBar).
@@ -119,6 +133,13 @@ public final class DisplayManager: @unchecked Sendable {
         displays.values.first { $0.isMain } ?? displays.values.first
     }
 
+    /// True if macOS "Displays have separate Spaces" is OFF — all displays share
+    /// one Space stack. Required for shared-strip-across-aligned-displays mode.
+    /// Wraps `NSScreen.screensHaveSeparateSpaces` (inverted).
+    public var displaysShareOneSpace: Bool {
+        !NSScreen.screensHaveSeparateSpaces
+    }
+
     // MARK: - Observation
 
     /// Start observing display configuration changes.
@@ -138,7 +159,14 @@ public final class DisplayManager: @unchecked Sendable {
         // There's no direct notification for Dock auto-hide state changes,
         // so we poll NSScreen.visibleFrame which changes when the Dock appears/hides.
         var lastVisibleFrame: CGRect = NSScreen.main?.visibleFrame ?? .zero
+        var lastMainID: CGDirectDisplayID = CGMainDisplayID()
         dockPollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            let curMainID = CGMainDisplayID()
+            if curMainID != lastMainID {
+                lastMainID = curMainID
+                self?.handleDisplayChange()
+                return
+            }
             guard let currentFrame = NSScreen.main?.visibleFrame else { return }
             if currentFrame != lastVisibleFrame {
                 lastVisibleFrame = currentFrame
@@ -173,5 +201,61 @@ public final class DisplayManager: @unchecked Sendable {
         fflush(stdout)
 
         onDisplayChange?(displays)
+    }
+
+    // MARK: - Alignment Groups
+
+    /// Static tolerance for X-edge adjacency (pixels).
+    public static let alignmentEpsilon: CGFloat = 0.5
+
+    /// Compute alignment groups from a set of displays.
+    /// Two displays are in the same group iff:
+    /// 1. X-edge adjacency: `|A.maxX − B.minX| ≤ ε` or symmetric, with ε = 0.5.
+    /// 2. Any Y-overlap: `max(A.minY, B.minY) < min(A.maxY, B.maxY)` (strict).
+    /// Both checks use `frame` (physical bounds), not `visibleFrame`.
+    ///
+    /// Returns groups sorted by leftmost member's `frame.minX`. Each group's
+    /// members are sorted by their own `frame.minX`. Deterministic output.
+    public static func alignmentGroups(
+        from displays: [CGDirectDisplayID: DisplayInfo]
+    ) -> [[CGDirectDisplayID]] {
+        let ids = displays.keys.sorted()
+        var visited: Set<CGDirectDisplayID> = []
+        var groups: [[CGDirectDisplayID]] = []
+
+        for id in ids where !visited.contains(id) {
+            var component: [CGDirectDisplayID] = []
+            var stack: [CGDirectDisplayID] = [id]
+            while let cur = stack.popLast() {
+                if visited.contains(cur) { continue }
+                visited.insert(cur)
+                component.append(cur)
+                guard let curInfo = displays[cur] else { continue }
+                for other in ids where !visited.contains(other) {
+                    guard let otherInfo = displays[other] else { continue }
+                    if areAligned(curInfo.frame, otherInfo.frame) {
+                        stack.append(other)
+                    }
+                }
+            }
+            component.sort { (a, b) in
+                (displays[a]?.frame.minX ?? 0) < (displays[b]?.frame.minX ?? 0)
+            }
+            groups.append(component)
+        }
+
+        groups.sort { (a, b) in
+            (displays[a[0]]?.frame.minX ?? 0) < (displays[b[0]]?.frame.minX ?? 0)
+        }
+        return groups
+    }
+
+    /// Pair-wise alignment check: X-adjacency (ε=0.5) AND any Y-overlap.
+    private static func areAligned(_ a: CGRect, _ b: CGRect) -> Bool {
+        let eps = alignmentEpsilon
+        let xAdjacent =
+            abs(a.maxX - b.minX) <= eps || abs(b.maxX - a.minX) <= eps
+        let yOverlap = max(a.minY, b.minY) < min(a.maxY, b.maxY)
+        return xAdjacent && yOverlap
     }
 }

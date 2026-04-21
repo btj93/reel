@@ -26,8 +26,16 @@ public struct Strip: Sendable {
     /// Gap between columns in logical points.
     public var gap: Double
 
-    /// Usable screen area (excluding menu bar, dock, struts).
-    public var workingArea: CGRect
+    /// The group's working area — per-region geometry + coordinate anchor.
+    /// For solo-display groups this is a singleton region; multi-region groups
+    /// back the shared-strip feature for aligned displays.
+    public var groupArea: GroupWorkingArea
+
+    /// Backward-compatible read-only alias: the bounding rect of all regions.
+    /// GET-ONLY. Writes must go through `groupArea = …` or, in `StripController`,
+    /// through `updateGroupArea(_:)`. A setter here would silently collapse
+    /// multi-region groups to a singleton on every write, which is unsafe.
+    public var workingArea: CGRect { groupArea.totalSpan }
 
     /// Column width presets for cycling.
     public var widthPresets: [ColumnWidth]
@@ -54,7 +62,35 @@ public struct Strip: Sendable {
         self.snapPoints = snapPoints
         self.snapIndices = snapIndices
         self.gap = gap
-        self.workingArea = workingArea
+        self.groupArea = GroupWorkingArea(
+            regions: [DisplayRegion(displayID: 0, rect: workingArea)],
+            referenceMidX: workingArea.midX
+        )
+        self.widthPresets = widthPresets
+        self.defaultWidth = defaultWidth
+    }
+
+    /// Primary init for shared-strip callers.
+    public init(
+        columns: [Column] = [],
+        columnData: [ColumnData] = [],
+        activeColumnIndex: Int = 0,
+        viewOffset: ViewOffset = .static(0),
+        snapPoints: [SnapPoint] = [.middle],
+        snapIndices: [Int] = [],
+        gap: Double = 16,
+        groupArea: GroupWorkingArea,
+        widthPresets: [ColumnWidth] = [.proportion(0.33), .proportion(0.5), .proportion(0.67)],
+        defaultWidth: ColumnWidth = .proportion(0.5)
+    ) {
+        self.columns = columns
+        self.columnData = columnData
+        self.activeColumnIndex = activeColumnIndex
+        self.viewOffset = viewOffset
+        self.snapPoints = snapPoints
+        self.snapIndices = snapIndices
+        self.gap = gap
+        self.groupArea = groupArea
         self.widthPresets = widthPresets
         self.defaultWidth = defaultWidth
     }
@@ -122,9 +158,31 @@ public struct Strip: Sendable {
     /// Used by position memory to restore windows to saved positions.
     public mutating func insertColumn(_ column: Column, at time: Double, atIndex requestedIndex: Int) {
         let insertIndex = max(0, min(requestedIndex, columns.count))
+
+        // Determine owning region for the insertion point.
+        var cumX: Double = 0
+        for j in 0..<insertIndex {
+            cumX += columnData[j].cachedWidth + gap
+        }
+        let trialWidth: Double
+        if column.isFullWidth {
+            trialWidth = Double(groupArea.firstRegionRect.width)
+        } else {
+            trialWidth = column.width.resolve(
+                workingAreaWidth: Double(groupArea.firstRegionRect.width),
+                gap: gap
+            )
+        }
+        let trialMidXInStrip = cumX + trialWidth / 2
+        let viewPosNow = viewPos(at: time)
+        let trialMidXOnScreen = trialMidXInStrip - viewPosNow + Double(groupArea.totalSpan.minX)
+        let owningRegion = groupArea.regions.first(where: {
+            trialMidXOnScreen >= Double($0.rect.minX) && trialMidXOnScreen <= Double($0.rect.maxX)
+        }) ?? groupArea.regions[0]
+
         let resolvedWidth = column.isFullWidth
-            ? workingArea.width
-            : column.width.resolve(workingAreaWidth: workingArea.width, gap: gap)
+            ? Double(owningRegion.rect.width)
+            : column.width.resolve(workingAreaWidth: Double(owningRegion.rect.width), gap: gap)
 
         columns.insert(column, at: insertIndex)
         columnData.insert(ColumnData(cachedWidth: resolvedWidth), at: insertIndex)
@@ -132,13 +190,7 @@ public struct Strip: Sendable {
 
         activeColumnIndex = insertIndex
 
-        let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
-        let newOffset = computeSnapOffset(
-            snapPoint: snapPoint,
-            columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
-            workingAreaWidth: workingArea.width
-        )
-        viewOffset = .static(newOffset)
+        viewOffset = .static(snapTargetForActive(at: time))
     }
 
     /// Remove a column at the given index.
@@ -171,13 +223,7 @@ public struct Strip: Sendable {
                 activeColumnIndex = columns.count - 1
             }
             // Recenter on the new active column
-            let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
-            let newOffset = computeSnapOffset(
-                snapPoint: snapPoint,
-                columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
-                workingAreaWidth: workingArea.width
-            )
-            viewOffset = .static(newOffset)
+            viewOffset = .static(snapTargetForActive(at: time))
         }
         // index > activeColumnIndex: active column unchanged, no viewOffset adjustment needed
     }
@@ -187,25 +233,17 @@ public struct Strip: Sendable {
     /// Recenter the viewport on the active column (e.g., after a resize changes column widths).
     public mutating func recenterActiveColumn(at time: Double) {
         guard !columns.isEmpty else { return }
-        let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
-        let targetOffset = computeSnapOffset(
-            snapPoint: snapPoint,
-            columnWidth: columnData[activeColumnIndex].currentWidth(at: time),
-            workingAreaWidth: workingArea.width
-        )
-        viewOffset = .static(targetOffset)
+        viewOffset = .static(snapTargetForActive(at: time))
     }
 
     /// Recenter the viewport on the active column with spring animation.
     /// Pass `columnWidth` to override the current width (e.g., target width during animation).
     public mutating func recenterActiveColumnAnimated(at time: Double, columnWidth: Double? = nil) -> SpringAnimation? {
         guard !columns.isEmpty else { return nil }
-        let snapPoint = snapPoints[snapIndices[activeColumnIndex]]
-        let width = columnWidth ?? columnData[activeColumnIndex].currentWidth(at: time)
-        let targetOffset = computeSnapOffset(
-            snapPoint: snapPoint,
-            columnWidth: width,
-            workingAreaWidth: workingArea.width
+        let targetOffset = snapTarget(
+            forColumn: activeColumnIndex,
+            columnWidthOverride: columnWidth,
+            at: time
         )
         return createScrollAnimation(to: targetOffset, at: time)
     }
@@ -356,30 +394,44 @@ public struct Strip: Sendable {
         let adjustedOffset = currentOffset + oldColX - newColX
         activeColumnIndex = colIndex
 
-        // Fully visible? (epsilon guards float jitter)
+        // Fully visible? Column must fit entirely within at least one region.
         let eps: Double = 0.5
-        if colLeftOnScreen >= -eps && colRightOnScreen <= workingArea.width + eps {
+        let screenLeft = colLeftOnScreen + Double(workingArea.minX)
+        let screenRight = colRightOnScreen + Double(workingArea.minX)
+        var fullyContained = false
+        for r in groupArea.regions {
+            if screenLeft >= Double(r.rect.minX) - eps && screenRight <= Double(r.rect.maxX) + eps {
+                fullyContained = true
+                break
+            }
+        }
+        if fullyContained {
             viewOffset = .static(adjustedOffset)
             return .anchorOnly
         }
 
+        // Determine the owning region for the target column at the adjusted offset.
+        let viewPosAtAdjusted = newColX + adjustedOffset
+        let colRegion = regionForColumn(colIndex, viewPos: viewPosAtAdjusted)
+        let colRegionWidth = Double(colRegion.rect.width)
+
         // Pick direction of travel & find first unreached milestone.
         let (snapIdx, targetOffset): (Int, Double)
-        if colRightOnScreen > workingArea.width {
-            // Column extends past the right edge → slide leftward on screen.
+        if colRightOnScreen + Double(workingArea.minX) > Double(colRegion.rect.maxX) {
+            // Column extends past the right edge of its region → slide leftward on screen.
             (snapIdx, targetOffset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: workingArea.width
+                workingAreaWidth: colRegionWidth
             )
         } else {
-            // Column extends past the left edge → slide rightward on screen.
+            // Column extends past the left edge of its region → slide rightward on screen.
             (snapIdx, targetOffset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: workingArea.width
+                workingAreaWidth: colRegionWidth
             )
         }
         snapIndices[colIndex] = snapIdx
@@ -418,13 +470,7 @@ public struct Strip: Sendable {
         if currentSnap > 0 {
             // Decrement snap point (window slides left on screen, revealing right)
             snapIndices[activeColumnIndex] -= 1
-            let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let targetOffset = computeSnapOffset(
-                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
-                columnWidth: colWidth,
-                workingAreaWidth: workingArea.width
-            )
-            return createScrollAnimation(to: targetOffset, at: time)
+            return createScrollAnimation(to: snapTargetForActive(at: time), at: time)
         } else if activeColumnIndex < columns.count - 1 {
             // Exhausted snap points — move focus to next column
             // navigateRight → window slides left → next leftward milestone
@@ -434,11 +480,12 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
             let (snapIdx, targetOffset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: workingArea.width
+                workingAreaWidth: regionWidth
             )
             snapIndices[activeColumnIndex] = snapIdx
             return createFocusChangeAnimation(from: adjustedOffset, to: targetOffset, at: time)
@@ -457,13 +504,7 @@ public struct Strip: Sendable {
         if currentSnap < snapPoints.count - 1 {
             // Increment snap point (window slides right on screen, revealing left)
             snapIndices[activeColumnIndex] += 1
-            let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let targetOffset = computeSnapOffset(
-                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
-                columnWidth: colWidth,
-                workingAreaWidth: workingArea.width
-            )
-            return createScrollAnimation(to: targetOffset, at: time)
+            return createScrollAnimation(to: snapTargetForActive(at: time), at: time)
         } else if activeColumnIndex > 0 {
             // Exhausted snap points — move focus to previous column
             // navigateLeft → window slides right → next rightward milestone
@@ -473,11 +514,12 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
             let (snapIdx, targetOffset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: workingArea.width
+                workingAreaWidth: regionWidth
             )
             snapIndices[activeColumnIndex] = snapIdx
             return createFocusChangeAnimation(from: adjustedOffset, to: targetOffset, at: time)
@@ -497,13 +539,7 @@ public struct Strip: Sendable {
 
         if currentSnap > 0 {
             snapIndices[activeColumnIndex] -= 1
-            let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let targetOffset = computeSnapOffset(
-                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
-                columnWidth: colWidth,
-                workingAreaWidth: workingArea.width
-            )
-            return createVelocityAnimation(to: targetOffset, velocity: velocity, at: time)
+            return createVelocityAnimation(to: snapTargetForActive(at: time), velocity: velocity, at: time)
         } else if activeColumnIndex < columns.count - 1 {
             let currentOffset = viewOffset.current(at: time)
             let oldColX = columnX(at: activeColumnIndex, time: time)
@@ -511,11 +547,12 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
             let (snapIdx, targetOffset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: workingArea.width
+                workingAreaWidth: regionWidth
             )
             snapIndices[activeColumnIndex] = snapIdx
             return createVelocityAnimation(from: adjustedOffset, to: targetOffset, velocity: velocity, at: time)
@@ -532,13 +569,7 @@ public struct Strip: Sendable {
 
         if currentSnap < snapPoints.count - 1 {
             snapIndices[activeColumnIndex] += 1
-            let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let targetOffset = computeSnapOffset(
-                snapPoint: snapPoints[snapIndices[activeColumnIndex]],
-                columnWidth: colWidth,
-                workingAreaWidth: workingArea.width
-            )
-            return createVelocityAnimation(to: targetOffset, velocity: velocity, at: time)
+            return createVelocityAnimation(to: snapTargetForActive(at: time), velocity: velocity, at: time)
         } else if activeColumnIndex > 0 {
             let currentOffset = viewOffset.current(at: time)
             let oldColX = columnX(at: activeColumnIndex, time: time)
@@ -546,11 +577,12 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
             let (snapIdx, targetOffset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: workingArea.width
+                workingAreaWidth: regionWidth
             )
             snapIndices[activeColumnIndex] = snapIdx
             return createVelocityAnimation(from: adjustedOffset, to: targetOffset, velocity: velocity, at: time)
@@ -573,11 +605,12 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
             let (snapIdx, offset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: workingArea.width
+                workingAreaWidth: regionWidth
             )
             snapIndices[activeColumnIndex] = snapIdx
             viewOffset = .static(offset)
@@ -586,13 +619,7 @@ public struct Strip: Sendable {
             return
         }
 
-        let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
-        let targetOffset = computeSnapOffset(
-            snapPoint: snapPoints[snapIndices[activeColumnIndex]],
-            columnWidth: colWidth,
-            workingAreaWidth: workingArea.width
-        )
-        viewOffset = .static(targetOffset)
+        viewOffset = .static(snapTargetForActive(at: time))
     }
 
     /// Navigate left without animation (instant mode).
@@ -609,11 +636,12 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
             let (snapIdx, offset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: workingArea.width
+                workingAreaWidth: regionWidth
             )
             snapIndices[activeColumnIndex] = snapIdx
             viewOffset = .static(offset)
@@ -622,13 +650,7 @@ public struct Strip: Sendable {
             return
         }
 
-        let colWidth = columnData[activeColumnIndex].currentWidth(at: time)
-        let targetOffset = computeSnapOffset(
-            snapPoint: snapPoints[snapIndices[activeColumnIndex]],
-            columnWidth: colWidth,
-            workingAreaWidth: workingArea.width
-        )
-        viewOffset = .static(targetOffset)
+        viewOffset = .static(snapTargetForActive(at: time))
     }
 
     /// Move the active column left (swap with neighbor).
@@ -689,8 +711,9 @@ public struct Strip: Sendable {
         guard !columns.isEmpty, !widthPresets.isEmpty else { return }
         let i = activeColumnIndex
         let nextPresetIndex = ((columns[i].presetIndex ?? -1) + 1) % widthPresets.count
+        let region = regionForColumn(i, at: time)
         let newWidth = widthPresets[nextPresetIndex]
-            .resolve(workingAreaWidth: workingArea.width, gap: gap)
+            .resolve(workingAreaWidth: Double(region.rect.width), gap: gap)
 
         columns[i].width = widthPresets[nextPresetIndex]
         columns[i].presetIndex = nextPresetIndex
@@ -717,8 +740,9 @@ public struct Strip: Sendable {
     public mutating func setWidthPreset(index presetIndex: Int, at time: Double, params: SpringParams?) {
         guard !columns.isEmpty, presetIndex >= 0, presetIndex < widthPresets.count else { return }
         let i = activeColumnIndex
+        let region = regionForColumn(i, at: time)
         let newWidth = widthPresets[presetIndex]
-            .resolve(workingAreaWidth: workingArea.width, gap: gap)
+            .resolve(workingAreaWidth: Double(region.rect.width), gap: gap)
 
         columns[i].width = widthPresets[presetIndex]
         columns[i].presetIndex = presetIndex
@@ -736,35 +760,147 @@ public struct Strip: Sendable {
     }
 
     /// Toggle the active column to/from full-width mode.
-    public mutating func toggleFullWidth() {
+    public mutating func toggleFullWidth(at time: Double) {
         guard !columns.isEmpty else { return }
         columnData[activeColumnIndex].widthAnimation = nil
         columnData[activeColumnIndex].raiseAnimation = nil
         let isCurrentlyFull = columns[activeColumnIndex].isFullWidth
         columns[activeColumnIndex].isFullWidth = !isCurrentlyFull
+        let region = regionForColumn(activeColumnIndex, at: time)
         if !isCurrentlyFull {
-            columnData[activeColumnIndex].cachedWidth = workingArea.width
+            columnData[activeColumnIndex].cachedWidth = Double(region.rect.width)
         } else {
             let width = columns[activeColumnIndex].width
             columnData[activeColumnIndex].cachedWidth = width.resolve(
-                workingAreaWidth: workingArea.width, gap: gap
+                workingAreaWidth: Double(region.rect.width), gap: gap
             )
         }
     }
 
     /// Recalculate all column widths (e.g., after working area changes).
-    public mutating func recalculateWidths() {
+    public mutating func recalculateWidths(at time: Double) {
         for i in 0..<columns.count {
             columnData[i].widthAnimation = nil
             columnData[i].raiseAnimation = nil
+            let region = regionForColumn(i, at: time)
+            let regionWidth = Double(region.rect.width)
             if columns[i].isFullWidth {
-                columnData[i].cachedWidth = workingArea.width
+                columnData[i].cachedWidth = regionWidth
             } else {
                 columnData[i].cachedWidth = columns[i].width.resolve(
-                    workingAreaWidth: workingArea.width, gap: gap
+                    workingAreaWidth: regionWidth, gap: gap
                 )
             }
         }
+    }
+
+    // MARK: - Per-Display Snap Helpers
+
+    /// Region whose CG-X range owns a column's rendered midX. Uses `cachedWidth`
+    /// for the cumulative-X walk so that snap targets are stable — they do NOT
+    /// drift with in-flight A2-interpolated widths during a scroll animation.
+    /// For solo groups returns the single region. For multi-region groups,
+    /// returns the region containing the column's midpoint X, or the nearest
+    /// region if the midpoint lands in an inter-display gap.
+    public func regionForColumn(_ idx: Int, at time: Double) -> DisplayRegion {
+        guard !columns.isEmpty, idx >= 0, idx < columns.count else {
+            return groupArea.regions[0]
+        }
+        var cumX: Double = 0
+        for i in 0..<idx {
+            cumX += columnData[i].cachedWidth + gap
+        }
+        let colW = columnData[idx].cachedWidth
+        let midXInStrip = cumX + colW / 2
+        let viewPos = viewPos(at: time)
+        let midXOnScreen = midXInStrip - viewPos + Double(groupArea.totalSpan.minX)
+
+        var best = groupArea.regions[0]
+        var bestDist = Double.infinity
+        for r in groupArea.regions {
+            if midXOnScreen >= Double(r.rect.minX) && midXOnScreen <= Double(r.rect.maxX) {
+                return r
+            }
+            let d = min(
+                abs(midXOnScreen - Double(r.rect.minX)),
+                abs(midXOnScreen - Double(r.rect.maxX))
+            )
+            if d < bestDist {
+                bestDist = d
+                best = r
+            }
+        }
+        return best
+    }
+
+    /// Convenience shorthand for the active column's region.
+    public func regionForActive(at time: Double) -> DisplayRegion {
+        regionForColumn(activeColumnIndex, at: time)
+    }
+
+    /// Region lookup with an explicit viewport-left-edge value (strip-space).
+    /// Used by navigation helpers that have updated `activeColumnIndex` but not yet
+    /// written the new `viewOffset` — the caller computes `adjustedOffset` manually
+    /// and passes it here so the midX-on-screen calculation is correct.
+    private func regionForColumn(_ idx: Int, viewPos: Double) -> DisplayRegion {
+        guard !columns.isEmpty, idx >= 0, idx < columns.count else {
+            return groupArea.regions[0]
+        }
+        var cumX: Double = 0
+        for i in 0..<idx {
+            cumX += columnData[i].cachedWidth + gap
+        }
+        let colW = columnData[idx].cachedWidth
+        let midXInStrip = cumX + colW / 2
+        let midXOnScreen = midXInStrip - viewPos + Double(groupArea.totalSpan.minX)
+
+        var best = groupArea.regions[0]
+        var bestDist = Double.infinity
+        for r in groupArea.regions {
+            if midXOnScreen >= Double(r.rect.minX) && midXOnScreen <= Double(r.rect.maxX) {
+                return r
+            }
+            let d = min(
+                abs(midXOnScreen - Double(r.rect.minX)),
+                abs(midXOnScreen - Double(r.rect.maxX))
+            )
+            if d < bestDist {
+                bestDist = d
+                best = r
+            }
+        }
+        return best
+    }
+
+    /// Snap-target `viewOffset` that lands column `idx` at its current snap
+    /// milestone within its owning region. Multi-region-aware: uses the owning
+    /// region's X range and width, so the column centers (or `.left`/`.right`
+    /// flushes) within that region, not across the combined strip.
+    ///
+    /// `columnWidthOverride` allows callers (e.g. `cycleWidthPreset`) to compute
+    /// the snap target for a width that hasn't been written into `cachedWidth`
+    /// yet — the animation target value.
+    public func snapTarget(
+        forColumn idx: Int,
+        columnWidthOverride: Double? = nil,
+        at time: Double
+    ) -> Double {
+        guard !columns.isEmpty, idx >= 0, idx < columns.count else { return 0 }
+        let snapPoint = snapPoints[snapIndices[idx]]
+        let colWidth = columnWidthOverride ?? columnData[idx].currentWidth(at: time)
+        let region = regionForColumn(idx, at: time)
+        let regionOffset = Double(region.rect.minX - groupArea.totalSpan.minX)
+        let localSnap = computeSnapOffset(
+            snapPoint: snapPoint,
+            columnWidth: colWidth,
+            workingAreaWidth: Double(region.rect.width)
+        )
+        return localSnap - regionOffset
+    }
+
+    /// Shorthand for the active column's snap target.
+    public func snapTargetForActive(at time: Double) -> Double {
+        snapTarget(forColumn: activeColumnIndex, at: time)
     }
 
     /// Finalize completed width animations and return whether any active animations remain.

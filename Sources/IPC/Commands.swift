@@ -4,6 +4,8 @@ import Foundation
 public enum ReelCommand: String, Codable, CaseIterable, Sendable {
     case focusLeft = "focus-left"
     case focusRight = "focus-right"
+    case focusUp = "focus-up"
+    case focusDown = "focus-down"
     case moveColumnLeft = "move-column-left"
     case moveColumnRight = "move-column-right"
     case cycleWidthPreset = "cycle-width-preset"

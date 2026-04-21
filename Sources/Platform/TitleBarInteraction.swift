@@ -270,10 +270,18 @@ public final class TitleBarInteraction: @unchecked Sendable {
 
     // MARK: - State Transitions
 
+    /// Screen containing the cursor, or main as fallback. Used so the overlay
+    /// panel sizes/positions to the monitor where the user is actually clicking.
+    private func screenUnderCursor() -> NSScreen? {
+        let loc = NSEvent.mouseLocation  // AppKit coords
+        return NSScreen.screens.first(where: { $0.frame.contains(loc) })
+            ?? NSScreen.main
+    }
+
     private func transitionToDragging(columnIndex: Int, tileID: TileID) {
         state = .dragging(columnIndex: columnIndex, tileID: tileID)
         setupEscapeTap()
-        if let screen = NSScreen.main {
+        if let screen = screenUnderCursor() {
             overlay.ensurePanel(for: screen)
         }
         overlay.setMousePassthrough(true)
@@ -284,7 +292,7 @@ public final class TitleBarInteraction: @unchecked Sendable {
     private func transitionToMenu(columnIndex: Int, tileID: TileID, mousePoint: CGPoint) {
         state = .menu(columnIndex: columnIndex, tileID: tileID)
         setupEscapeTap()
-        if let screen = NSScreen.main {
+        if let screen = screenUnderCursor() {
             overlay.ensurePanel(for: screen)
         }
         overlay.setMousePassthrough(false)

@@ -37,6 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         startWindowManager()
         setupMenuBar()
+        observeDisplayChanges()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -82,11 +83,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem(title: "Reel v0.3.0", action: nil, keyEquivalent: "")) // x-release-please-version
             menu.addItem(NSMenuItem.separator())
 
+            // Shared-strip mode requires "Displays have separate Spaces" to be OFF.
+            // If it's ON, show a clickable warning that opens Mission Control settings.
+            if let wm = self.windowManager, wm.separateSpacesEnabled {
+                let warning = NSMenuItem(
+                    title: "⚠︎ Shared strip disabled — turn off \"Displays have separate Spaces\"",
+                    action: #selector(openMissionControlSettings),
+                    keyEquivalent: ""
+                )
+                warning.toolTip = "System Settings → Desktop & Dock → Mission Control → Displays have separate Spaces"
+                menu.addItem(warning)
+                menu.addItem(NSMenuItem.separator())
+            }
+
             // Keybinding actions
             let keybindings = windowManager?.config.keybindings ?? [:]
             let actions: [(action: String, title: String, tag: Int)] = [
                 ("focus_left",       "Focus Left",        1),
                 ("focus_right",      "Focus Right",       2),
+                ("focus_up",         "Focus Strip Up",    9),
+                ("focus_down",       "Focus Strip Down", 10),
                 ("move_left",        "Move Left",         3),
                 ("move_right",       "Move Right",        4),
                 ("cycle_width",      "Cycle Width",       5),
@@ -173,6 +189,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func openMissionControlSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.expose") {
+            _ = NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc private func handleMenuAction(_ sender: NSMenuItem) {
         let actionMap: [Int: HotkeyAction] = [
             1: .focusLeft,
@@ -183,6 +205,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             6: .toggleFullWidth,
             7: .toggleFloating,
             8: .closeWindow,
+            9: .focusUp,
+            10: .focusDown,
         ]
         if let action = actionMap[sender.tag] {
             windowManager?.performAction(action)
@@ -224,6 +248,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() {
         windowManager?.shutdown()
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Display Change Observer
+
+    private func observeDisplayChanges() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.setupMenuBar()
+        }
     }
 
     // MARK: - Log File Redirect

@@ -75,13 +75,18 @@ struct ReelCLI {
         // while keeping the read side open for the response.
         shutdown(fd, SHUT_WR)
 
-        // Read response
+        // Read response — loop until EOF so large payloads (e.g. get-layout
+        // with many columns) don't get truncated at 4KB.
+        var responseData = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
-        let bytesRead = read(fd, &buffer, buffer.count)
+        while true {
+            let bytesRead = read(fd, &buffer, buffer.count)
+            if bytesRead <= 0 { break }
+            responseData.append(contentsOf: buffer[0..<bytesRead])
+        }
         close(fd)
 
-        if bytesRead > 0 {
-            let responseData = Data(buffer[0..<bytesRead])
+        if !responseData.isEmpty {
             if let response = try? JSONDecoder().decode(ReelResponse.self, from: responseData) {
                 if let data = response.data {
                     print(data)

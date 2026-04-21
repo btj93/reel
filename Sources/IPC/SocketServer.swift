@@ -149,15 +149,22 @@ public final class SocketServer: @unchecked Sendable {
             response = ReelResponse(success: false, message: "Invalid data")
         }
 
-        // Send response
+        // Send response — loop write until all bytes are flushed (a single
+        // write() may return short, especially for large JSON payloads).
         if let responseData = try? Self.jsonEncoder.encode(response) {
             let responseStr = String(data: responseData, encoding: .utf8)! + "\n"
-            responseStr.withCString { ptr in
-                let len = strlen(ptr)
-                let written = write(clientFD, ptr, len)
-                if written < 0 {
-                    print("[IPC] Write failed: \(String(cString: strerror(errno)))")
-                    fflush(stdout)
+            responseStr.withCString { base in
+                let total = strlen(base)
+                var offset = 0
+                while offset < total {
+                    let n = write(clientFD, base.advanced(by: offset), total - offset)
+                    if n < 0 {
+                        print("[IPC] Write failed: \(String(cString: strerror(errno)))")
+                        fflush(stdout)
+                        break
+                    }
+                    if n == 0 { break }
+                    offset += n
                 }
             }
         }

@@ -28,8 +28,22 @@ public final class WindowManager: @unchecked Sendable {
 
     private static let isoFormatter = ISO8601DateFormatter()
 
-    /// Per-display strip controllers. One strip per connected monitor.
-    public private(set) var stripControllers: [CGDirectDisplayID: StripController] = [:]
+    /// A canonical identifier for a group of aligned displays. Sorted ascending
+    /// so equal member sets produce equal IDs (stable across hot-plug cycles).
+    public typealias GroupID = [CGDirectDisplayID]
+
+    /// Reverse index: `displayID` → the `GroupID` it belongs to.
+    /// Kept in sync with `stripControllers` at every reconciliation.
+    private var displayToGroup: [CGDirectDisplayID: GroupID] = [:]
+
+    /// Canonicalize a sequence of display IDs into a `GroupID`.
+    public static func groupID<S: Sequence>(from ids: S) -> GroupID
+    where S.Element == CGDirectDisplayID {
+        ids.sorted()
+    }
+
+    /// Per-group strip controllers. One strip per group of aligned displays.
+    public private(set) var stripControllers: [GroupID: StripController] = [:]
 
     /// Snapshot store for restoring window placement.
     public var snapshotStore: StripSnapshotStore?
@@ -39,7 +53,17 @@ public final class WindowManager: @unchecked Sendable {
 
     /// Convenience: the strip controller for the active display.
     public var stripController: StripController {
-        stripControllers[activeDisplayID] ?? stripControllers.values.first!
+        if let gid = displayToGroup[activeDisplayID], let sc = stripControllers[gid] {
+            return sc
+        }
+        return stripControllers.values.first!
+    }
+
+    /// True when macOS "Displays have separate Spaces" is ON. In that state
+    /// shared-strip mode is disabled and Reel falls back to per-display strips.
+    /// Surfaced to the menu bar as a user-visible hint.
+    public var separateSpacesEnabled: Bool {
+        !displayManager.displaysShareOneSpace
     }
 
     /// Whether management is paused.
@@ -117,14 +141,19 @@ public final class WindowManager: @unchecked Sendable {
         for (displayID, info) in displayManager.displays {
             let wa = info.workingArea(
                 struts: struts, primaryScreenHeight: displayManager.primaryScreenHeight)
-            stripControllers[displayID] = StripController(
+            let gid: GroupID = [displayID]
+            stripControllers[gid] = StripController(
                 workingArea: wa, primaryScreenHeight: displayManager.primaryScreenHeight)
+            displayToGroup[displayID] = gid
         }
         // Ensure at least one strip exists (fallback)
         if stripControllers.isEmpty {
             let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
-            stripControllers[CGMainDisplayID()] = StripController(
+            let fallbackID = CGMainDisplayID()
+            let gid: GroupID = [fallbackID]
+            stripControllers[gid] = StripController(
                 workingArea: wa, primaryScreenHeight: NSScreen.main?.frame.height ?? 0)
+            displayToGroup[fallbackID] = gid
         }
         activeDisplayID = displayManager.mainDisplay?.displayID ?? CGMainDisplayID()
 
@@ -232,6 +261,12 @@ public final class WindowManager: @unchecked Sendable {
             fflush(stdout)
         #endif
 
+        // Form alignment groups before window discovery — init() creates per-
+        // display singletons, but shared-strip mode merges aligned displays
+        // into one group. didChangeScreenParameters doesn't fire at startup,
+        // so run the reconciler explicitly once here.
+        reconcileDisplayTopology(newDisplays: displayManager.displays)
+
         // Record initial Space fingerprint for all strips
         let initialWindows = getAllWindowInfo()
         let initialFingerprint = Set(
@@ -333,23 +368,33 @@ public final class WindowManager: @unchecked Sendable {
         titleBar.titleBarCornerInsetPx = config.cursor.titleBarCornerInsetPx
         titleBar.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
         titleBar.onNeedsManagedFrames = { [weak self] () -> (frames: [TileID: CGRect], primaryScreenHeight: CGFloat) in
-            guard let sc = self?.stripController else {
-                return (frames: [:], primaryScreenHeight: 0)
+            // Merge committed frames across ALL strips so title-bar hit-testing
+            // works for windows on non-active strips (e.g. second monitor).
+            guard let self = self else { return (frames: [:], primaryScreenHeight: 0) }
+            var merged: [TileID: CGRect] = [:]
+            for (_, sc) in self.stripControllers {
+                for (tid, frame) in sc.lastCommittedFrames {
+                    merged[tid] = frame
+                }
             }
-            return (frames: sc.lastCommittedFrames, primaryScreenHeight: sc.primaryScreenHeight)
+            return (frames: merged, primaryScreenHeight: self.displayManager.primaryScreenHeight)
         }
 
         titleBar.onNeedsTileColumnIndex = { [weak self] (tileID: TileID) -> Int? in
-            guard let sc = self?.stripController else { return nil }
-            for (i, col) in sc.strip.columns.enumerated() {
-                if col.tiles.contains(tileID) { return i }
+            guard let self = self else { return nil }
+            // Search every strip for this tile.
+            for (_, sc) in self.stripControllers {
+                for (i, col) in sc.strip.columns.enumerated() {
+                    if col.tiles.contains(tileID) { return i }
+                }
             }
             return nil
         }
 
         titleBar.onDragBegin = { [weak self] columnIndex in
             guard let self = self else { return }
-            let sc = self.stripController
+            // Use the strip the cursor is currently on, not the active strip.
+            let sc = self.stripControllerUnderCursor()
             let columns = self.buildColumnInfos(from: sc)
             self.reorderOverlay.onCommit = { [weak self] sourceIndex, insertionIndex in
                 guard let self = self else { return }
@@ -383,7 +428,10 @@ public final class WindowManager: @unchecked Sendable {
                 self.isReorderPending = false
             }
             // Use the full display frame in AppKit coordinates for the overlay window.
-            let displayID = self.stripControllers.first(where: { $0.value === sc })?.key ?? self.activeDisplayID
+            let gid = self.stripControllers.first(where: { $0.value === sc })?.key
+                ?? self.displayToGroup[self.activeDisplayID]
+                ?? [self.activeDisplayID]
+            let displayID = gid.first ?? self.activeDisplayID
             let screenFrame = self.displayManager.displays[displayID]?.frame ?? sc.strip.workingArea
             self.reorderOverlay.show(
                 columns: columns,
@@ -413,10 +461,11 @@ public final class WindowManager: @unchecked Sendable {
         }
         titleBar.onMenuShow = { [weak self] (columnIndex: Int, cgMousePoint: CGPoint) in
             guard let self = self else { return }
-            let sc = self.stripController
+            // Route to the strip under the cursor so windows on the non-active
+            // monitor still get the pill-bar menu.
+            let sc = self.stripControllerUnderCursor()
             let pills = sc.buildPillItems(for: columnIndex)
-            // Convert CG cursor position to AppKit coords for overlay positioning
-            let appKitY = sc.primaryScreenHeight - cgMousePoint.y
+            let appKitY = self.displayManager.primaryScreenHeight - cgMousePoint.y
             let anchorFrame = CGRect(x: cgMousePoint.x, y: appKitY, width: 0, height: 0)
             self.titleBarInteraction?.overlay.mode = .menu(
                 pills: pills, anchorFrame: anchorFrame, selectedIndex: nil
@@ -425,7 +474,7 @@ public final class WindowManager: @unchecked Sendable {
         }
         titleBar.onMenuSelect = { [weak self] (actionIndex: Int) in
             guard let self = self else { return }
-            let sc = self.stripController
+            let sc = self.stripControllerUnderCursor()
             if let action = sc.pillAction(for: actionIndex) {
                 switch action {
                 case .widthPreset(let idx):
@@ -563,8 +612,8 @@ public final class WindowManager: @unchecked Sendable {
         // Persist final state
         persistState()
         // Save all snapshots before shutdown
-        for (displayID, sc) in stripControllers {
-            let key = SnapshotKey(displayID: UInt32(displayID), spaceFingerprint: sc.currentSpaceFingerprint)
+        for (gid, sc) in stripControllers {
+            let key = SnapshotKey(groupID: Array(gid), spaceFingerprint: sc.currentSpaceFingerprint)
             if let snapshot = captureSnapshot(sc: sc) {
                 snapshotStore?.saveImmediate(snapshot, for: key)
             }
@@ -636,7 +685,7 @@ public final class WindowManager: @unchecked Sendable {
         }
 
         // Relayout
-        stripController.strip.recalculateWidths()
+        stripController.strip.recalculateWidths(at: TimeUtil.now())
         stripController.clearCommittedFrames()
         stripController.applyLayout()
 
@@ -669,29 +718,9 @@ public final class WindowManager: @unchecked Sendable {
             self.handleHotkeyAction(action)
         }
 
-        // Display changes → recalculate layout for all displays
+        // Display changes → reconcile strip controller topology
         displayManager.onDisplayChange = { [weak self] displays in
-            guard let self = self else { return }
-            let struts = Struts(
-                left: CGFloat(self.config.struts.left),
-                right: CGFloat(self.config.struts.right),
-                top: CGFloat(self.config.struts.top),
-                bottom: CGFloat(self.config.struts.bottom)
-            )
-            for (displayID, info) in displays {
-                if let sc = self.stripControllers[displayID] {
-                    sc.primaryScreenHeight = self.displayManager.primaryScreenHeight
-                    sc.updateWorkingArea(
-                        info.workingArea(
-                            struts: struts,
-                            primaryScreenHeight: self.displayManager.primaryScreenHeight))
-                }
-            }
-            // Use first display as fallback
-            if let main = displays.values.first(where: { $0.isMain }) ?? displays.values.first {
-                self.stripController.updateWorkingArea(
-                    main.workingArea(primaryScreenHeight: self.displayManager.primaryScreenHeight))
-            }
+            self?.reconcileDisplayTopology(newDisplays: displays)
         }
     }
 
@@ -743,8 +772,19 @@ public final class WindowManager: @unchecked Sendable {
             switch classification {
             case .tile:
                 if let app = tracker.apps[window.pid] {
-                    let (displayID, sc) = stripControllerEntryForWindow(window)
-                    let saved = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
+                    // Skip if this tile is already owned by some strip — avoids
+                    // duplicate columns when a re-discovery path (space change,
+                    // health check, mission-control drag echoes) fires
+                    // windowAdded for a window we already manage.
+                    if stripControllers.values.contains(where: { $0.windowMap[window.tileID] != nil }) {
+                        #if DEBUG
+                        print("[WM] windowAdded SKIP (already managed) wid=\(window.windowID)")
+                        fflush(stdout)
+                        #endif
+                        break
+                    }
+                    let (gid, sc) = stripControllerEntryForWindow(window)
+                    let saved = resolveSnapshotPosition(for: window, on: sc, groupID: gid)
                     print("[WM] windowAdded wid=\(window.windowID) pid=\(window.pid) app=\(app.bundleIdentifier ?? "?") restored=\(saved != nil)")
                     fflush(stdout)
                     sc.addWindow(window, app: app, restoredPosition: saved)
@@ -846,8 +886,8 @@ public final class WindowManager: @unchecked Sendable {
             } else if let window = tracker.windows[windowID],
                 let app = tracker.apps[window.pid]
             {
-                let (displayID, sc) = stripControllerEntryForWindow(window)
-                let saved = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
+                let (gid, sc) = stripControllerEntryForWindow(window)
+                let saved = resolveSnapshotPosition(for: window, on: sc, groupID: gid)
                 sc.addWindow(window, app: app, restoredPosition: saved)
                 scheduleSnapshotSave(sc: sc)
             }
@@ -858,8 +898,48 @@ public final class WindowManager: @unchecked Sendable {
             scheduleSnapshotSave()
 
         case .windowMoved(let windowID):
-            // User dragged a window — snap it back to its strip position
-            stripController.handleUserMove(windowID: windowID)
+            // User dragged a window — if it now lives on a different group's
+            // working area (e.g. Mission Control drag to another monitor),
+            // migrate it to that group's strip. Otherwise snap it back to its
+            // current strip position.
+            //
+            // IMPORTANT: only migrate when the window's FRAME CENTER is
+            // genuinely inside another group's workingArea. A window scrolled
+            // off its own strip's edge (e.g., pushed off when a new column is
+            // inserted on the destination) has a frame that doesn't contain
+            // any region's center — falling back to `stripControllers.first!`
+            // would incorrectly migrate it to a different strip.
+            let tileID = TileID(windowID)
+            let currentOwner = stripControllers.first(where: { $0.value.windowMap[tileID] != nil })?.value
+            if let owner = currentOwner, let window = owner.windowMap[tileID] {
+                var destEntry: (GroupID, StripController)? = nil
+                if case .success(let frame) = window.getFrame() {
+                    let center = CGPoint(x: frame.midX, y: frame.midY)
+                    for (gid, sc) in stripControllers {
+                        if sc.strip.workingArea.contains(center) {
+                            destEntry = (gid, sc)
+                            break
+                        }
+                    }
+                }
+                if let (destGID, destSC) = destEntry, destSC !== owner {
+                    // Genuine cross-group migration.
+                    if let app = tracker.apps[window.pid] {
+                        owner.removeWindow(tileID: tileID)
+                        let restored = resolveSnapshotPosition(for: window, on: destSC, groupID: destGID)
+                        destSC.addWindow(window, app: app, restoredPosition: restored)
+                        scheduleSnapshotSave(sc: destSC)
+                        print("[WM] window \(windowID) migrated to group \(destGID)")
+                        fflush(stdout)
+                    } else {
+                        owner.handleUserMove(windowID: windowID)
+                    }
+                } else {
+                    owner.handleUserMove(windowID: windowID)
+                }
+            } else {
+                stripController.handleUserMove(windowID: windowID)
+            }
 
         case .spaceChanged:
             handleSpaceChange()
@@ -885,6 +965,22 @@ public final class WindowManager: @unchecked Sendable {
         print("[WM] spaceChanged leaving wid=\(leavingWindow?.windowID ?? 0) app=\(leavingWindow.flatMap { tracker.apps[$0.pid]?.bundleIdentifier } ?? "?") title=\(logTitle(leavingWindow?.getTitle())) onScreenIDs=\(onScreenIDs)")
         fflush(stdout)
 
+        // With "Displays have separate Spaces" OFF (the required setting for
+        // shared-strip mode), a Space switch affects EVERY display simultaneously.
+        // Save+switch every strip, not just the active one, otherwise non-active
+        // strips retain a stale columns list / windowMap for a Space they no
+        // longer display — windows on the new Space get "stuck" unmanaged.
+        for (_, sc) in stripControllers where sc !== stripController {
+            saveSnapshotImmediate(sc: sc)
+            _ = sc.switchSpace(onScreenWindowIDs: onScreenIDs)
+            // Remove windows no longer on screen (closed/minimized while away).
+            let managedIDs = Set(sc.windowMap.keys.map(\.rawValue))
+            let goneIDs = managedIDs.subtracting(onScreenIDs)
+            for goneID in goneIDs {
+                sc.removeWindow(tileID: TileID(goneID))
+            }
+        }
+
         // Save snapshot for the leaving space before switching
         saveSnapshotImmediate(sc: stripController)
 
@@ -902,8 +998,13 @@ public final class WindowManager: @unchecked Sendable {
                 stripController.removeWindow(tileID: TileID(goneID))
             }
 
-            // Add new windows that weren't in the saved state
-            let newWindowIDs = onScreenIDs.subtracting(managedIDs)
+            // Add new windows that weren't in the saved state. Use the UNION
+            // of windowMaps across every strip — a window on a non-active
+            // strip must not be treated as "new" here.
+            let managedAcrossAllStrips: Set<UInt32> = stripControllers.values.reduce(into: []) { set, sc in
+                for tile in sc.windowMap.keys { set.insert(tile.rawValue) }
+            }
+            let newWindowIDs = onScreenIDs.subtracting(managedAcrossAllStrips)
 
             if !newWindowIDs.isEmpty {
                 for (pid, app) in tracker.apps {
@@ -919,9 +1020,9 @@ public final class WindowManager: @unchecked Sendable {
                         guard classification == .tile else { continue }
                         tracker.registerTrackedWindow(window)
                         app.observeWindow(window.element)
-                        let (displayID, targetSC) = stripControllerEntryForWindow(window)
+                        let (gid, targetSC) = stripControllerEntryForWindow(window)
                         let saved = resolveSnapshotPosition(
-                            for: window, on: targetSC, displayID: displayID)
+                            for: window, on: targetSC, groupID: gid)
                         targetSC.addWindow(window, app: app, restoredPosition: saved)
                         print("[WM] space: adopted new wid=\(window.windowID) pid=\(window.pid)")
                         fflush(stdout)
@@ -969,12 +1070,18 @@ public final class WindowManager: @unchecked Sendable {
             return
         }
 
-        // New Space — discover windows from scratch
-        stripController.beginBatch()
+        // New Space — discover windows from scratch. Other strips may have
+        // already populated via their own switchSpace above; skip windows
+        // already owned by any strip.
+        let managedAcrossAllStrips: Set<UInt32> = stripControllers.values.reduce(into: []) { set, sc in
+            for tile in sc.windowMap.keys { set.insert(tile.rawValue) }
+        }
+        for (_, sc) in stripControllers { sc.beginBatch() }
         for (pid, app) in tracker.apps {
             let appWindows = discoverWindows(pid: pid)
             for window in appWindows {
                 guard onScreenIDs.contains(window.windowID) else { continue }
+                guard !managedAcrossAllStrips.contains(window.windowID) else { continue }
                 guard !tracker.floatingWindows.contains(window.windowID),
                       !tracker.ignoredWindows.contains(window.windowID)
                 else { continue }
@@ -987,12 +1094,12 @@ public final class WindowManager: @unchecked Sendable {
 
                 tracker.registerTrackedWindow(window)
                 app.observeWindow(window.element)
-                let (displayID, targetSC) = stripControllerEntryForWindow(window)
-                let saved = resolveSnapshotPosition(for: window, on: targetSC, displayID: displayID)
+                let (gid, targetSC) = stripControllerEntryForWindow(window)
+                let saved = resolveSnapshotPosition(for: window, on: targetSC, groupID: gid)
                 targetSC.addWindow(window, app: app, restoredPosition: saved)
             }
         }
-        stripController.finishBatch()
+        for (_, sc) in stripControllers { sc.finishBatch() }
 
         // Consume any pending dock-activation carryover — the new-Space
         // discovery path does its own focus ordering via addWindow, and
@@ -1011,6 +1118,74 @@ public final class WindowManager: @unchecked Sendable {
         handleHotkeyAction(action)
     }
 
+    /// Return the strip controller for the group under the current cursor.
+    /// Used by hotkeys so commands route to the strip the user is looking at,
+    /// not just the `activeDisplayID` one. Falls back to the active strip if
+    /// the cursor's display isn't mapped (e.g. cursor on an unmanaged display).
+    /// Side-effect: updates `activeDisplayID` to the cursor's display when a
+    /// match is found, so subsequent non-cursor-routed code sees the right
+    /// "active" display.
+    private enum StripDirection { case up, down }
+
+    /// Focus the active window of the strip immediately above/below the strip
+    /// currently under the cursor, by CG-Y midpoint of each group's totalSpan.
+    /// No-op if there's no strip in the requested direction.
+    private func focusStripInDirection(_ dir: StripDirection) {
+        let current = stripControllerUnderCursor()
+        let curMidY = current.strip.groupArea.totalSpan.midY
+
+        var best: (sc: StripController, gid: GroupID)? = nil
+        var bestDist = CGFloat.infinity
+        for (gid, sc) in stripControllers where sc !== current {
+            let theirMidY = sc.strip.groupArea.totalSpan.midY
+            let dy = theirMidY - curMidY
+            switch dir {
+            case .up:    guard dy < 0 else { continue }
+            case .down:  guard dy > 0 else { continue }
+            }
+            let dist = abs(dy)
+            if dist < bestDist {
+                bestDist = dist
+                best = (sc, gid)
+            }
+        }
+        guard let target = best else {
+            print("[WM] focus \(dir) — no strip found")
+            fflush(stdout)
+            return
+        }
+        // Snap activeDisplayID to the target group so subsequent non-cursor-
+        // routed code points at the right strip.
+        if let firstID = target.sc.strip.groupArea.regions.first?.displayID {
+            activeDisplayID = CGDirectDisplayID(firstID)
+        }
+        target.sc.focusActiveWindow()
+        print("[WM] focus \(dir) → group \(target.gid)")
+        fflush(stdout)
+    }
+
+    private func stripControllerUnderCursor() -> StripController {
+        let cursor = CGEvent(source: nil)?.location ?? .zero
+        let primaryH = displayManager.primaryScreenHeight
+        for (displayID, info) in displayManager.displays {
+            // DisplayInfo.frame is AppKit coords; convert to CG (top-left origin).
+            let cgY = primaryH - info.frame.maxY
+            let cgRect = CGRect(
+                x: info.frame.minX, y: cgY,
+                width: info.frame.width, height: info.frame.height
+            )
+            if cgRect.contains(cursor) {
+                if let gid = displayToGroup[displayID], let sc = stripControllers[gid] {
+                    if activeDisplayID != displayID {
+                        activeDisplayID = displayID
+                    }
+                    return sc
+                }
+            }
+        }
+        return stripController
+    }
+
     private func handleHotkeyAction(_ action: HotkeyAction) {
         if isReorderPending {
             switch action {
@@ -1020,22 +1195,27 @@ public final class WindowManager: @unchecked Sendable {
                 break
             }
         }
+        let sc = stripControllerUnderCursor()
         switch action {
         case .focusLeft:
-            stripController.focusLeft()
+            sc.focusLeft()
         case .focusRight:
-            stripController.focusRight()
+            sc.focusRight()
+        case .focusUp:
+            focusStripInDirection(.up)
+        case .focusDown:
+            focusStripInDirection(.down)
         case .moveColumnLeft:
-            stripController.moveColumnLeft()
+            sc.moveColumnLeft()
             scheduleSnapshotSave()
         case .moveColumnRight:
-            stripController.moveColumnRight()
+            sc.moveColumnRight()
             scheduleSnapshotSave()
         case .cycleWidthPreset:
-            stripController.cycleWidthPreset()
+            sc.cycleWidthPreset()
             scheduleSnapshotSave()
         case .toggleFullWidth:
-            stripController.toggleFullWidth()
+            sc.toggleFullWidth()
             scheduleSnapshotSave()
         case .toggleFloating:
             if let focusedWID = getFocusedWindowID(),
@@ -1045,21 +1225,21 @@ public final class WindowManager: @unchecked Sendable {
             {
                 tracker.unmarkFloating(focusedWID)
                 userToggledFloats.remove(focusedWID)
-                let (displayID, sc) = stripControllerEntryForWindow(window)
-                let restored = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
-                stripController.unfloatWindow(window, app: app, restoredPosition: restored)
+                let (gid, targetSC) = stripControllerEntryForWindow(window)
+                let restored = resolveSnapshotPosition(for: window, on: targetSC, groupID: gid)
+                targetSC.unfloatWindow(window, app: app, restoredPosition: restored)
                 scheduleSnapshotSave()
                 print("[WM] Window \(focusedWID) is now tiled (unfloated)")
                 fflush(stdout)
-            } else if let window = stripController.toggleFloating() {
-                saveSnapshotImmediate(sc: stripController)
+            } else if let window = sc.toggleFloating() {
+                saveSnapshotImmediate(sc: sc)
                 tracker.markFloating(window.windowID)
                 userToggledFloats.insert(window.windowID)
                 print("[WM] Window \(window.tileID.rawValue) is now floating")
                 fflush(stdout)
             }
         case .closeWindow:
-            stripController.closeActiveWindow()
+            sc.closeActiveWindow()
         case .workspace:
             break  // TODO: Phase 3
         }
@@ -1151,45 +1331,40 @@ public final class WindowManager: @unchecked Sendable {
         let onScreenWindows = getAllWindowInfo()
         let onScreenIDs = Set(onScreenWindows.map(\.windowID))
 
-        // Pass 1: Remove dead windows from the strip
+        // Pass 1: Remove dead windows from every strip (not just the active one).
+        // A window on a secondary strip that disappeared from CGWindowList is just
+        // as stale as one on the active strip.
         var changed = false
-        for (tileID, window) in stripController.windowMap {
-            // Method 1: Check if the window is still in CGWindowList
-            if !onScreenIDs.contains(window.windowID) {
-                // Fix B: Skip recently adopted windows — gives tab-based apps time
-                // to stabilize after a tab switch before we declare the window dead.
-                if let adoptedAt = recentlyAdoptedWindows[window.windowID],
-                   now.timeIntervalSince(adoptedAt) < 2.0 {
-                    #if DEBUG
-                        print("[HealthCheck] Skipping recently adopted window wid=\(window.windowID)")
-                        fflush(stdout)
-                    #endif
-                    continue
-                }
+        for (_, sc) in stripControllers {
+            for (tileID, window) in sc.windowMap {
+                if !onScreenIDs.contains(window.windowID) {
+                    if let adoptedAt = recentlyAdoptedWindows[window.windowID],
+                       now.timeIntervalSince(adoptedAt) < 2.0 {
+                        #if DEBUG
+                            print("[HealthCheck] Skipping recently adopted window wid=\(window.windowID)")
+                            fflush(stdout)
+                        #endif
+                        continue
+                    }
 
-                // Capture position before removal for same-PID tab-switch detection.
-                // If another window from this PID appears soon, it inherits this column.
-                if let colIndex = stripController.strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
-                    let col = stripController.strip.columns[colIndex]
-                    let colData = stripController.strip.columnData[colIndex]
-                    let width: ColumnWidth = col.width == .auto ? .fixed(colData.cachedWidth) : col.width
-                    recentRemovalsByPID[window.pid] = RecentRemoval(
-                        columnIndex: colIndex, width: width,
-                        presetIndex: col.presetIndex, isFullWidth: col.isFullWidth, date: now)
-                }
+                    if let colIndex = sc.strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
+                        let col = sc.strip.columns[colIndex]
+                        let colData = sc.strip.columnData[colIndex]
+                        let width: ColumnWidth = col.width == .auto ? .fixed(colData.cachedWidth) : col.width
+                        recentRemovalsByPID[window.pid] = RecentRemoval(
+                            columnIndex: colIndex, width: width,
+                            presetIndex: col.presetIndex, isFullWidth: col.isFullWidth, date: now)
+                    }
 
-                print("[HealthCheck] Removing dead window wid=\(window.windowID) tileID=\(tileID.rawValue)")
-                fflush(stdout)
-                stripController.removeWindow(tileID: tileID)
-                scheduleSnapshotSave()
-                tracker.untrackWindow(window.windowID)
-                recentlyAdoptedWindows.removeValue(forKey: window.windowID)
-                changed = true
-                continue
+                    print("[HealthCheck] Removing dead window wid=\(window.windowID) tileID=\(tileID.rawValue)")
+                    fflush(stdout)
+                    sc.removeWindow(tileID: tileID)
+                    scheduleSnapshotSave(sc: sc)
+                    tracker.untrackWindow(window.windowID)
+                    recentlyAdoptedWindows.removeValue(forKey: window.windowID)
+                    changed = true
+                }
             }
-            // Note: We skip AX probing for windows confirmed alive by CGWindowList.
-            // Hung-but-alive apps will still appear here — they are cleaned up
-            // when the process eventually terminates and disappears from CGWindowList.
         }
 
         // Pass 2: Adopt unmanaged windows that should be in the strip.
@@ -1248,7 +1423,7 @@ public final class WindowManager: @unchecked Sendable {
                     tracker.registerTrackedWindow(window)
                     app.observeWindow(window.element)
                 }
-                let (displayID, targetSC) = stripControllerEntryForWindow(window)
+                let (gid, targetSC) = stripControllerEntryForWindow(window)
 
                 // Fix D: If a window from this PID was recently removed (tab switch),
                 // inherit its position instead of looking up this window's own saved position.
@@ -1264,7 +1439,7 @@ public final class WindowManager: @unchecked Sendable {
                         fflush(stdout)
                     #endif
                 } else {
-                    restored = resolveSnapshotPosition(for: window, on: targetSC, displayID: displayID)
+                    restored = resolveSnapshotPosition(for: window, on: targetSC, groupID: gid)
                 }
 
                 targetSC.addWindow(window, app: app, restoredPosition: restored)
@@ -1372,6 +1547,12 @@ public final class WindowManager: @unchecked Sendable {
         case .focusRight:
             stripController.focusRight()
             return ReelResponse(success: true)
+        case .focusUp:
+            focusStripInDirection(.up)
+            return ReelResponse(success: true)
+        case .focusDown:
+            focusStripInDirection(.down)
+            return ReelResponse(success: true)
         case .moveColumnLeft:
             stripController.moveColumnLeft()
             scheduleSnapshotSave()
@@ -1396,8 +1577,8 @@ public final class WindowManager: @unchecked Sendable {
             {
                 tracker.unmarkFloating(focusedWID)
                 userToggledFloats.remove(focusedWID)
-                let (displayID, sc) = stripControllerEntryForWindow(window)
-                let restored = resolveSnapshotPosition(for: window, on: sc, displayID: displayID)
+                let (gid, sc) = stripControllerEntryForWindow(window)
+                let restored = resolveSnapshotPosition(for: window, on: sc, groupID: gid)
                 stripController.unfloatWindow(window, app: app, restoredPosition: restored)
                 scheduleSnapshotSave()
             } else if let window = stripController.toggleFloating() {
@@ -1420,15 +1601,129 @@ public final class WindowManager: @unchecked Sendable {
             }
             return ReelResponse(success: true, data: "[]")
         case .getLayout:
-            let cols = stripController.strip.columns.enumerated().map { (i, col) -> [String: Any] in
-                [
-                    "index": i,
-                    "tiles": col.tiles.map(\.rawValue),
-                    "width": stripController.strip.columnData[i].cachedWidth,
-                    "active": i == stripController.strip.activeColumnIndex,
+            let now = TimeUtil.now()
+            let activeGID = displayToGroup[activeDisplayID]
+
+            let groupsJSON: [[String: Any]] = stripControllers.map { (gid, sc) -> [String: Any] in
+                let strip = sc.strip
+                let frames = computeTargetFrames(strip: strip, time: now)
+                var frameByTile: [UInt32: TargetFrame] = [:]
+                for f in frames { frameByTile[f.tileID.rawValue] = f }
+
+                let regions: [[String: Any]] = strip.groupArea.regions.map { r in
+                    [
+                        "displayID": r.displayID,
+                        "minX": r.rect.minX, "minY": r.rect.minY,
+                        "maxX": r.rect.maxX, "maxY": r.rect.maxY,
+                        "width": r.rect.width, "height": r.rect.height,
+                    ]
+                }
+
+                let cols: [[String: Any]] = strip.columns.enumerated().map { (i, col) -> [String: Any] in
+                    let cd = strip.columnData[i]
+                    let firstTile = col.tiles.first.map { $0.rawValue } ?? 0
+                    let f = frameByTile[firstTile]
+                    let owningRegion = strip.regionForColumn(i, at: now)
+                    var overlaps: [[String: Any]] = []
+                    if let f {
+                        for r in strip.groupArea.regions {
+                            let inter = f.frame.intersection(r.rect)
+                            let area = (inter.isNull || inter.width <= 0 || inter.height <= 0)
+                                ? 0.0
+                                : Double(inter.width * inter.height)
+                            overlaps.append([
+                                "displayID": r.displayID,
+                                "interX": inter.isNull ? 0 : inter.minX,
+                                "interW": inter.isNull ? 0 : inter.width,
+                                "area": area,
+                            ])
+                        }
+                    }
+                    // Window metadata for this column's active tile.
+                    let firstTileID = col.tiles.first
+                    let window = firstTileID.flatMap { sc.windowMap[$0] }
+                    return [
+                        "index": i,
+                        "tiles": col.tiles.map(\.rawValue),
+                        "windowID": window?.windowID ?? 0,
+                        "bundleID": window.flatMap { tracker.apps[$0.pid]?.bundleIdentifier } ?? "",
+                        "title": window?.getTitle() ?? "",
+                        "width": String(describing: col.width),
+                        "cachedWidth": cd.cachedWidth,
+                        "currentAnimatedWidth": cd.currentWidth(at: now),
+                        "isFullWidth": col.isFullWidth,
+                        "presetIndex": col.presetIndex as Any? ?? NSNull(),
+                        "active": i == strip.activeColumnIndex,
+                        "snapIndex": strip.snapIndices.indices.contains(i) ? strip.snapIndices[i] : -1,
+                        "owningRegionDisplayID": owningRegion.displayID,
+                        "frame": f.map { [
+                            "x": $0.frame.minX, "y": $0.frame.minY,
+                            "w": $0.frame.width, "h": $0.frame.height,
+                        ] } ?? [:],
+                        "isVisible": f?.isVisible ?? false,
+                        "isOffScreen": f?.isOffScreen ?? false,
+                        "regionOverlaps": overlaps,
+                    ]
+                }
+
+                // Stashed space states (other desktops this strip has seen).
+                let savedSpaces: [[String: Any]] = sc.savedSpaceFingerprints.map { fp in
+                    let snap = sc.savedSpaceSnapshot(for: fp) ?? []
+                    return [
+                        "fingerprint": fp.sorted(),
+                        "windows": snap.map { entry in
+                            [
+                                "tileID": entry.tileID.rawValue,
+                                "windowID": entry.windowID,
+                                "bundleID": entry.bundleID ?? "",
+                                "title": entry.title ?? "",
+                            ]
+                        },
+                    ]
+                }
+
+                return [
+                    "groupID": gid,
+                    "isActive": gid == activeGID,
+                    "regions": regions,
+                    "viewPos": strip.viewPos(at: now),
+                    "workingAreaMinX": strip.workingArea.minX,
+                    "workingAreaWidth": strip.workingArea.width,
+                    "gap": strip.gap,
+                    "activeColumnIndex": strip.activeColumnIndex,
+                    "currentSpaceFingerprint": sc.currentSpaceFingerprint.sorted(),
+                    "currentColumns": cols,
+                    "savedSpaces": savedSpaces,
                 ]
             }
-            if let data = try? JSONSerialization.data(withJSONObject: cols),
+
+            // Snapshot store entries (persisted spaces across all groups).
+            var storeEntries: [[String: Any]] = []
+            if let store = snapshotStore {
+                for (key, snap) in store.allSnapshots() {
+                    storeEntries.append([
+                        "groupID": key.groupID,
+                        "spaceFingerprint": key.spaceFingerprint.sorted(),
+                        "slots": snap.slots.map { slot in
+                            [
+                                "bundleID": slot.bundleID,
+                                "title": slot.windowTitle ?? "",
+                                "width": String(describing: slot.width),
+                                "windowID": slot.windowID ?? 0,
+                                "isFullWidth": slot.isFullWidth,
+                            ]
+                        },
+                    ])
+                }
+            }
+
+            let payload: [String: Any] = [
+                "activeDisplayID": activeDisplayID,
+                "primaryScreenHeight": displayManager.primaryScreenHeight,
+                "groups": groupsJSON,
+                "snapshotStore": storeEntries,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]),
                 let json = String(data: data, encoding: .utf8)
             {
                 return ReelResponse(success: true, data: json)
@@ -1440,7 +1735,7 @@ public final class WindowManager: @unchecked Sendable {
                 for (key, snapshot) in store.allSnapshots() {
                     for (i, slot) in snapshot.slots.enumerated() {
                         allSlots.append([
-                            "displayID": key.displayID,
+                            "groupID": key.groupID,
                             "slotIndex": i,
                             "bundleID": slot.bundleID,
                             "windowTitle": slot.windowTitle ?? "nil",
@@ -1478,7 +1773,7 @@ public final class WindowManager: @unchecked Sendable {
 
     /// Resolve a snapshot position for a window using the strip snapshot store.
     private func resolveSnapshotPosition(
-        for window: AXWindow, on sc: StripController, displayID: CGDirectDisplayID
+        for window: AXWindow, on sc: StripController, groupID: [CGDirectDisplayID]
     ) -> RestoredSlot? {
         guard config.positionMemory, let snapshotStore else { return nil }
 
@@ -1486,12 +1781,15 @@ public final class WindowManager: @unchecked Sendable {
         guard let bundleID else { return nil }
 
         let title = window.getTitle()
-        let key = SnapshotKey(displayID: UInt32(displayID), spaceFingerprint: sc.currentSpaceFingerprint)
+        let key = SnapshotKey(
+            groupID: Array(groupID),
+            spaceFingerprint: sc.currentSpaceFingerprint
+        )
         var currentBundleIDs = buildCurrentBundleIDs(sc: sc)
         currentBundleIDs.insert(bundleID)  // Include the incoming window for disk matching
 
         guard let snapshot = snapshotStore.snapshotFuzzyByBundleIDs(
-            displayID: key.displayID, fingerprint: key.spaceFingerprint,
+            groupID: key.groupID, fingerprint: key.spaceFingerprint,
             currentBundleIDs: currentBundleIDs)
         else { return nil }
 
@@ -1616,8 +1914,10 @@ public final class WindowManager: @unchecked Sendable {
 
     /// Build a SnapshotKey for the given strip controller.
     private func snapshotStoreKey(for sc: StripController) -> SnapshotKey {
-        let displayID = stripControllers.first(where: { $0.value === sc })?.key ?? activeDisplayID
-        return SnapshotKey(displayID: UInt32(displayID), spaceFingerprint: sc.currentSpaceFingerprint)
+        let gid = stripControllers.first(where: { $0.value === sc })?.key
+            ?? displayToGroup[activeDisplayID]
+            ?? [activeDisplayID]
+        return SnapshotKey(groupID: Array(gid), spaceFingerprint: sc.currentSpaceFingerprint)
     }
 
     /// Parse a modifier key string into CGEventFlags. Returns empty flags for "none"/"".
@@ -1682,18 +1982,18 @@ public final class WindowManager: @unchecked Sendable {
             snapshotStore.saveImmediate(snapshot, for: key)
             // Consume the matching disk entry now that we have a live entry
             let bundleIDs = buildCurrentBundleIDs(sc: sc)
-            snapshotStore.consumeDiskEntry(displayID: key.displayID, bundleIDs: bundleIDs)
+            snapshotStore.consumeDiskEntry(groupID: key.groupID, bundleIDs: bundleIDs)
         }
     }
 
-    /// Returns both the displayID and StripController for a window based on its frame.
+    /// Returns both the GroupID and StripController for a window based on its frame.
     private func stripControllerEntryForWindow(_ window: AXWindow) -> (
-        CGDirectDisplayID, StripController
+        GroupID, StripController
     ) {
         if let frame = try? window.getFrame().get() {
-            for (displayID, sc) in stripControllers {
+            for (gid, sc) in stripControllers {
                 if sc.strip.workingArea.intersects(frame) {
-                    return (displayID, sc)
+                    return (gid, sc)
                 }
             }
         }
@@ -1711,8 +2011,277 @@ public final class WindowManager: @unchecked Sendable {
             let cgFrame = CGRect(
                 x: info.frame.minX, y: cgY, width: info.frame.width, height: info.frame.height)
             if cgFrame.contains(windowCenter) {
-                return stripControllers[displayID]
+                if let gid = displayToGroup[displayID] {
+                    return stripControllers[gid]
+                }
             }
+        }
+        return nil
+    }
+
+    // MARK: - Display Topology Reconciliation
+
+    /// Reconcile `stripControllers` with the current display set.
+    /// Consults `displaysShareOneSpace` + `alignmentGroups()`:
+    ///   - Separate Spaces ON: force singleton groups (today's behavior).
+    ///   - Separate Spaces OFF: form groups per alignment rule.
+    /// Handles pure-new, pure-dissolve, metric-change diff cases. Merge
+    /// (subsuming) and split (partitioning) group-diff cases arrive in
+    /// follow-up tasks. Idempotent.
+    private func reconcileDisplayTopology(
+        newDisplays: [CGDirectDisplayID: DisplayInfo]
+    ) {
+        let struts = Struts(
+            left: CGFloat(config.struts.left),
+            right: CGFloat(config.struts.right),
+            top: CGFloat(config.struts.top),
+            bottom: CGFloat(config.struts.bottom)
+        )
+        let primaryH = displayManager.primaryScreenHeight
+
+        // Compute new groups. If separate-Spaces is ON, force singletons.
+        let newGroups: [[CGDirectDisplayID]]
+        if displayManager.displaysShareOneSpace {
+            newGroups = DisplayManager.alignmentGroups(from: newDisplays)
+        } else {
+            newGroups = newDisplays.keys.sorted().map { [$0] }
+        }
+
+        let newGroupIDs = Set(newGroups.map { WindowManager.groupID(from: $0) })
+        let oldGroupIDs = Set(stripControllers.keys)
+        let addedGIDs = newGroupIDs.subtracting(oldGroupIDs)
+        let removedGIDs = oldGroupIDs.subtracting(newGroupIDs)
+        let persistingGIDs = oldGroupIDs.intersection(newGroupIDs)
+
+        // Helper: build a GroupWorkingArea for a group of display IDs.
+        func buildGroupArea(for members: [CGDirectDisplayID]) -> GroupWorkingArea {
+            let mainID = displayManager.mainDisplay?.displayID
+            let sortedMembers = members.sorted { (a, b) in
+                (newDisplays[a]?.frame.minX ?? 0) < (newDisplays[b]?.frame.minX ?? 0)
+            }
+            let regions: [DisplayRegion] = sortedMembers.compactMap { id in
+                guard let info = newDisplays[id] else { return nil }
+                let rect = info.workingArea(struts: struts, primaryScreenHeight: primaryH)
+                return DisplayRegion(displayID: UInt32(id), rect: rect)
+            }
+            let referenceMidX: CGFloat
+            if let main = mainID, members.contains(main),
+               let mainInfo = newDisplays[main] {
+                let mainRect = mainInfo.workingArea(struts: struts, primaryScreenHeight: primaryH)
+                referenceMidX = mainRect.midX
+            } else {
+                referenceMidX = regions.first?.rect.midX ?? 0
+            }
+            return GroupWorkingArea(regions: regions, referenceMidX: referenceMidX)
+        }
+
+        // 1. Persisting groups — update geometry, refresh primaryScreenHeight.
+        for gid in persistingGIDs {
+            guard let sc = stripControllers[gid] else { continue }
+            sc.primaryScreenHeight = primaryH
+            sc.updateGroupArea(buildGroupArea(for: gid))
+        }
+
+        // 2. Added groups — may be pure-new or merged from predecessor groups.
+        for gid in addedGIDs {
+            let ga = buildGroupArea(for: gid)
+
+            // Merge case: if this new group's member set is a superset of one
+            // or more groups being removed, adopt those groups' columns before
+            // the dying controllers are disposed.
+            let gidSet = Set(gid)
+            var predecessors: [GroupID] = []
+            for oldGID in removedGIDs where gidSet.isSuperset(of: Set(oldGID)) {
+                predecessors.append(oldGID)
+            }
+
+            let sc = StripController(
+                workingArea: ga.totalSpan,
+                primaryScreenHeight: primaryH
+            )
+            applyConfigToStrip(sc)
+            sc.strip.groupArea = ga
+            if let fp = stripControllers.values.first?.currentSpaceFingerprint {
+                sc.setSpaceFingerprint(fp)
+            }
+            stripControllers[gid] = sc
+            for did in gid {
+                displayToGroup[did] = gid
+            }
+
+            if predecessors.isEmpty {
+                rehomeWindows(onto: sc, newGroupID: gid)
+                print("[WM] group added: \(gid)")
+            } else {
+                // Adopt columns from predecessors in X order (leftmost first).
+                sc.beginBatch()
+                var adopted = 0
+                for oldGID in predecessors {
+                    guard let oldSC = stripControllers[oldGID] else { continue }
+                    let entries = oldSC.windowMap.map { ($0.key, $0.value) }
+                    for (_, window) in entries {
+                        guard let app = tracker.apps[window.pid] else { continue }
+                        sc.addWindow(window, app: app)
+                        adopted += 1
+                    }
+                    // Clear predecessor's windowMap so the removed-branch's
+                    // rehomeWindowsOff is a no-op for these controllers.
+                    for tileID in Array(oldSC.windowMap.keys) {
+                        oldSC.removeWindow(tileID: tileID)
+                    }
+                }
+                sc.finishBatch()
+                print("[WM] group merged: \(predecessors) → \(gid), adopted \(adopted) columns")
+            }
+            fflush(stdout)
+        }
+
+        // 3. Removed groups — may be pure-dissolve or split into ≥2 new groups.
+        for gid in removedGIDs {
+            guard let dyingSC = stripControllers[gid] else { continue }
+
+            let gidSet = Set(gid)
+            // Split case: new groups whose members are subsets of this old one.
+            var successors: [GroupID] = []
+            for newGID in addedGIDs where gidSet.isSuperset(of: Set(newGID)) {
+                successors.append(newGID)
+            }
+
+            if successors.isEmpty {
+                // Pure dissolve — windows migrate to any surviving strip by position.
+                rehomeWindowsOff(dyingSC: dyingSC)
+            } else {
+                // Partition dyingSC's windowMap by midpoint-X into successors
+                // (successor controllers were already created in step 2).
+                var partitioned = 0
+                let entries = dyingSC.windowMap.map { ($0.key, $0.value) }
+                for (_, window) in entries {
+                    guard let app = tracker.apps[window.pid] else { continue }
+                    guard case .success(let frame) = window.getFrame() else { continue }
+                    let centerX = Double(frame.midX)
+                    var chosen: StripController?
+                    var chosenDist: Double = .infinity
+                    for newGID in successors {
+                        guard let newSC = stripControllers[newGID] else { continue }
+                        let span = newSC.strip.workingArea
+                        let dist: Double
+                        if centerX < Double(span.minX) {
+                            dist = Double(span.minX) - centerX
+                        } else if centerX > Double(span.maxX) {
+                            dist = centerX - Double(span.maxX)
+                        } else {
+                            dist = 0
+                        }
+                        if dist < chosenDist {
+                            chosenDist = dist
+                            chosen = newSC
+                        }
+                    }
+                    guard let target = chosen else { continue }
+                    target.addWindow(window, app: app)
+                    partitioned += 1
+                }
+                for tileID in Array(dyingSC.windowMap.keys) {
+                    dyingSC.removeWindow(tileID: tileID)
+                }
+                print("[WM] group split: \(gid) → \(successors), partitioned \(partitioned) columns")
+                fflush(stdout)
+            }
+
+            dyingSC.focusIndicator.hide()
+            stripControllers.removeValue(forKey: gid)
+            for did in gid {
+                displayToGroup.removeValue(forKey: did)
+            }
+            print("[WM] group removed: \(gid)")
+            fflush(stdout)
+        }
+
+        // 4. Snap activeDisplayID to a live display if its group vanished.
+        let hasLiveGroup: Bool
+        if let gid = displayToGroup[activeDisplayID], stripControllers[gid] != nil {
+            hasLiveGroup = true
+        } else {
+            hasLiveGroup = false
+        }
+        if !hasLiveGroup {
+            activeDisplayID = displayManager.mainDisplay?.displayID
+                ?? displayToGroup.keys.first
+                ?? CGMainDisplayID()
+            print("[WM] activeDisplayID → \(activeDisplayID)")
+            fflush(stdout)
+        }
+    }
+
+    /// Apply current config state + frame loop to a fresh StripController.
+    private func applyConfigToStrip(_ sc: StripController) {
+        sc.strip.gap = config.gap
+        sc.strip.defaultWidth = config.defaultWidth
+        sc.strip.widthPresets = config.widthPresets
+        sc.strip.snapPoints = config.snapPoints
+        sc.animationEnabled = config.animationEnabled
+        sc.gestureSnap = config.gestureSnap
+        sc.widthSpringParams = config.widthSpringParams
+        sc.focusIndicator.reloadConfig(config.focusIndicator)
+        sc.focusIndicator.springParams = config.widthSpringParams
+        sc.frameLoop = frameLoop
+    }
+
+    /// Migrate windows from other strips whose current frame center lands inside
+    /// the newly-added display's working area.
+    private func rehomeWindows(onto targetSC: StripController, newGroupID: GroupID) {
+        let newWA = targetSC.strip.workingArea
+        var migrated = 0
+        for (otherGID, otherSC) in stripControllers where otherGID != newGroupID {
+            let candidates = otherSC.windowMap.map { ($0.key, $0.value) }
+            for (tileID, window) in candidates {
+                guard case .success(let frame) = window.getFrame() else { continue }
+                let center = CGPoint(x: frame.midX, y: frame.midY)
+                guard newWA.contains(center) else { continue }
+                guard let app = tracker.apps[window.pid] else { continue }
+                otherSC.removeWindow(tileID: tileID)
+                targetSC.addWindow(window, app: app)
+                migrated += 1
+            }
+        }
+        if migrated > 0 {
+            print("[WM] add: migrated \(migrated) windows onto group \(newGroupID)")
+            fflush(stdout)
+        }
+    }
+
+    /// Re-home every window on a dying strip to a surviving strip chosen by
+    /// frame position (macOS has already reassigned frames to live displays).
+    private func rehomeWindowsOff(dyingSC: StripController) {
+        let survivors = stripControllers.filter { $0.value !== dyingSC }
+        guard !survivors.isEmpty else { return }
+        let entries = dyingSC.windowMap.map { ($0.key, $0.value) }
+        var migrated = 0
+        for (tileID, window) in entries {
+            guard let app = tracker.apps[window.pid] else {
+                dyingSC.removeWindow(tileID: tileID)
+                continue
+            }
+            let targetSC = surviving(for: window, among: survivors) ?? survivors.values.first!
+            dyingSC.removeWindow(tileID: tileID)
+            targetSC.addWindow(window, app: app)
+            migrated += 1
+        }
+        if migrated > 0 {
+            print("[WM] remove: migrated \(migrated) windows off dying strip")
+            fflush(stdout)
+        }
+    }
+
+    /// Pick a surviving strip whose working area contains the window's center.
+    private func surviving(
+        for window: AXWindow,
+        among survivors: [GroupID: StripController]
+    ) -> StripController? {
+        guard case .success(let frame) = window.getFrame() else { return nil }
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        for (_, sc) in survivors where sc.strip.workingArea.contains(center) {
+            return sc
         }
         return nil
     }

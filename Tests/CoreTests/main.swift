@@ -5,6 +5,7 @@ import Config
 import IPC
 import TOMLKit
 import WindowManager
+import Platform
 
 // Simple test runner — no Xcode or XCTest required
 var passed = 0
@@ -165,10 +166,10 @@ section("Toggle full width")
 do {
     var strip = makeStrip(columnCount: 2)
     check(!strip.columns[0].isFullWidth)
-    strip.toggleFullWidth()
+    strip.toggleFullWidth(at: 0)
     check(strip.columns[0].isFullWidth)
     assertClose(strip.columnData[0].cachedWidth, strip.workingArea.width, tolerance: 0.01)
-    strip.toggleFullWidth()
+    strip.toggleFullWidth(at: 0)
     check(!strip.columns[0].isFullWidth)
 }
 
@@ -363,10 +364,22 @@ do {
 print()
 print("Window Classification Tests")
 
-section("Standard window → tile")
+section("Standard window with title → tile")
 do {
-    let props = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", isResizable: true, hasCloseButton: true)
+    let props = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", isResizable: true, hasCloseButton: true, title: "My Document")
     assertEq(classifyWindow(props), .tile)
+}
+
+section("Standard window with nil title → float (popup/autocomplete)")
+do {
+    let props = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", isResizable: true, hasCloseButton: true, title: nil)
+    assertEq(classifyWindow(props), .float)
+}
+
+section("Standard window with empty title → float (popup/autocomplete)")
+do {
+    let props = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", isResizable: true, hasCloseButton: true, title: "")
+    assertEq(classifyWindow(props), .float)
 }
 
 section("Dialog → float")
@@ -2050,6 +2063,577 @@ do {
     for i in 0..<frames.count {
         assertClose(Double(frames[i].frame.minY), Double(strip.workingArea.minY), tolerance: 1, "frame \(i) default at ceiling")
     }
+}
+
+// ============================================================
+
+// MARK: - DisplayRegion Tests
+print()
+print("DisplayRegion Tests")
+
+section("DisplayRegion stores displayID and rect")
+do {
+    let region = DisplayRegion(displayID: 42, rect: CGRect(x: 100, y: 0, width: 1440, height: 900))
+    assertEq(region.displayID, UInt32(42), "displayID round-trips")
+    assertEq(region.rect, CGRect(x: 100, y: 0, width: 1440, height: 900), "rect round-trips")
+}
+
+section("DisplayRegion is Equatable")
+do {
+    let a = DisplayRegion(displayID: 1, rect: CGRect(x: 0, y: 0, width: 100, height: 100))
+    let b = DisplayRegion(displayID: 1, rect: CGRect(x: 0, y: 0, width: 100, height: 100))
+    let c = DisplayRegion(displayID: 2, rect: CGRect(x: 0, y: 0, width: 100, height: 100))
+    check(a == b, "same displayID + rect equal")
+    check(a != c, "different displayID differs")
+}
+
+// MARK: - GroupWorkingArea Tests
+print()
+print("GroupWorkingArea Tests")
+
+section("solo region — totalSpan equals the region rect")
+do {
+    let r = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r)],
+        referenceMidX: r.midX
+    )
+    assertEq(ga.totalSpan, r, "solo totalSpan = rect")
+    assertEq(ga.referenceMidX, r.midX, "referenceMidX set")
+    assertEq(ga.regions.count, 1, "one region")
+}
+
+section("two flush regions — totalSpan is their union")
+do {
+    let r0 = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let r1 = CGRect(x: 1440, y: 25, width: 2560, height: 1415)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    assertEq(ga.totalSpan.minX, 0, "union minX")
+    assertEq(ga.totalSpan.maxX, 4000, "union maxX (1440+2560)")
+    assertEq(ga.totalSpan.minY, 25, "union minY")
+    assertEq(ga.totalSpan.maxY, 1440, "union maxY")
+}
+
+section("two regions with gap — totalSpan spans the gap")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1100, y: 0, width: 1000, height: 800)  // 100px gap
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    assertEq(ga.totalSpan, CGRect(x: 0, y: 0, width: 2100, height: 800), "union bridges gap")
+}
+
+// MARK: - Strip.groupArea Tests
+print()
+print("Strip.groupArea Tests")
+
+section("Strip constructed from groupArea exposes workingArea computed")
+do {
+    let r = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r)],
+        referenceMidX: r.midX
+    )
+    let strip = Strip(groupArea: ga)
+    assertEq(strip.groupArea, ga, "groupArea round-trips")
+    assertEq(strip.workingArea, r, "workingArea is totalSpan")
+}
+
+section("Strip constructed from CGRect wraps in singleton group")
+do {
+    let r = CGRect(x: 10, y: 20, width: 1000, height: 700)
+    let strip = Strip(workingArea: r)
+    assertEq(strip.workingArea, r, "workingArea round-trips")
+    assertEq(strip.groupArea.regions.count, 1, "singleton group")
+    assertEq(strip.groupArea.regions[0].rect, r, "region rect = workingArea")
+    assertEq(strip.groupArea.regions[0].displayID, UInt32(0), "synthesized displayID = 0")
+    assertEq(strip.groupArea.referenceMidX, r.midX, "referenceMidX = midX of singleton")
+}
+
+// MARK: - ColumnWidth.resolveBlended Tests
+print()
+print("ColumnWidth.resolveBlended Tests")
+
+section("proportion — fully on region 0 (no blend)")
+do {
+    let r0 = DisplayRegion(displayID: 1, rect: CGRect(x: 0, y: 0, width: 1000, height: 800))
+    let overlaps: [(DisplayRegion, Double)] = [(r0, 1000 * 800)]
+    let w = ColumnWidth.proportion(0.5).resolveBlended(overlaps: overlaps, gap: 16)
+    assertClose(w, 500, tolerance: 0.5, "0.5 of r0 width")
+}
+
+section("proportion — fully on region 1 (no blend)")
+do {
+    let r1 = DisplayRegion(displayID: 2, rect: CGRect(x: 1000, y: 0, width: 2000, height: 1000))
+    let overlaps: [(DisplayRegion, Double)] = [(r1, 2000 * 1000)]
+    let w = ColumnWidth.proportion(0.5).resolveBlended(overlaps: overlaps, gap: 16)
+    assertClose(w, 1000, tolerance: 0.5, "0.5 of r1 width")
+}
+
+section("proportion — 50/50 straddle blends by area")
+do {
+    let r0 = DisplayRegion(displayID: 1, rect: CGRect(x: 0, y: 0, width: 1000, height: 800))
+    let r1 = DisplayRegion(displayID: 2, rect: CGRect(x: 1000, y: 0, width: 2000, height: 800))
+    let overlaps: [(DisplayRegion, Double)] = [(r0, 100), (r1, 100)]
+    let w = ColumnWidth.proportion(0.5).resolveBlended(overlaps: overlaps, gap: 16)
+    assertClose(w, 0.5 * 0.5 * 1000 + 0.5 * 0.5 * 2000, tolerance: 0.5, "avg of 500 and 1000 = 750")
+}
+
+section("proportion — 30/70 straddle blends by area")
+do {
+    let r0 = DisplayRegion(displayID: 1, rect: CGRect(x: 0, y: 0, width: 1000, height: 800))
+    let r1 = DisplayRegion(displayID: 2, rect: CGRect(x: 1000, y: 0, width: 2000, height: 800))
+    let overlaps: [(DisplayRegion, Double)] = [(r0, 30), (r1, 70)]
+    let w = ColumnWidth.proportion(0.5).resolveBlended(overlaps: overlaps, gap: 16)
+    // 0.3 * 500 + 0.7 * 1000 = 150 + 700 = 850
+    assertClose(w, 850, tolerance: 0.5, "area-weighted blend")
+}
+
+section("fixed — returns literal regardless of blend")
+do {
+    let r0 = DisplayRegion(displayID: 1, rect: CGRect(x: 0, y: 0, width: 1000, height: 800))
+    let r1 = DisplayRegion(displayID: 2, rect: CGRect(x: 1000, y: 0, width: 2000, height: 800))
+    let overlaps: [(DisplayRegion, Double)] = [(r0, 50), (r1, 50)]
+    let w = ColumnWidth.fixed(300).resolveBlended(overlaps: overlaps, gap: 16)
+    assertClose(w, 300, tolerance: 0.5, "fixed ignores blend")
+}
+
+section("auto — treated as proportion(0.5)")
+do {
+    let r0 = DisplayRegion(displayID: 1, rect: CGRect(x: 0, y: 0, width: 1000, height: 800))
+    let overlaps: [(DisplayRegion, Double)] = [(r0, 1)]
+    let w = ColumnWidth.auto.resolveBlended(overlaps: overlaps, gap: 16)
+    assertClose(w, 500, tolerance: 0.5, "auto = proportion(0.5)")
+}
+
+section("empty overlaps — returns 0 (caller's fallback applies elsewhere)")
+do {
+    let overlaps: [(DisplayRegion, Double)] = []
+    let w = ColumnWidth.proportion(0.5).resolveBlended(overlaps: overlaps, gap: 16)
+    assertClose(w, 0, tolerance: 0.5, "no regions → 0")
+}
+
+// MARK: - computeColumnGeometry Tests
+print("computeColumnGeometry Tests")
+
+section("solo region — geometry is p × region.width, region.height")
+do {
+    let r = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r)],
+        referenceMidX: r.midX
+    )
+    let g = computeColumnGeometry(
+        groupArea: ga, centerX: r.midX, width: .proportion(0.5), gap: 16
+    )
+    assertClose(g.width, 500, tolerance: 0.5, "0.5 × 1000")
+    assertClose(g.height, 800, tolerance: 0.5, "region height")
+    assertClose(g.midY, 400, tolerance: 0.5, "region midY")
+    check(g.fallbackRegion == nil, "no fallback for solo")
+}
+
+section("two regions — column entirely on region 1")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 1000)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    let g = computeColumnGeometry(
+        groupArea: ga, centerX: r1.midX, width: .proportion(0.5), gap: 16
+    )
+    assertClose(g.width, 1000, tolerance: 0.5, "0.5 × 2000")
+    assertClose(g.height, 1000, tolerance: 0.5, "r1 height")
+    assertClose(g.midY, 500, tolerance: 0.5, "r1 midY")
+    check(g.fallbackRegion == nil, "no fallback — overlap exists")
+}
+
+section("two regions — 50/50 straddle at seam")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 1000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    let g = computeColumnGeometry(
+        groupArea: ga, centerX: 1000, width: .proportion(0.5), gap: 16
+    )
+    // equal widths → width converges to 0.5 × 1000 = 500
+    assertClose(g.width, 500, tolerance: 0.5, "symmetric straddle → 500")
+    assertClose(g.height, 800, tolerance: 0.5, "same height both sides")
+    check(g.fallbackRegion == nil, "no fallback — overlap exists")
+}
+
+section("two regions with different heights — 50/50 straddle blends height")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 1000, height: 1600)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    let g = computeColumnGeometry(
+        groupArea: ga, centerX: 1000, width: .proportion(0.5), gap: 16
+    )
+    check(g.height > 800 && g.height < 1600, "height blended, got \(g.height)")
+}
+
+section("entirely in a gap — fallbackRegion is set to nearest")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1500, y: 0, width: 1000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    // centerX = 1200 → nearest edge is r0.maxX=1000 (dist 200) vs r1.minX=1500 (dist 300).
+    // So nearest = r0.
+    let g = computeColumnGeometry(
+        groupArea: ga, centerX: 1200, width: .proportion(0.5), gap: 16
+    )
+    assertClose(g.width, 500, tolerance: 0.5, "fallback to r0 width")
+    assertClose(g.height, 800, tolerance: 0.5, "fallback to r0 height")
+    check(g.fallbackRegion?.displayID == 1, "fallbackRegion = r0")
+}
+
+// MARK: - computeTargetFrames multi-region Tests
+print("computeTargetFrames multi-region Tests")
+
+section("two-region strip — column on region 0 keeps r0 dimensions")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 1000)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(groupArea: ga)
+    strip.columns = [Column(tiles: [TileID(1)], width: .proportion(0.5))]
+    strip.columnData = [ColumnData(cachedWidth: 500)]
+    strip.snapIndices = [0]
+    strip.activeColumnIndex = 0
+    strip.viewOffset = .static(0)
+
+    let frames = computeTargetFrames(strip: strip, time: 0)
+    assertEq(frames.count, 1, "one tile")
+    let f = frames[0]
+    assertClose(Double(f.frame.width), 500, tolerance: 1.0, "r0 proportion width")
+}
+
+section("two-region strip — column scrolled onto region 1 grows")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(groupArea: ga)
+    strip.columns = [Column(tiles: [TileID(1)], width: .proportion(0.5))]
+    strip.columnData = [ColumnData(cachedWidth: 500)]
+    strip.snapIndices = [0]
+    strip.activeColumnIndex = 0
+    // Scroll far enough that column center lands in r1 (x≈2000).
+    // Starting: column center at (500/2)=250 in strip coords. Need screen center ≈ 2000.
+    // screenCenter = cumX + colW/2 - viewPos + minX = 0 + 250 - viewPos + 0 = 250 - viewPos.
+    // Want 250 - viewPos ≈ 2000 → viewPos ≈ -1750.
+    strip.viewOffset = .static(-1750)
+
+    let frames = computeTargetFrames(strip: strip, time: 0)
+    let f = frames[0]
+    // Column should render at r1's proportion (0.5 × 2000 = 1000). Allow some slack
+    // for A2 iteration convergence.
+    check(Double(f.frame.width) > 800, "width grew, got \(f.frame.width)")
+}
+
+// MARK: - DisplayManager.alignmentGroups Tests
+print("DisplayManager.alignmentGroups Tests")
+
+func makeDisplayInfo(id: CGDirectDisplayID, frame: CGRect) -> DisplayInfo {
+    DisplayInfo(
+        displayID: id,
+        frame: frame,
+        visibleFrame: frame,
+        isMain: id == 1,
+        refreshRate: 60
+    )
+}
+
+section("solo display — one group of size 1")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 1, "one group")
+    assertEq(groups[0], [1], "group contains display 1")
+}
+
+section("two flush same-height displays — one group of size 2")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900)),
+        2: makeDisplayInfo(id: 2, frame: CGRect(x: 1440, y: 0, width: 2560, height: 900))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 1, "one merged group")
+    assertEq(groups[0].count, 2, "two members")
+    check(groups[0].contains(1) && groups[0].contains(2), "both displays")
+}
+
+section("two displays with partial Y-overlap — one group")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900)),
+        2: makeDisplayInfo(id: 2, frame: CGRect(x: 1440, y: 200, width: 1920, height: 600))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 1, "merge with partial Y-overlap")
+}
+
+section("two displays edge-touching (zero Y-overlap) — two groups")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900)),
+        2: makeDisplayInfo(id: 2, frame: CGRect(x: 1440, y: 900, width: 1920, height: 600))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 2, "edge-touching does not merge")
+}
+
+section("vertical stack — two groups")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900)),
+        2: makeDisplayInfo(id: 2, frame: CGRect(x: 0, y: 900, width: 1440, height: 900))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 2, "vertical stack does not merge")
+}
+
+section("three-way chain A-B-C transitive merge")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 800)),
+        2: makeDisplayInfo(id: 2, frame: CGRect(x: 1000, y: 100, width: 1000, height: 600)),
+        3: makeDisplayInfo(id: 3, frame: CGRect(x: 2000, y: 50, width: 1000, height: 500))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 1, "A-B-C all merge transitively")
+    assertEq(groups[0].count, 3, "three members")
+}
+
+section("epsilon tolerance on X-edge (0.3 px gap)")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900)),
+        2: makeDisplayInfo(id: 2, frame: CGRect(x: 1440.3, y: 0, width: 1920, height: 900))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 1, "0.3 px gap tolerated by ε=0.5")
+}
+
+section("X gap beyond epsilon (1 px gap) — no merge")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900)),
+        2: makeDisplayInfo(id: 2, frame: CGRect(x: 1441, y: 0, width: 1920, height: 900))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 2, "1 px gap exceeds ε=0.5")
+}
+
+section("members sorted by frame.minX")
+do {
+    let displays: [CGDirectDisplayID: DisplayInfo] = [
+        2: makeDisplayInfo(id: 2, frame: CGRect(x: 1440, y: 0, width: 1920, height: 900)),
+        1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900))
+    ]
+    let groups = DisplayManager.alignmentGroups(from: displays)
+    assertEq(groups.count, 1, "one group")
+    assertEq(groups[0][0], UInt32(1), "leftmost first (id 1)")
+    assertEq(groups[0][1], UInt32(2), "rightmost second (id 2)")
+}
+
+// ============================================================
+// MARK: - Per-Display Snap Tests
+print("Per-Display Snap Tests")
+
+section("solo group — snap target unchanged (regression)")
+do {
+    let r = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r)],
+        referenceMidX: r.midX
+    )
+    var strip = Strip(snapPoints: [.middle], groupArea: ga)
+    strip.columns = [Column(tiles: [TileID(1)], width: .proportion(0.5))]
+    strip.columnData = [ColumnData(cachedWidth: 720)]
+    strip.snapIndices = [0]
+    strip.activeColumnIndex = 0
+    let targetOffset = strip.snapTargetForActive(at: 0)
+    // Solo middle snap: viewOffset = cumX(0) - regionOffset(0) + localSnap.
+    // localSnap for .middle, colWidth=720, waWidth=1440 → -360.
+    assertClose(targetOffset, -360, tolerance: 1.0, "solo middle snap offset")
+}
+
+section("two-region group — active column on region 1 snaps to r1 midX")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(snapPoints: [.middle], groupArea: ga)
+    strip.columns = [Column(tiles: [TileID(1)], width: .proportion(0.5))]
+    strip.columnData = [ColumnData(cachedWidth: 1000)]
+    strip.snapIndices = [0]
+    strip.activeColumnIndex = 0
+    strip.viewOffset = ViewOffset.static(-1500)
+    let targetOffset = strip.snapTargetForActive(at: 0)
+    // Active column's midX lands at screen x=2000 (inside r1).
+    // Snap to r1.midX = 2000. colWidth=1000, waWidth=2000, localSnap=-500.
+    // regionOffset = 1000. cumX=0. target = 0 - 1000 + (-500) = -1500.
+    assertClose(targetOffset, -1500, tolerance: 5.0, "multi-region: snap to r1 midX")
+}
+
+section("two-region group — active column on region 0 snaps to r0 midX")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(snapPoints: [.middle], groupArea: ga)
+    strip.columns = [Column(tiles: [TileID(1)], width: .proportion(0.5))]
+    strip.columnData = [ColumnData(cachedWidth: 500)]
+    strip.snapIndices = [0]
+    strip.activeColumnIndex = 0
+    strip.viewOffset = ViewOffset.static(0)
+    let targetOffset = strip.snapTargetForActive(at: 0)
+    // midX on screen = 250 (inside r0). Snap to r0.midX = 500.
+    // colWidth=500, waWidth=1000, localSnap=-250. regionOffset=0. cumX=0.
+    // target = 0 - 0 + (-250) = -250.
+    assertClose(targetOffset, -250, tolerance: 1.0, "multi-region: snap to r0 midX")
+}
+
+// MARK: - Region-Aware Preset & Full-Width Tests
+print("Region-Aware Preset & Full-Width Tests")
+
+section("toggleFullWidth on multi-region — sizes to owning region, not totalSpan")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(snapPoints: [.middle], groupArea: ga)
+    strip.columns = [Column(tiles: [TileID(1)], width: .proportion(0.5))]
+    strip.columnData = [ColumnData(cachedWidth: 500)]
+    strip.snapIndices = [0]
+    strip.activeColumnIndex = 0
+    strip.viewOffset = ViewOffset.static(0)
+
+    strip.toggleFullWidth(at: 0)
+    assertClose(strip.columnData[0].cachedWidth, 1000, tolerance: 1.0, "full-width on r0 = 1000 (not 3000)")
+}
+
+section("toggleFullWidth on multi-region — column on r1 → fills r1")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(snapPoints: [.middle], groupArea: ga)
+    strip.columns = [Column(tiles: [TileID(1)], width: .proportion(0.5))]
+    strip.columnData = [ColumnData(cachedWidth: 1000)]
+    strip.snapIndices = [0]
+    strip.activeColumnIndex = 0
+    // Scroll so active column's midpoint is in r1.
+    strip.viewOffset = ViewOffset.static(-1500)
+
+    strip.toggleFullWidth(at: 0)
+    assertClose(strip.columnData[0].cachedWidth, 2000, tolerance: 1.0, "full-width on r1 = 2000")
+}
+
+section("cycleWidthPreset uses owning region's width")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(
+        snapPoints: [.middle],
+        groupArea: ga,
+        widthPresets: [.proportion(0.33), .proportion(0.5), .proportion(0.67)]
+    )
+    strip.columns = [Column(tiles: [TileID(1)], width: .proportion(0.5), presetIndex: 0)]
+    strip.columnData = [ColumnData(cachedWidth: 1000)]
+    strip.snapIndices = [0]
+    strip.activeColumnIndex = 0
+    strip.viewOffset = ViewOffset.static(-1500)  // column on r1
+
+    strip.cycleWidthPreset(at: 0, params: SpringParams?.none)
+    // Next preset = 0.5 × r1.width = 1000.
+    assertClose(strip.columnData[0].cachedWidth, 1000, tolerance: 1.0, "0.5 × r1.width")
+
+    strip.cycleWidthPreset(at: 0, params: SpringParams?.none)
+    // Next preset = 0.67 × r1.width = 1340.
+    assertClose(strip.columnData[0].cachedWidth, 1340, tolerance: 2.0, "0.67 × r1.width")
+}
+
+section("recalculateWidths — each column uses its own owning region")
+do {
+    let r0 = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let r1 = CGRect(x: 1000, y: 0, width: 2000, height: 800)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(snapPoints: [.middle], groupArea: ga)
+    strip.columns = [
+        Column(tiles: [TileID(1)], width: .proportion(0.5)),
+        Column(tiles: [TileID(2)], width: .proportion(0.5), isFullWidth: true)
+    ]
+    strip.columnData = [
+        ColumnData(cachedWidth: 500),
+        ColumnData(cachedWidth: 2000)
+    ]
+    strip.snapIndices = [0, 0]
+    strip.activeColumnIndex = 1
+    strip.viewOffset = ViewOffset.static(-1000)
+
+    strip.recalculateWidths(at: 0)
+    assertClose(strip.columnData[0].cachedWidth, 500, tolerance: 1.0, "col 0 → 0.5 × r0.w = 500")
+    assertClose(strip.columnData[1].cachedWidth, 2000, tolerance: 1.0, "col 1 full-width on r1 = 2000")
 }
 
 // ============================================================

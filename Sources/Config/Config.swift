@@ -49,6 +49,8 @@ public struct ReelConfig: Sendable {
     public var keybindings: [String: String] = [
         "focus_left": "alt-h",
         "focus_right": "alt-l",
+        "focus_up": "alt-k",
+        "focus_down": "alt-j",
         "move_left": "alt-shift-h",
         "move_right": "alt-shift-l",
         "cycle_width": "alt-r",

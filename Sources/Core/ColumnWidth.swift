@@ -56,3 +56,37 @@ extension ColumnWidth: Codable {
         }
     }
 }
+
+extension ColumnWidth {
+    /// Resolve a column's width when it straddles multiple display regions.
+    /// Returns an area-weighted blend of `(p × region.width)` across overlaps.
+    /// `.fixed` ignores the blend and returns the literal. `.auto` is treated as
+    /// `.proportion(0.5)`. Empty overlaps → 0.
+    public func resolveBlended(
+        overlaps: [(region: DisplayRegion, area: Double)],
+        gap: Double
+    ) -> Double {
+        switch self {
+        case .fixed(let f):
+            return f
+        case .proportion(let p):
+            return Self.blend(p: p, overlaps: overlaps)
+        case .auto:
+            return Self.blend(p: 0.5, overlaps: overlaps)
+        }
+    }
+
+    private static func blend(
+        p: Double,
+        overlaps: [(region: DisplayRegion, area: Double)]
+    ) -> Double {
+        let totalArea = overlaps.reduce(0.0) { $0 + $1.area }
+        guard totalArea > 0 else { return 0 }
+        var acc = 0.0
+        for (region, area) in overlaps {
+            let weight = area / totalArea
+            acc += weight * (p * Double(region.rect.width))
+        }
+        return acc
+    }
+}

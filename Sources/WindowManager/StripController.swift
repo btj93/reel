@@ -42,6 +42,27 @@ public final class StripController: @unchecked Sendable {
     /// Saved strip states per Space, keyed by a fingerprint of on-screen window IDs.
     private var savedSpaces: [Set<UInt32>: SavedStripState] = [:]
 
+    /// Debug-introspection: fingerprints of spaces whose state this controller
+    /// currently has stashed (does NOT include the live current space).
+    public var savedSpaceFingerprints: [Set<UInt32>] {
+        Array(savedSpaces.keys)
+    }
+
+    /// Debug-introspection: the column list + window titles for a stashed space.
+    /// Returns nil if the fingerprint isn't stashed.
+    public func savedSpaceSnapshot(for fingerprint: Set<UInt32>) -> [(tileID: TileID, windowID: UInt32, bundleID: String?, title: String?)]? {
+        guard let state = savedSpaces[fingerprint] else { return nil }
+        var out: [(TileID, UInt32, String?, String?)] = []
+        for col in state.columns {
+            for tile in col.tiles {
+                guard let w = state.windowMap[tile] else { continue }
+                let bundle = state.apps[w.pid]?.bundleIdentifier
+                out.append((tile, w.windowID, bundle, w.getTitle()))
+            }
+        }
+        return out
+    }
+
     /// The fingerprint of the current Space.
     public internal(set) var currentSpaceFingerprint: Set<UInt32> = []
 
@@ -133,6 +154,12 @@ public final class StripController: @unchecked Sendable {
 
     /// Register a window and add it to the strip.
     public func addWindow(_ window: AXWindow, app: AXApp) {
+        // Prevent duplicate columns for the same tile.
+        if windowMap[window.tileID] != nil {
+            print("[Strip] addWindow SKIP (duplicate): tileID=\(window.tileID.rawValue)")
+            fflush(stdout)
+            return
+        }
         print("[Strip] addWindow: tileID=\(window.tileID.rawValue) pid=\(window.pid) app=\(app.bundleIdentifier ?? "?") title=\(logTitle(window.getTitle()))")
         fflush(stdout)
         windowMap[window.tileID] = window
@@ -168,6 +195,13 @@ public final class StripController: @unchecked Sendable {
             return
         }
 
+        // Prevent duplicate columns for the same tile.
+        if windowMap[window.tileID] != nil {
+            print("[Strip] addWindow (restored) SKIP (duplicate): tileID=\(window.tileID.rawValue)")
+            fflush(stdout)
+            return
+        }
+
         #if DEBUG
         print("[Strip] addWindow (restored): tileID=\(window.tileID.rawValue) pid=\(window.pid) at index=\(restored.slotIndex) width=\(restored.width)")
         fflush(stdout)
@@ -181,7 +215,8 @@ public final class StripController: @unchecked Sendable {
         let width: ColumnWidth
         switch restored.width {
         case .auto:
-            width = .fixed(restored.width.resolve(workingAreaWidth: strip.workingArea.width, gap: strip.gap))
+            let region = strip.regionForColumn(insertIndex, at: TimeUtil.now())
+            width = .fixed(restored.width.resolve(workingAreaWidth: Double(region.rect.width), gap: strip.gap))
         default:
             width = restored.width
         }
@@ -375,8 +410,8 @@ public final class StripController: @unchecked Sendable {
     }
 
     public func toggleFullWidth() {
-        strip.toggleFullWidth()
         let time = TimeUtil.now()
+        strip.toggleFullWidth(at: time)
         if animationEnabled {
             // Apply layout immediately so the window resizes right away,
             // then animate the scroll to recenter the column.
@@ -481,7 +516,17 @@ public final class StripController: @unchecked Sendable {
     public func handleUserMove(windowID: CGWindowID) {
         let tileID = TileID(windowID)
         guard windowMap[tileID] != nil,
-              strip.columns.contains(where: { $0.tiles.contains(tileID) }) else { return }
+              let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) })
+        else { return }
+
+        // If the user moved the active column, re-compute its snap target so
+        // the column centers on its owning region using the CURRENT cachedWidth.
+        // A prior snap may have been computed against a stale width if the app
+        // adjusted its own size after the initial column insertion.
+        if colIndex == strip.activeColumnIndex {
+            let time = TimeUtil.now()
+            strip.viewOffset = .static(strip.snapTargetForActive(at: time))
+        }
 
         // Clear the committed frame so applyLayout will reposition it
         lastCommittedFrames.removeValue(forKey: tileID)
@@ -1157,13 +1202,20 @@ public final class StripController: @unchecked Sendable {
         return columnIndexAtStripX(cursorStripX, columnData: strip.columnData, gap: strip.gap, time: time)
     }
 
-    /// Update the working area (e.g., after display change or Dock show/hide).
-    public func updateWorkingArea(_ rect: CGRect) {
-        let changed = !framesEqual(strip.workingArea, rect)
-        strip.workingArea = rect
-        strip.recalculateWidths()
+    /// Update the strip's group area (e.g., after display change, Dock show/hide,
+    /// or main-display change). Solo-region groups behave exactly as today.
+    public func updateGroupArea(_ area: GroupWorkingArea) {
+        let changed = strip.groupArea != area
+        strip.groupArea = area
+        let time = TimeUtil.now()
+        strip.recalculateWidths(at: time)
+        // recalculateWidths may have changed the active column's cachedWidth;
+        // without a re-snap, the stored viewOffset would leave the active
+        // column off-center by the width delta on the next layout pass.
+        if !strip.columns.isEmpty {
+            strip.viewOffset = .static(strip.snapTargetForActive(at: time))
+        }
         if changed {
-            // Clear committed frames so all windows reposition
             clearCommittedFrames()
         }
         applyLayout()

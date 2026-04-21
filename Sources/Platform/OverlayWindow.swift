@@ -27,6 +27,7 @@ public class OverlayWindow {
     public var accentColor: NSColor = .systemBlue
 
     public func ensurePanel(for screen: NSScreen) {
+        let targetFrame = NSRect(origin: .zero, size: screen.frame.size)
         if panel == nil {
             let p = NSPanel(
                 contentRect: screen.frame,
@@ -39,16 +40,18 @@ public class OverlayWindow {
             p.backgroundColor = .clear
             p.hasShadow = false
             p.collectionBehavior = [.canJoinAllSpaces, .stationary, .transient]
-            let view = OverlayView(frame: screen.frame)
+            let view = OverlayView(frame: targetFrame)
             p.contentView = view
             self.panel = p
             self.overlayView = view
         }
         panel?.setFrame(screen.frame, display: false)
+        overlayView?.frame = targetFrame
     }
 
     public func show() {
         panel?.orderFront(nil)
+        panel?.display()
     }
 
     public func hide() {
@@ -107,8 +110,17 @@ class OverlayView: NSView {
         }
     }
 
+    /// anchorFrame is AppKit global coords (the cursor's position). Convert to
+    /// this view's local coords so drawing lands in the right spot regardless
+    /// of which screen the overlay window sits on.
+    private func anchorInViewLocal(_ anchorFrame: CGRect) -> CGRect {
+        convert(anchorFrame, from: nil)
+    }
+
     private func drawPillBar(ctx: CGContext, pills: [PillItem], anchorFrame: CGRect, selectedIndex: Int?) {
         guard !pills.isEmpty else { return }
+
+        let localAnchor = anchorInViewLocal(anchorFrame)
 
         let pillWidths = pills.map { estimatePillWidth($0.label) }
         let totalPillWidth = pillWidths.reduce(0, +)
@@ -116,8 +128,8 @@ class OverlayView: NSView {
         let containerWidth = totalPillWidth + containerPadding * 2
         let containerHeight = pillHeight + containerPadding * 2
 
-        let containerX = anchorFrame.midX - containerWidth / 2
-        let containerY = anchorFrame.minY - 8 - containerHeight
+        let containerX = localAnchor.midX - containerWidth / 2
+        let containerY = localAnchor.minY - 8 - containerHeight
         let containerRect = CGRect(x: containerX, y: containerY, width: containerWidth, height: containerHeight)
 
         let bgColor = NSColor(white: 0.12, alpha: 0.92)
@@ -175,13 +187,14 @@ class OverlayView: NSView {
 
     func pillIndexAt(screenPoint: NSPoint, pills: [PillItem], anchorFrame: CGRect) -> Int? {
         let localPoint = convert(screenPoint, from: nil)
+        let localAnchor = anchorInViewLocal(anchorFrame)
         let pillWidths = pills.map { estimatePillWidth($0.label) }
         let totalPillWidth = pillWidths.reduce(0, +)
             + CGFloat(max(0, pills.count - 1)) * pillSpacing
         let containerWidth = totalPillWidth + containerPadding * 2
         let containerHeight = pillHeight + containerPadding * 2
-        let containerX = anchorFrame.midX - containerWidth / 2
-        let containerY = anchorFrame.minY - 8 - containerHeight
+        let containerX = localAnchor.midX - containerWidth / 2
+        let containerY = localAnchor.minY - 8 - containerHeight
 
         var x = containerX + containerPadding
         let pillY = containerY + containerPadding
