@@ -63,6 +63,22 @@ public final class StripController: @unchecked Sendable {
         return out
     }
 
+    /// Debug-introspection: returns the stashed columns together with their
+    /// AXWindow references and per-column metadata so callers can query live AX
+    /// frames for windows that belong to another Space.
+    public func savedSpaceDetail(for fingerprint: Set<UInt32>) -> [(tileID: TileID, window: AXWindow, bundleID: String?, columnWidth: ColumnWidth, isFullWidth: Bool)]? {
+        guard let state = savedSpaces[fingerprint] else { return nil }
+        var out: [(TileID, AXWindow, String?, ColumnWidth, Bool)] = []
+        for col in state.columns {
+            for tile in col.tiles {
+                guard let w = state.windowMap[tile] else { continue }
+                let bundle = state.apps[w.pid]?.bundleIdentifier
+                out.append((tile, w, bundle, col.width, col.isFullWidth))
+            }
+        }
+        return out
+    }
+
     /// The fingerprint of the current Space.
     public internal(set) var currentSpaceFingerprint: Set<UInt32> = []
 
@@ -224,6 +240,12 @@ public final class StripController: @unchecked Sendable {
         let column = Column(tiles: [window.tileID], width: width,
                             presetIndex: restored.presetIndex, isFullWidth: restored.isFullWidth)
         strip.insertColumn(column, at: TimeUtil.now(), atIndex: insertIndex)
+
+        // Belt-and-suspenders: a stale `lastCommittedFrames` entry (e.g., from
+        // a prior window that reused this CGWindowID, or from before the strip
+        // was cleared) would let applyLayout skip the new setFrame dispatch if
+        // the target happened to match. Force the next layout pass to re-dispatch.
+        lastCommittedFrames.removeValue(forKey: window.tileID)
 
         if !isBatching {
             // Pre-position the new window immediately before the full layout pass.
@@ -883,6 +905,14 @@ public final class StripController: @unchecked Sendable {
 
     /// Called by FrameLoop every vsync frame during animation.
     public func handleFrameTick(time: Double) {
+        // Keep echo suppression armed for the full animation. We dispatch AX
+        // writes every tick below; their echoes arrive with AX-observer latency
+        // that can exceed the 150ms window if we only rely on the initial
+        // applyLayout bump. Re-bumping each tick makes suppression self-sustaining
+        // while the frame loop is active (it pauses on settle, so suppression
+        // expires normally when we stop writing).
+        lastLayoutTime = time
+
         // Advance focus indicator animations first (unconditional)
         focusIndicator.tick(time: time)
 

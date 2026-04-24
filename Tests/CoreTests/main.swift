@@ -1284,6 +1284,96 @@ do {
     assertEq(filled3.count, 3, "after 3rd add: all 3 slots filled")
 }
 
+// MARK: - matchSlotsToWindows (replay-loop helper)
+
+section("matchSlotsToWindows — single match")
+do {
+    let slots = [makeSlot(bundleID: "com.app.A", title: "Doc")]
+    let candidates = [makeStripWindow(tileID: 1, windowID: 100, bundleID: "com.app.A", title: "Doc")]
+    let pairs = matchSlotsToWindows(slots: slots, candidates: candidates)
+    assertEq(pairs.count, 1, "one pair")
+    assertEq(pairs[0].slotIndex, 0, "slot 0")
+    assertEq(pairs[0].candidateIndex, 0, "cand 0")
+}
+
+section("matchSlotsToWindows — multi-match prefers title")
+do {
+    let slots = [
+        makeSlot(bundleID: "com.app.A", title: "Beta"),
+        makeSlot(bundleID: "com.app.A", title: "Alpha"),
+    ]
+    let candidates = [
+        makeStripWindow(tileID: 1, windowID: 1, bundleID: "com.app.A", title: "Alpha"),
+        makeStripWindow(tileID: 2, windowID: 2, bundleID: "com.app.A", title: "Beta"),
+    ]
+    let pairs = matchSlotsToWindows(slots: slots, candidates: candidates)
+    assertEq(pairs.count, 2, "two pairs")
+    // slot 0 (Beta) should pair with candidate 1 (Beta)
+    assertEq(pairs[0].slotIndex, 0, "first pair slot 0")
+    assertEq(pairs[0].candidateIndex, 1, "first pair cand 1 (Beta)")
+    // slot 1 (Alpha) should pair with candidate 0 (Alpha)
+    assertEq(pairs[1].slotIndex, 1, "second pair slot 1")
+    assertEq(pairs[1].candidateIndex, 0, "second pair cand 0 (Alpha)")
+}
+
+section("matchSlotsToWindows — title miss falls back to bundle match")
+do {
+    // Slot expects Alpha, but only a different-titled window is available.
+    let slots = [makeSlot(bundleID: "com.app.A", title: "Alpha")]
+    let candidates = [makeStripWindow(tileID: 1, windowID: 100, bundleID: "com.app.A", title: "Gamma")]
+    let pairs = matchSlotsToWindows(slots: slots, candidates: candidates)
+    assertEq(pairs.count, 1, "bundle-only fallback pairs")
+    assertEq(pairs[0].candidateIndex, 0, "candidate 0 chosen")
+}
+
+section("matchSlotsToWindows — slot with no candidate dropped")
+do {
+    let slots = [
+        makeSlot(bundleID: "com.app.A"),
+        makeSlot(bundleID: "com.missing"),
+        makeSlot(bundleID: "com.app.B"),
+    ]
+    let candidates = [
+        makeStripWindow(tileID: 1, windowID: 1, bundleID: "com.app.A"),
+        makeStripWindow(tileID: 2, windowID: 2, bundleID: "com.app.B"),
+    ]
+    let pairs = matchSlotsToWindows(slots: slots, candidates: candidates)
+    assertEq(pairs.count, 2, "missing bundle dropped")
+    assertEq(pairs[0].slotIndex, 0, "slot 0 matched")
+    assertEq(pairs[1].slotIndex, 2, "slot 2 matched")
+}
+
+section("matchSlotsToWindows — vacant slot skipped")
+do {
+    let slots = [
+        makeSlot(bundleID: "com.app.A"),
+        makeSlot(bundleID: "com.app.B", vacant: true, vacatedAt: Date()),
+        makeSlot(bundleID: "com.app.C"),
+    ]
+    let candidates = [
+        makeStripWindow(tileID: 1, windowID: 1, bundleID: "com.app.A"),
+        makeStripWindow(tileID: 2, windowID: 2, bundleID: "com.app.B"),
+        makeStripWindow(tileID: 3, windowID: 3, bundleID: "com.app.C"),
+    ]
+    let pairs = matchSlotsToWindows(slots: slots, candidates: candidates)
+    assertEq(pairs.count, 2, "vacant slot skipped even with live candidate")
+    assertEq(pairs[0].slotIndex, 0, "slot 0 paired")
+    assertEq(pairs[1].slotIndex, 2, "slot 2 paired (skipping vacant slot 1)")
+}
+
+section("matchSlotsToWindows — each candidate used at most once")
+do {
+    // Two identical-looking slots, one candidate.
+    let slots = [
+        makeSlot(bundleID: "com.app.A"),
+        makeSlot(bundleID: "com.app.A"),
+    ]
+    let candidates = [makeStripWindow(tileID: 1, windowID: 1, bundleID: "com.app.A")]
+    let pairs = matchSlotsToWindows(slots: slots, candidates: candidates)
+    assertEq(pairs.count, 1, "one pair only")
+    assertEq(pairs[0].slotIndex, 0, "first slot takes the candidate")
+}
+
 // MARK: - Layout Mode
 print()
 print("Layout Mode Tests")

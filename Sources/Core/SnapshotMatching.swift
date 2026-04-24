@@ -111,6 +111,45 @@ public func computeFilledSlots(
     return filled
 }
 
+/// Match snapshot slots to window candidates in strip order.
+/// Each candidate is used at most once. Non-vacant slots are matched; vacant
+/// slots are skipped (ghosts have no live window to claim). A candidate with
+/// a title matching the slot wins over one with only a bundle match.
+/// Returns pairs in slot order; slots with no candidate are dropped.
+public func matchSlotsToWindows(
+    slots: [SlotDescriptor],
+    candidates: [StripWindowInfo]
+) -> [(slotIndex: Int, candidateIndex: Int)] {
+    var result: [(slotIndex: Int, candidateIndex: Int)] = []
+    var usedCandidates = Set<Int>()
+
+    for (slotIdx, slot) in slots.enumerated() {
+        guard !slot.vacant else { continue }
+
+        var titleMatch: Int?
+        var bundleMatch: Int?
+        for (candIdx, cand) in candidates.enumerated() {
+            guard !usedCandidates.contains(candIdx),
+                  cand.bundleID == slot.bundleID
+            else { continue }
+            if let slotTitle = slot.windowTitle, cand.windowTitle == slotTitle {
+                titleMatch = candIdx
+                break
+            }
+            if bundleMatch == nil {
+                bundleMatch = candIdx
+            }
+        }
+
+        if let chosen = titleMatch ?? bundleMatch {
+            result.append((slotIdx, chosen))
+            usedCandidates.insert(chosen)
+        }
+    }
+
+    return result
+}
+
 /// Match a newly-appearing window to its best slot in the snapshot.
 /// Returns the slot index, or nil if no match found.
 public func matchWindowToSlot(

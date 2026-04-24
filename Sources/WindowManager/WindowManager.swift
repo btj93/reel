@@ -543,7 +543,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Periodic window health check — detect closed windows that AX observer missed.
         // kAXUIElementDestroyedNotification is unreliable for some apps.
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.checkWindowHealth()
         }
 
@@ -725,6 +725,17 @@ public final class WindowManager: @unchecked Sendable {
     }
 
     private func handleWindowEvent(_ event: WindowEvent) {
+        // A real AX move event means the user is manipulating the window
+        // (drag, Mission Control move, etc.). Cancel any pending focus-scroll
+        // so its delayed setFrame doesn't race the drag and snap the window
+        // back to its slot mid-gesture. Runs before echo suppression so a
+        // drag that starts inside the 150ms echo window still disables the
+        // scheduled scroll.
+        if case .windowMoved = event {
+            pendingFocusScroll?.cancel()
+            pendingFocusScroll = nil
+        }
+
         // Ignore move/resize/focus events that echo from our own layout calls
         if stripController.isInEchoSuppression {
             switch event {
@@ -903,12 +914,14 @@ public final class WindowManager: @unchecked Sendable {
             // migrate it to that group's strip. Otherwise snap it back to its
             // current strip position.
             //
-            // IMPORTANT: only migrate when the window's FRAME CENTER is
-            // genuinely inside another group's workingArea. A window scrolled
-            // off its own strip's edge (e.g., pushed off when a new column is
-            // inserted on the destination) has a frame that doesn't contain
-            // any region's center — falling back to `stripControllers.first!`
-            // would incorrectly migrate it to a different strip.
+            // Destination resolution runs in two passes:
+            //   1. center-inside-workingArea — fast, matches a fully-dropped
+            //      window cleanly.
+            //   2. max-frame-overlap fallback — handles Mission Control drops
+            //      that leave the window partially off the destination monitor
+            //      (the center can miss every workingArea even though the
+            //      frame genuinely overlaps one). Off-strip slivers have
+            //      zero overlap with every group and so remain unmigrated.
             let tileID = TileID(windowID)
             let currentOwner = stripControllers.first(where: { $0.value.windowMap[tileID] != nil })?.value
             if let owner = currentOwner, let window = owner.windowMap[tileID] {
@@ -919,6 +932,17 @@ public final class WindowManager: @unchecked Sendable {
                         if sc.strip.workingArea.contains(center) {
                             destEntry = (gid, sc)
                             break
+                        }
+                    }
+                    if destEntry == nil {
+                        var bestArea: CGFloat = 0
+                        for (gid, sc) in stripControllers {
+                            let inter = sc.strip.workingArea.intersection(frame)
+                            let area = inter.isNull ? 0 : inter.width * inter.height
+                            if area > bestArea {
+                                bestArea = area
+                                destEntry = (gid, sc)
+                            }
                         }
                     }
                 }
@@ -970,14 +994,22 @@ public final class WindowManager: @unchecked Sendable {
         // Save+switch every strip, not just the active one, otherwise non-active
         // strips retain a stale columns list / windowMap for a Space they no
         // longer display — windows on the new Space get "stuck" unmanaged.
-        for (_, sc) in stripControllers where sc !== stripController {
+        //
+        // Strips whose switchSpace returns false (no in-memory SavedStripState
+        // for this Space) get queued for deterministic snapshot replay below.
+        var stripsNeedingReplay: [(gid: GroupID, sc: StripController)] = []
+        for (gid, sc) in stripControllers where sc !== stripController {
             saveSnapshotImmediate(sc: sc)
-            _ = sc.switchSpace(onScreenWindowIDs: onScreenIDs)
-            // Remove windows no longer on screen (closed/minimized while away).
-            let managedIDs = Set(sc.windowMap.keys.map(\.rawValue))
-            let goneIDs = managedIDs.subtracting(onScreenIDs)
-            for goneID in goneIDs {
-                sc.removeWindow(tileID: TileID(goneID))
+            let restoredNonActive = sc.switchSpace(onScreenWindowIDs: onScreenIDs)
+            if restoredNonActive {
+                // Remove windows no longer on screen (closed/minimized while away).
+                let managedIDs = Set(sc.windowMap.keys.map(\.rawValue))
+                let goneIDs = managedIDs.subtracting(onScreenIDs)
+                for goneID in goneIDs {
+                    sc.removeWindow(tileID: TileID(goneID))
+                }
+            } else {
+                stripsNeedingReplay.append((gid, sc))
             }
         }
 
@@ -986,6 +1018,31 @@ public final class WindowManager: @unchecked Sendable {
 
         // Try to restore saved state for this Space
         let restored = stripController.switchSpace(onScreenWindowIDs: onScreenIDs)
+
+        if !restored {
+            // Active strip wasn't in in-memory savedSpaces — include it in replay.
+            let activeGID = stripControllers.first(where: { $0.value === stripController })?.key
+                ?? displayToGroup[activeDisplayID]
+                ?? [activeDisplayID]
+            stripsNeedingReplay.append((activeGID, stripController))
+        }
+
+        // Deterministic first-visit replay: for each non-restored strip, look up
+        // its persisted snapshot (fuzzy-matched by bundle-ID set) and adopt each
+        // slot in order. This closes the failure mode where a subsequent generic
+        // discovery drops windows due to float classification drift or fingerprint
+        // mismatches in per-window resolveSnapshotPosition lookups. Runs before
+        // either branch below — replay-adopted windows then appear in
+        // `managedAcrossAllStrips` on either path.
+        var adoptedByReplay: Set<UInt32> = []
+        for entry in stripsNeedingReplay {
+            let adopted = replayFromSnapshot(
+                sc: entry.sc,
+                groupID: entry.gid,
+                onScreenIDs: onScreenIDs,
+                exclude: adoptedByReplay)
+            adoptedByReplay.formUnion(adopted)
+        }
 
         if restored {
             // Remember which window was focused before we modify the strip
@@ -1729,6 +1786,155 @@ public final class WindowManager: @unchecked Sendable {
                 return ReelResponse(success: true, data: json)
             }
             return ReelResponse(success: true, data: "[]")
+        case .getLayouts:
+            // Cross-Space probe: for every space Reel knows about (current +
+            // stashed in-session + persisted on-disk), list its windows with
+            // their current AX frame so "stuck" windows can be spotted no
+            // matter which Space they belong to.
+            let now = TimeUtil.now()
+            let activeGID = displayToGroup[activeDisplayID]
+
+            // One CGWindowList pass to flag which windowIDs macOS considers
+            // currently on-screen (i.e. in the active Space, un-minimized).
+            let onScreenIDs: Set<CGWindowID> = {
+                guard let arr = CGWindowListCopyWindowInfo(
+                    [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+                ) as? [[CFString: Any]] else { return [] }
+                var s = Set<CGWindowID>()
+                for d in arr {
+                    if let n = d[kCGWindowNumber] as? CGWindowID { s.insert(n) }
+                }
+                return s
+            }()
+
+            func entry(
+                tileID: TileID,
+                window: AXWindow,
+                bundleID: String?,
+                columnWidth: ColumnWidth?,
+                isFullWidth: Bool?
+            ) -> [String: Any] {
+                var frame: Any = NSNull()
+                var slivered = false
+                if case .success(let f) = window.getFrame() {
+                    frame = [
+                        "x": f.minX, "y": f.minY,
+                        "w": f.width, "h": f.height,
+                    ]
+                    // Heuristic: matches our two off-screen hiding techniques.
+                    // 1 px edge sliver (width ≤ 2) or corner-hide at (-10000,-10000).
+                    slivered = f.minX <= -9000 || f.minY <= -9000
+                        || f.width <= 2 || f.height <= 2
+                }
+                var out: [String: Any] = [
+                    "tileID": tileID.rawValue,
+                    "windowID": window.windowID,
+                    "bundleID": bundleID ?? "",
+                    "title": window.getTitle() ?? "",
+                    "currentFrame": frame,
+                    "isOnScreen": onScreenIDs.contains(window.windowID),
+                    "slivered": slivered,
+                ]
+                if let w = columnWidth { out["savedWidth"] = String(describing: w) }
+                if let f = isFullWidth { out["isFullWidth"] = f }
+                return out
+            }
+
+            var spaces: [[String: Any]] = []
+            var seen: Set<SnapshotKey> = []
+
+            for (gid, sc) in stripControllers {
+                // --- current space: use live strip + columns ---
+                let strip = sc.strip
+                var currWindows: [[String: Any]] = []
+                for col in strip.columns {
+                    for tile in col.tiles {
+                        guard let w = sc.windowMap[tile] else { continue }
+                        let bundle = tracker.apps[w.pid]?.bundleIdentifier
+                        currWindows.append(entry(
+                            tileID: tile, window: w, bundleID: bundle,
+                            columnWidth: col.width, isFullWidth: col.isFullWidth
+                        ))
+                    }
+                }
+                spaces.append([
+                    "groupID": gid,
+                    "isActiveGroup": gid == activeGID,
+                    "isCurrentSpace": true,
+                    "source": "live",
+                    "spaceFingerprint": sc.currentSpaceFingerprint.sorted(),
+                    "windows": currWindows,
+                ])
+                seen.insert(SnapshotKey(groupID: gid, spaceFingerprint: sc.currentSpaceFingerprint))
+
+                // --- stashed-in-session spaces: AXWindow refs are still alive ---
+                for fp in sc.savedSpaceFingerprints {
+                    guard let detail = sc.savedSpaceDetail(for: fp) else { continue }
+                    var wins: [[String: Any]] = []
+                    for (tile, axw, bundle, width, isFW) in detail {
+                        wins.append(entry(
+                            tileID: tile, window: axw, bundleID: bundle,
+                            columnWidth: width, isFullWidth: isFW
+                        ))
+                    }
+                    spaces.append([
+                        "groupID": gid,
+                        "isActiveGroup": false,
+                        "isCurrentSpace": false,
+                        "source": "session",
+                        "spaceFingerprint": fp.sorted(),
+                        "windows": wins,
+                    ])
+                    seen.insert(SnapshotKey(groupID: gid, spaceFingerprint: fp))
+                }
+            }
+
+            // --- persisted snapshot-store entries not covered above ---
+            if let store = snapshotStore {
+                for (key, snap) in store.allSnapshots() {
+                    if seen.contains(key) { continue }
+                    let wins: [[String: Any]] = snap.slots.map { slot in
+                        var d: [String: Any] = [
+                            "tileID": NSNull(),
+                            "windowID": slot.windowID ?? 0,
+                            "bundleID": slot.bundleID,
+                            "title": slot.windowTitle ?? "",
+                            "savedWidth": String(describing: slot.width),
+                            "isFullWidth": slot.isFullWidth,
+                            "currentFrame": NSNull(),
+                            "slivered": false,
+                            "vacant": slot.vacant,
+                        ]
+                        if let wid = slot.windowID {
+                            d["isOnScreen"] = onScreenIDs.contains(wid)
+                        } else {
+                            d["isOnScreen"] = false
+                        }
+                        return d
+                    }
+                    spaces.append([
+                        "groupID": key.groupID,
+                        "isActiveGroup": false,
+                        "isCurrentSpace": false,
+                        "source": "disk",
+                        "spaceFingerprint": key.spaceFingerprint.sorted(),
+                        "windows": wins,
+                    ])
+                }
+            }
+
+            let payload2: [String: Any] = [
+                "activeDisplayID": activeDisplayID,
+                "primaryScreenHeight": displayManager.primaryScreenHeight,
+                "queryTime": now,
+                "spaces": spaces,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload2, options: [.prettyPrinted, .sortedKeys]),
+                let json = String(data: data, encoding: .utf8)
+            {
+                return ReelResponse(success: true, data: json)
+            }
+            return ReelResponse(success: true, data: "[]")
         case .listPositions:
             if let store = snapshotStore {
                 var allSlots: [[String: Any]] = []
@@ -1811,6 +2017,132 @@ public final class WindowManager: @unchecked Sendable {
             width: slot.width,
             presetIndex: slot.presetIndex,
             isFullWidth: slot.isFullWidth)
+    }
+
+    /// Deterministic first-visit replay: use the persisted snapshot (fuzzy-matched
+    /// by bundle-ID set) to reassemble a strip in saved order when we haven't
+    /// visited this Space this session. Returns the set of adopted windowIDs so
+    /// the caller can skip them in its subsequent discovery pass.
+    ///
+    /// Bypasses `tracker.floatingWindows` — if a window was saved as a tile, a
+    /// transient float classification (e.g., the empty-title popup heuristic
+    /// firing on a window that is in fact a real document) is un-marked here.
+    /// `tracker.ignoredWindows` is still respected.
+    private func replayFromSnapshot(
+        sc: StripController,
+        groupID: GroupID,
+        onScreenIDs: Set<UInt32>,
+        exclude: Set<UInt32>
+    ) -> Set<UInt32> {
+        guard config.positionMemory, let snapshotStore else { return [] }
+
+        let currentBundleIDs = Set(tracker.apps.values.compactMap { $0.bundleIdentifier })
+        guard let snapshot = snapshotStore.snapshotFuzzyByBundleIDs(
+            groupID: Array(groupID),
+            fingerprint: sc.currentSpaceFingerprint,
+            currentBundleIDs: currentBundleIDs)
+        else { return [] }
+
+        // Exclude windows already owned by any strip, plus any adopted earlier
+        // in this replay pass (other strips adopted first).
+        var alreadyUsed: Set<UInt32> = exclude
+        for otherSC in stripControllers.values {
+            for tile in otherSC.windowMap.keys { alreadyUsed.insert(tile.rawValue) }
+        }
+
+        // Collect on-screen candidate windows whose bundle matches some slot.
+        let slotBundles = Set(snapshot.slots.compactMap { $0.vacant ? nil : $0.bundleID })
+        struct Cand {
+            let window: AXWindow
+            let app: AXApp
+            let info: StripWindowInfo
+        }
+        var candidates: [Cand] = []
+        for (pid, app) in tracker.apps {
+            guard let bid = app.bundleIdentifier, slotBundles.contains(bid) else { continue }
+            for window in discoverWindows(pid: pid) {
+                guard onScreenIDs.contains(window.windowID) else { continue }
+                guard !alreadyUsed.contains(window.windowID) else { continue }
+                // Ignored windows (sheets, dialogs flagged at classification) stay out.
+                guard !tracker.ignoredWindows.contains(window.windowID) else { continue }
+                let props = window.getPropertiesFast()
+                guard !props.isMinimized && !props.isFullscreen else { continue }
+                candidates.append(Cand(
+                    window: window, app: app,
+                    info: StripWindowInfo(
+                        tileID: window.tileID,
+                        windowID: window.windowID,
+                        bundleID: bid,
+                        windowTitle: window.getTitle())))
+            }
+        }
+        guard !candidates.isEmpty else { return [] }
+
+        let pairs = matchSlotsToWindows(
+            slots: snapshot.slots,
+            candidates: candidates.map(\.info))
+        guard !pairs.isEmpty else { return [] }
+
+        var adopted: Set<UInt32> = []
+        sc.beginBatch()
+        for pair in pairs {
+            let slot = snapshot.slots[pair.slotIndex]
+            let cand = candidates[pair.candidateIndex]
+
+            // Float-gate bypass: snapshot says "tile", override transient float mark.
+            if tracker.floatingWindows.contains(cand.window.windowID) {
+                tracker.unmarkFloating(cand.window.windowID)
+            }
+
+            tracker.registerTrackedWindow(cand.window)
+            cand.app.observeWindow(cand.window.element)
+            sc.addWindow(
+                cand.window, app: cand.app,
+                restoredPosition: RestoredSlot(
+                    slotIndex: adopted.count,
+                    width: slot.width,
+                    presetIndex: slot.presetIndex,
+                    isFullWidth: slot.isFullWidth))
+            adopted.insert(cand.window.windowID)
+        }
+        sc.finishBatch()
+
+        print("[WM] replay: adopted \(adopted.count)/\(snapshot.slots.count) slot(s) onto group=\(groupID)")
+        fflush(stdout)
+
+        scheduleUnsliverWatchdog(sc: sc, windowIDs: adopted)
+
+        return adopted
+    }
+
+    /// After replay, verify each adopted window's on-screen frame and force a
+    /// setFrame if the window is still slivered/corner-hidden. Runs async so
+    /// the setFrame dispatches from `finishBatch → applyLayout` have time to
+    /// land before we read back.
+    private func scheduleUnsliverWatchdog(sc: StripController, windowIDs: Set<UInt32>) {
+        guard !windowIDs.isEmpty else { return }
+        let workingArea = sc.strip.workingArea
+        // Capture (window, target) pairs up-front — sc.windowMap may mutate by
+        // the time the async closure runs (closed/replaced windows).
+        let pairs: [(AXWindow, CGRect)] = windowIDs.compactMap { wid in
+            let tid = TileID(wid)
+            guard let window = sc.windowMap[tid],
+                  let target = sc.lastCommittedFrames[tid] else { return nil }
+            return (window, target)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            for (window, target) in pairs {
+                guard case .success(let current) = window.getFrame() else { continue }
+                let slivered = current.maxX < workingArea.minX + 5
+                    || current.minX > workingArea.maxX - 5
+                    || current.origin.x <= -5000
+                    || current.origin.y <= -5000
+                guard slivered else { continue }
+                print("[WM] replay unsliver wid=\(window.windowID) target=\(target) current=\(current)")
+                fflush(stdout)
+                _ = window.setFrame(target)
+            }
+        }
     }
 
     /// Build StripWindowInfo array from a strip controller (caches AX title calls).

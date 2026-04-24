@@ -311,18 +311,30 @@ ln -s /Applications/Reel.app/Contents/MacOS/reel-msg /usr/local/bin/reel-msg
 reel-msg list-windows        # JSON list of managed windows
 reel-msg focus-left          # scroll left
 reel-msg toggle-floating     # float/unfloat focused window
-reel-msg get-layout          # JSON layout state
+reel-msg get-layout          # JSON layout state (current Space only)
+reel-msg get-layouts         # JSON layout state across every known Space
 reel-msg recover             # move all windows back on-screen
 reel-msg quit                # graceful shutdown
 ```
 
-All commands: `focus-left`, `focus-right`, `focus-up`, `focus-down`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
+All commands: `focus-left`, `focus-right`, `focus-up`, `focus-down`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `get-layouts`, `list-positions`, `clear-positions`, `recover`, `quit`.
 
 `get-layout` returns a JSON payload covering **every** strip (one per display
 group), each strip's current columns with window metadata, stashed per-Space
 states the strip has seen this session, and persisted snapshot-store entries
 across all groups — useful for scripting and debugging multi-monitor
 behavior.
+
+`get-layouts` is the cross-Space diagnostic probe. It enumerates every Space
+Reel knows about (current strip + stashed in-session spaces + persisted
+snapshot-store entries) and, for each window in each Space, queries the
+current AX frame so you can see exactly where a window sits right now,
+regardless of which macOS Space it belongs to. Each window entry includes
+`currentFrame`, `isOnScreen` (from `CGWindowListCopyWindowInfo`), and a
+`slivered` flag that trips when the frame matches Reel's off-screen hide
+patterns (1 px edge sliver or corner-hide at `(-10000, -10000)`) — useful
+for tracking down "stuck" windows that got parked off-screen during a Space
+switch and never re-adopted.
 
 ## Architecture
 

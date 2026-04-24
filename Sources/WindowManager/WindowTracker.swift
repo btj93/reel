@@ -154,7 +154,7 @@ public final class WindowTracker: @unchecked Sendable {
 
         // Newly launched apps often create their first window *after* the launch
         // notification. Retry discovery at short intervals to catch it quickly
-        // instead of waiting for the 1s health check poll.
+        // instead of waiting for the 500ms health check poll.
         for delay in [0.1, 0.3, 0.7] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self = self, self.apps[pid] != nil else { return }

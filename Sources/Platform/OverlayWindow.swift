@@ -113,8 +113,22 @@ class OverlayView: NSView {
     /// anchorFrame is AppKit global coords (the cursor's position). Convert to
     /// this view's local coords so drawing lands in the right spot regardless
     /// of which screen the overlay window sits on.
+    ///
+    /// `convert(_:from: nil)` on an NSView converts from the *window*'s coord
+    /// space, not AppKit-global screen space. Those only coincide when the
+    /// window sits at (0,0) — the primary display. For any panel on a non-
+    /// primary screen (e.g. an upper monitor in a stacked setup whose frame
+    /// origin is > 0), we must go screen → window first. Since the overlay
+    /// view fills the panel at local origin (0,0), window-local already equals
+    /// view-local, so no further view-level conversion is needed.
     private func anchorInViewLocal(_ anchorFrame: CGRect) -> CGRect {
-        convert(anchorFrame, from: nil)
+        guard let window = self.window else { return anchorFrame }
+        return window.convertFromScreen(anchorFrame)
+    }
+
+    private func screenPointToViewLocal(_ screenPoint: NSPoint) -> NSPoint {
+        guard let window = self.window else { return screenPoint }
+        return window.convertPoint(fromScreen: screenPoint)
     }
 
     private func drawPillBar(ctx: CGContext, pills: [PillItem], anchorFrame: CGRect, selectedIndex: Int?) {
@@ -186,7 +200,7 @@ class OverlayView: NSView {
     }
 
     func pillIndexAt(screenPoint: NSPoint, pills: [PillItem], anchorFrame: CGRect) -> Int? {
-        let localPoint = convert(screenPoint, from: nil)
+        let localPoint = screenPointToViewLocal(screenPoint)
         let localAnchor = anchorInViewLocal(anchorFrame)
         let pillWidths = pills.map { estimatePillWidth($0.label) }
         let totalPillWidth = pillWidths.reduce(0, +)

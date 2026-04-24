@@ -14,6 +14,7 @@ public enum ReelCommand: String, Codable, CaseIterable, Sendable {
     case closeWindow = "close-window"
     case listWindows = "list-windows"
     case getLayout = "get-layout"
+    case getLayouts = "get-layouts"
     case listPositions = "list-positions"
     case clearPositions = "clear-positions"
     case recover = "recover"

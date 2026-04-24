@@ -54,13 +54,13 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 **WindowManager** — Orchestration, main thread.
 - `WindowManager`: holds `stripControllers: [CGDirectDisplayID: StripController]` — one per monitor. `stripController` (computed) returns the active display's strip.
 - `StripController`: two modes — `applyLayout()` (instant) and `handleFrameTick(time:)` (animated). `animationEnabled` toggles between them.
-- `WindowTracker`: AX observers + NSWorkspace notifications. Periodic 1s health check catches missed `kAXUIElementDestroyedNotification`.
+- `WindowTracker`: AX observers + NSWorkspace notifications. Periodic 500ms health check catches missed `kAXUIElementDestroyedNotification`.
 - `StripSnapshotStore` (in `PositionMemory.swift`): replaces the old position memory. Stores ordered strip snapshots keyed by `(displayID, spaceFingerprint)`. Live snapshots use exact keys; disk-loaded entries use fuzzy Jaccard matching (>0.5) on fingerprints.
 - `ReorderOverlayController` + `ReorderOverlayWindow`: drag-to-reorder UI. Background screenshot capture → overlay shows column thumbnails → cursor tracking computes insertion index → ghost-settle animation on drop. `isReady` flag + buffered cursor positions handle the race between async capture and early cursor events.
 
 **Config** — `~/.config/reel/config.toml` via TOMLKit. Reload via menu bar button.
 
-**IPC** — Unix socket at `/tmp/reel_{uid}.sock`. `SocketServer` + `ReelCLI`. Available commands: `focus-left`, `focus-right`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `list-positions`, `clear-positions`, `recover`, `quit`.
+**IPC** — Unix socket at `/tmp/reel_{uid}.sock`. `SocketServer` + `ReelCLI`. Available commands: `focus-left`, `focus-right`, `focus-up`, `focus-down`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `get-layouts`, `list-positions`, `clear-positions`, `recover`, `quit`. `focus-up`/`focus-down` jump focus to the nearest strip above/below on multi-monitor setups with independent strips. `get-layouts` is a cross-Space diagnostic probe: for every known Space (current + in-session stash + persisted snapshots), queries each window's current AX frame and flags `isOnScreen` / `slivered` — use it to find windows stuck off-screen from a prior Space switch.
 
 ## Key Patterns
 
@@ -87,6 +87,17 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 **Logging**: `logTitle()` in WindowManager uses raw window titles in DEBUG, SHA-256 hash prefix (8 hex) in release — keeps logs useful without leaking window content.
 
 **Threading**: AX calls are dispatched to per-app background threads via `AXApp`. Layout computation and `computeTargetFrames` run on main thread during frame ticks.
+
+**Multi-monitor strip grouping**: Horizontally-aligned displays (edges touch within 0.5 px AND any Y-overlap) merge into one shared `StripController`; columns flow across the seam, and width presets / full-width resolve against the display a column currently centers on. Stacked or offset displays get independent strips, one `StripController` per `CGDirectDisplayID`. **Merging requires macOS's "Displays have separate Spaces" setting to be OFF** — when it's ON, Reel falls back to per-display strips and surfaces a menu-bar warning that deep-links to the Mission Control pane. Hot-plug and rearrangement merge/split groups live; columns migrate by position.
+
+**AppKit coordinate systems** — three different coord spaces often collide in overlay code:
+- **CG** (top-left origin, used by `CGEvent.location`, AX frames, per-display local coords).
+- **AppKit global** (bottom-left origin anchored at the primary display's bottom-left; spans all screens).
+- **Window-local** (per-window bottom-left origin = the window's AppKit-global origin).
+
+`NSView.convert(_:from: nil)` converts from the view's **window** coordinate system, **not** AppKit-global. Those only coincide when the window sits at `(0, 0)` — i.e. the primary display. Any fullscreen overlay panel (`OverlayWindow`, reorder overlay) created with `contentRect: screen.frame` on a non-primary display has a non-zero origin, so feeding AppKit-global coords into `convert(_:from: nil)` silently miscomputes by `screen.frame.origin`. Route AppKit-global inputs through `NSWindow.convertFromScreen(_:)` / `convertPoint(fromScreen:)` first.
+
+**Logs**: Running the `.app` bundle writes to `~/Library/Logs/Reel/reel.log` (rotated at 1 MB, one backup `reel.log.1`). The bare `.build/debug/Reel` binary logs to the terminal.
 
 ## Testing
 
