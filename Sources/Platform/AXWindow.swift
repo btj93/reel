@@ -209,7 +209,8 @@ public final class AXWindow: @unchecked Sendable {
             isFullscreen: isFullscreen(),
             windowLayer: 0,  // Will be set from CGWindowList data
             bundleIdentifier: nil,  // Set by WindowTracker
-            title: getTitle()
+            title: getTitle(),
+            frame: try? getFrame().get()
         )
     }
 
@@ -227,7 +228,8 @@ public final class AXWindow: @unchecked Sendable {
             isFullscreen: isFullscreen(),
             windowLayer: 0,
             bundleIdentifier: nil,
-            title: getTitle()
+            title: getTitle(),
+            frame: try? getFrame().get()
         )
     }
 

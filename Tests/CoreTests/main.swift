@@ -382,6 +382,55 @@ do {
     assertEq(classifyWindow(props), .float)
 }
 
+section("Standard window with title but tiny frame → float (Fork autocomplete)")
+do {
+    // Fork's autocomplete dropdown reports as AXStandardWindow with a title
+    // ("Window"), is resizable, and has a close button — but it's only ~200 px
+    // wide. Size gate must catch it.
+    let props = WindowProperties(
+        role: "AXWindow", subrole: "AXStandardWindow",
+        isResizable: true, hasCloseButton: true,
+        title: "Window",
+        frame: CGRect(x: 0, y: 0, width: 200, height: 1037)
+    )
+    assertEq(classifyWindow(props), .float)
+}
+
+section("Standard window with title but short frame → float")
+do {
+    let props = WindowProperties(
+        role: "AXWindow", subrole: "AXStandardWindow",
+        isResizable: true, hasCloseButton: true,
+        title: "Window",
+        frame: CGRect(x: 0, y: 0, width: 800, height: 100)
+    )
+    assertEq(classifyWindow(props), .float)
+}
+
+section("Standard window with title and substantial frame → tile (TablePlus)")
+do {
+    let props = WindowProperties(
+        role: "AXWindow", subrole: "AXStandardWindow",
+        isResizable: true, hasCloseButton: true,
+        title: "blogbot-go-postgres : blogbot - PostgreSQL 15.17",
+        frame: CGRect(x: 0, y: 0, width: 1120, height: 1037)
+    )
+    assertEq(classifyWindow(props), .tile)
+}
+
+section("Standard window with title and unknown frame → tile (no regression)")
+do {
+    // Backwards-compat: when frame is unavailable (nil), the size gate is
+    // skipped — preserves prior behavior for callers that don't fetch frame.
+    let props = WindowProperties(
+        role: "AXWindow", subrole: "AXStandardWindow",
+        isResizable: true, hasCloseButton: true,
+        title: "My Document",
+        frame: nil
+    )
+    assertEq(classifyWindow(props), .tile)
+}
+
 section("Dialog → float")
 do {
     let props = WindowProperties(role: "AXWindow", subrole: "AXDialog", isResizable: false, hasCloseButton: true)

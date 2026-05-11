@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// How a window should be managed by the window manager.
@@ -24,6 +25,10 @@ public struct WindowProperties: Sendable {
     public var windowLayer: Int        // CGWindowList kCGWindowLayer (0 = normal)
     public var bundleIdentifier: String?
     public var title: String?
+    /// Current AX-reported frame (nil if unknown). Used to reject popups that
+    /// otherwise look like a tileable standard window (e.g., autocomplete
+    /// dropdowns that mis-report as AXStandardWindow + resizable + closeBtn).
+    public var frame: CGRect?
 
     public init(
         role: String? = nil,
@@ -36,7 +41,8 @@ public struct WindowProperties: Sendable {
         isFullscreen: Bool = false,
         windowLayer: Int = 0,
         bundleIdentifier: String? = nil,
-        title: String? = nil
+        title: String? = nil,
+        frame: CGRect? = nil
     ) {
         self.role = role
         self.subrole = subrole
@@ -49,8 +55,16 @@ public struct WindowProperties: Sendable {
         self.windowLayer = windowLayer
         self.bundleIdentifier = bundleIdentifier
         self.title = title
+        self.frame = frame
     }
 }
+
+/// Minimum width an AXStandardWindow must report to be considered a tileable
+/// document window. Anything narrower is almost certainly a popup (autocomplete
+/// dropdown, command palette, branch picker) — these can mis-report subrole as
+/// AXStandardWindow with resizable=true and a close button.
+public let minTileableWidth: CGFloat = 350
+public let minTileableHeight: CGFloat = 250
 
 /// Classify a window based on its properties.
 public func classifyWindow(_ props: WindowProperties) -> WindowClassification {
@@ -96,13 +110,18 @@ public func classifyWindow(_ props: WindowProperties) -> WindowClassification {
     }
 
     // Standard windows that are resizable with a close button → tile.
-    // Exception: an empty / nil title on an AXStandardWindow is almost always
-    // a transient popup (autocomplete menu, branch picker, command palette),
-    // even when the OS reports it as resizable with a close button. Float
-    // those so they don't get inserted as strip columns.
+    // Exceptions (both indicate a transient popup misreporting as
+    // AXStandardWindow — autocomplete menus, branch pickers, command palettes):
+    //   1. Empty / nil title.
+    //   2. Frame smaller than the minimum tileable size in either dimension.
+    // Float those so they don't get inserted as strip columns.
     if subrole == "AXStandardWindow" && props.isResizable && props.hasCloseButton {
         let hasUsableTitle = !(props.title?.isEmpty ?? true)
         if !hasUsableTitle {
+            return .float
+        }
+        if let f = props.frame,
+           (f.width < minTileableWidth || f.height < minTileableHeight) {
             return .float
         }
         return .tile

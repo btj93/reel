@@ -19,6 +19,12 @@ public final class WindowTracker: @unchecked Sendable {
     /// Windows classified as ignored (not managed at all).
     public private(set) var ignoredWindows: Set<CGWindowID> = []
 
+    /// Windows that were floated solely because their title was empty at
+    /// registration time. Apps like TablePlus open their main window before
+    /// populating the title — we re-classify those on `kAXTitleChangedNotification`
+    /// so they can rejoin the strip once the real title arrives.
+    private var floatedDueToEmptyTitle: Set<CGWindowID> = []
+
     /// Last time each tracked window of each pid was focused. Used as a
     /// fallback when resolving "which window of this pid did the user mean."
     public private(set) var lastFocusTimeByWindow: [CGWindowID: Double] = [:]
@@ -217,6 +223,18 @@ public final class WindowTracker: @unchecked Sendable {
             windows[wid] = window
             floatingWindows.insert(wid)
 
+            // Remember if this window was floated only because its title was
+            // empty at registration. If a non-rule classification path floated
+            // an otherwise-tileable AXStandardWindow purely for that reason,
+            // a later kAXTitleChangedNotification will re-run classification.
+            if ruleResult == nil,
+               props.subrole == "AXStandardWindow",
+               props.isResizable,
+               props.hasCloseButton,
+               (props.title?.isEmpty ?? true) {
+                floatedDueToEmptyTitle.insert(wid)
+            }
+
             if let app = apps[window.pid] {
                 app.observeWindow(window.element)
             }
@@ -237,6 +255,7 @@ public final class WindowTracker: @unchecked Sendable {
 
         floatingWindows.remove(wid)
         ignoredWindows.remove(wid)
+        floatedDueToEmptyTitle.remove(wid)
         lastFocusTimeByWindow.removeValue(forKey: wid)
 
         onEvent?(.windowRemoved(windowID: wid, tileID: window.tileID))
@@ -289,6 +308,32 @@ public final class WindowTracker: @unchecked Sendable {
         case kAXMovedNotification:
             if let wid = event.windowID {
                 onEvent?(.windowMoved(windowID: wid))
+            }
+
+        case kAXTitleChangedNotification:
+            // Re-classify windows that were floated only because their title
+            // was empty at register time (e.g., TablePlus, which opens its
+            // main window before populating the document title).
+            if let wid = event.windowID,
+               floatedDueToEmptyTitle.contains(wid),
+               floatingWindows.contains(wid),
+               let window = windows[wid] {
+                var props = window.getPropertiesFast()
+                props.bundleIdentifier = apps[event.pid]?.bundleIdentifier
+                props.windowLayer = windowLayer(for: wid)
+
+                // Wait for a non-empty title before deciding.
+                if !(props.title?.isEmpty ?? true) {
+                    floatedDueToEmptyTitle.remove(wid)
+                    let ruleResult = applyRules(props)
+                    let classification = ruleResult ?? classifyWindow(props)
+                    if classification == .tile {
+                        floatingWindows.remove(wid)
+                        print("[Tracker] reclassify wid=\(wid) float→tile title=\(logTitle(props.title))")
+                        fflush(stdout)
+                        onEvent?(.windowAdded(window: window, classification: .tile))
+                    }
+                }
             }
 
         default:
