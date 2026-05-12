@@ -946,7 +946,11 @@ public final class StripController: @unchecked Sendable {
                     let adjustedOffset = viewPos - strip.columnX(at: newActive, time: time)
                     strip.viewOffset = .static(adjustedOffset)
                 } else {
-                    strip.viewOffset = .static(finalOffset)
+                    // Snap to the canonical target, not the spring's evaluated value.
+                    // Spring epsilon (0.5) admits a small drift, and a previous animation
+                    // could have been retargeted off-snap by rapid keypresses — locking in
+                    // `finalOffset` would persist that drift.
+                    strip.viewOffset = .static(strip.snapTargetForActive(at: time))
                 }
 
                 // One final layout with exact positions + full setFrame.

@@ -259,12 +259,14 @@ public struct Strip: Sendable {
         // Use underdamped spring (ratio < 1) for a visible bounce-back
         let bounceParams = SpringParams(dampingRatio: 0.6, stiffness: 600, epsilon: 0.5)
 
-        // Animate: current → overshoot position, but target is current (so it bounces back)
-        // We achieve this by starting with an initial velocity that carries past the target
+        // Animate: current → overshoot position, but target is the canonical snap (so it
+        // bounces back to the right place even if currentPos has drifted off the snap from
+        // an earlier interrupted animation — rapid keypresses at the boundary used to lock
+        // in the mid-bounce value because `to` was just `currentPos`).
         let velocity = kickVelocity ?? overshoot * 15
         let anim = SpringAnimation(
             from: currentPos,
-            to: currentPos,                     // return to same position
+            to: snapTargetForActive(at: time),
             initialVelocity: velocity,          // kick velocity to overshoot
             startTime: time,
             params: bounceParams

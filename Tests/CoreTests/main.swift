@@ -1509,7 +1509,9 @@ do {
     var strip = makeStrip(columnCount: 3, snapPoints: [.middle])
     let anim = strip.navigateLeft(at: 0, velocity: 800)
     check(anim != nil, "animation created")
-    assertClose(anim!.from, anim!.to, tolerance: 1, "rubber-band from==to")
+    assertClose(anim!.to, strip.snapTargetForActive(at: 0), tolerance: 0.5,
+                "rubber-band to == canonical snap")
+    assertClose(anim!.initialVelocity, -800, tolerance: 1, "kick velocity preserved")
 }
 
 section("navigateRight with velocity — snap point advance uses velocity")
