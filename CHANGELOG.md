@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.0](https://github.com/btj93/reel/compare/v0.3.0...v0.4.0) (2026-05-14)
+
+
+### Features
+
+* shared strip across aligned displays ([756a2a7](https://github.com/btj93/reel/commit/756a2a708d2e6b8ab2107f344f6f2666898d2511))
+* **wm:** first-visit space restore via snapshot replay ([9ebc8ed](https://github.com/btj93/reel/commit/9ebc8edcca1df89dda1eb7cca594d1ba19667650))
+
+
+### Bug Fixes
+
+* focusing on pip window should not change focus ([180c814](https://github.com/btj93/reel/commit/180c8147f5871781da5a6aba69d8fab578004c34))
+* **platform:** anchor primaryScreenHeight to CGMainDisplayID ([2f5eb4b](https://github.com/btj93/reel/commit/2f5eb4b84e1522bd08deb385b5166fc551aae5ad))
+* **platform:** populate title in getPropertiesFast so classifier sees it ([fb1586b](https://github.com/btj93/reel/commit/fb1586b77f820db6e6e47ec5f1955a0229bb858b))
+* pressing too fast causes the windows in wrong position ([36bbec2](https://github.com/btj93/reel/commit/36bbec23d8603134e29805a91332390fa1b58c97))
+* windows not joining the strip ([54afb7a](https://github.com/btj93/reel/commit/54afb7af7b43d727ecabd5859fc83cda0c61e837))
+
 ## [0.3.0](https://github.com/btj93/reel/compare/v0.2.5...v0.3.0) (2026-04-15)
 
 
