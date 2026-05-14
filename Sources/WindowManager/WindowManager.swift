@@ -822,11 +822,13 @@ public final class WindowManager: @unchecked Sendable {
 
         case .windowFocused(let windowID):
             let tileID = TileID(windowID)
-            // Suppress focus events for windows not on the current strip
-            // (destination-space windows during space transitions).
+            // Suppress focus events for windows not in the current strip.
+            // Covers two cases that both want to no-op the strip scroll:
+            //   - destination-space windows arriving during a space transition
+            //   - floating / unmanaged windows (PIP, dialogs, palettes) on the current space
             guard stripController.windowMap[tileID] != nil else {
                 #if DEBUG
-                    print("[WM] Suppressed pre-space-switch focus wid=\(windowID)")
+                    print("[WM] Suppressed focus for untracked window wid=\(windowID)")
                     fflush(stdout)
                 #endif
                 break
@@ -1346,12 +1348,18 @@ public final class WindowManager: @unchecked Sendable {
     /// in `sc.windowMap`) or cross-Space activations before the destination
     /// strip has been restored — both intentional no-ops.
     private func resolveFocusedTileID(forPID pid: pid_t, on sc: StripController) -> TileID? {
-        // 1. Ask AX
+        // 1. Ask AX. If AX gives a definite answer, trust it — even when the
+        //    answer is "the focused window is something we don't track" (a
+        //    floating PIP, a dialog, a window on a different strip). Falling
+        //    through to step 2 in that case would scroll to an unrelated
+        //    tracked window of the same app, which contradicts the app's own
+        //    focus state. Only proceed to step 2 when AX has nothing to say
+        //    (no focused window yet — common right after activation).
         if let axApp = tracker.apps[pid],
            let wid = axApp.focusedWindowID()
         {
             let tid = TileID(wid)
-            if sc.windowMap[tid] != nil { return tid }
+            return sc.windowMap[tid] != nil ? tid : nil
         }
 
         // 2. Most recently focused tracked window of this pid on this strip.

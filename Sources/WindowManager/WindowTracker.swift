@@ -233,6 +233,13 @@ public final class WindowTracker: @unchecked Sendable {
                props.hasCloseButton,
                (props.title?.isEmpty ?? true) {
                 floatedDueToEmptyTitle.insert(wid)
+                // Backstop: if no AX event triggers a reclassify within 500 ms,
+                // re-check with the frame fallback enabled. Catches apps whose
+                // AXTitle never populates (e.g., System Settings).
+                let pid = window.pid
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.tryAdoptFloatedEmpty(wid: wid, pid: pid, allowFrameFallback: true)
+                }
             }
 
             if let app = apps[window.pid] {
@@ -286,6 +293,9 @@ public final class WindowTracker: @unchecked Sendable {
                     let window = AXWindow(element: event.element, windowID: wid, pid: event.pid)
                     registerWindow(window, bundleID: bundleID)
                 }
+                // Some apps (e.g. System Settings) never fire a title-changed
+                // notification, so use focus as another reclassification trigger.
+                tryAdoptFloatedEmpty(wid: wid, pid: event.pid, allowFrameFallback: false)
                 lastFocusTimeByWindow[wid] = TimeUtil.now()
                 onEvent?(.windowFocused(windowID: wid))
             }
@@ -302,42 +312,78 @@ public final class WindowTracker: @unchecked Sendable {
 
         case kAXResizedNotification:
             if let wid = event.windowID {
+                tryAdoptFloatedEmpty(wid: wid, pid: event.pid, allowFrameFallback: false)
                 onEvent?(.windowResized(windowID: wid))
             }
 
         case kAXMovedNotification:
             if let wid = event.windowID {
+                tryAdoptFloatedEmpty(wid: wid, pid: event.pid, allowFrameFallback: false)
                 onEvent?(.windowMoved(windowID: wid))
             }
 
         case kAXTitleChangedNotification:
-            // Re-classify windows that were floated only because their title
-            // was empty at register time (e.g., TablePlus, which opens its
-            // main window before populating the document title).
-            if let wid = event.windowID,
-               floatedDueToEmptyTitle.contains(wid),
-               floatingWindows.contains(wid),
-               let window = windows[wid] {
-                var props = window.getPropertiesFast()
-                props.bundleIdentifier = apps[event.pid]?.bundleIdentifier
-                props.windowLayer = windowLayer(for: wid)
-
-                // Wait for a non-empty title before deciding.
-                if !(props.title?.isEmpty ?? true) {
-                    floatedDueToEmptyTitle.remove(wid)
-                    let ruleResult = applyRules(props)
-                    let classification = ruleResult ?? classifyWindow(props)
-                    if classification == .tile {
-                        floatingWindows.remove(wid)
-                        print("[Tracker] reclassify wid=\(wid) float→tile title=\(logTitle(props.title))")
-                        fflush(stdout)
-                        onEvent?(.windowAdded(window: window, classification: .tile))
-                    }
-                }
+            if let wid = event.windowID {
+                tryAdoptFloatedEmpty(wid: wid, pid: event.pid, allowFrameFallback: false)
             }
 
         default:
             break
+        }
+    }
+
+    /// Re-classify a window previously floated due to an empty title.
+    ///
+    /// Apps like TablePlus open their main window before populating the title;
+    /// `kAXTitleChangedNotification` later carries the real title and we adopt
+    /// the window into the strip. But some apps (notably System Settings) never
+    /// reliably fire a title-changed notification, so we also re-check on focus,
+    /// move, and resize events, plus a deferred retry after registration. If the
+    /// title is still empty by the deferred check but the window has a usable
+    /// frame and clearly looks like a real document window, we accept it as a
+    /// tile anyway (`allowFrameFallback`).
+    private func tryAdoptFloatedEmpty(wid: CGWindowID, pid: pid_t, allowFrameFallback: Bool) {
+        guard floatedDueToEmptyTitle.contains(wid),
+              floatingWindows.contains(wid),
+              let window = windows[wid] else { return }
+
+        var props = window.getPropertiesFast()
+        props.bundleIdentifier = apps[pid]?.bundleIdentifier
+        props.windowLayer = windowLayer(for: wid)
+
+        if !(props.title?.isEmpty ?? true) {
+            // Title arrived — reclassify via the regular path.
+            floatedDueToEmptyTitle.remove(wid)
+            let ruleResult = applyRules(props)
+            let classification = ruleResult ?? classifyWindow(props)
+            if classification == .tile {
+                floatingWindows.remove(wid)
+                print("[Tracker] reclassify wid=\(wid) float→tile title=\(logTitle(props.title))")
+                fflush(stdout)
+                onEvent?(.windowAdded(window: window, classification: .tile))
+            }
+            return
+        }
+
+        guard allowFrameFallback else { return }
+
+        // Frame-based fallback: AXStandardWindow + resizable + closeButton with a
+        // usable frame is almost certainly a real app window; the popups the
+        // empty-title check was guarding against are caught by the frame size
+        // threshold instead.
+        if props.subrole == "AXStandardWindow",
+           props.isResizable,
+           props.hasCloseButton,
+           let f = props.frame,
+           f.width >= minTileableWidth,
+           f.height >= minTileableHeight {
+            // Respect explicit rules — only fall back if no rule overrides.
+            if let ruleResult = applyRules(props), ruleResult != .tile { return }
+            floatedDueToEmptyTitle.remove(wid)
+            floatingWindows.remove(wid)
+            print("[Tracker] reclassify wid=\(wid) float→tile (frame fallback, title still empty, frame=\(Int(f.width))x\(Int(f.height)))")
+            fflush(stdout)
+            onEvent?(.windowAdded(window: window, classification: .tile))
         }
     }
 

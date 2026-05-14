@@ -197,8 +197,6 @@ public struct Strip: Sendable {
     public mutating func removeColumn(at index: Int, at time: Double) {
         guard index >= 0, index < columns.count else { return }
 
-        let removedWidth = columnData[index].currentWidth(at: time) + gap
-
         columns.remove(at: index)
         columnData.remove(at: index)
         snapIndices.remove(at: index)
@@ -211,9 +209,11 @@ public struct Strip: Sendable {
 
         // Adjust active column index and view offset based on removal position
         if index < activeColumnIndex {
+            // viewPos = columnX(active) + viewOffset, and columnX(active) is
+            // recomputed from the (now shorter) columnData — it has already
+            // shifted left by removedWidth. Leaving viewOffset alone preserves
+            // the visual position of the active column on screen.
             activeColumnIndex -= 1
-            // Compensate view offset for the removed width to preserve visual position
-            viewOffset.shiftBy(-removedWidth)
         } else if index == activeColumnIndex {
             if index < columns.count {
                 // Prefer the right neighbor (now at same index after removal)

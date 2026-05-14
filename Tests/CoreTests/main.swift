@@ -1573,19 +1573,39 @@ do {
 
 print("removeColumn viewOffset Preservation Tests")
 
-section("removeColumn — left of active preserves viewOffset")
+section("removeColumn — left of active preserves visual position")
 do {
     // 3 columns, active=2, each 720px wide, gap=16
     var strip = makeStrip(columnCount: 3)
     strip.activeColumnIndex = 2
-    // Set a known viewOffset
     strip.viewOffset = .static(-100)
-    let removedWidth = strip.columnData[0].currentWidth(at: 0) + strip.gap  // 720 + 16 = 736
+    let viewPosBefore = strip.viewPos(at: 0)
+    let removedWidth = strip.columnData[0].currentWidth(at: 0) + strip.gap  // 736
     strip.removeColumn(at: 0, at: 0)
-    // After removing column to the left, viewOffset should shift by -removedWidth
-    let expected = -100 - removedWidth
-    assertClose(strip.viewOffset.current(at: 0), expected, tolerance: 0.1, "viewOffset should shift by -removedWidth")
+    // columnX(active) drops by removedWidth automatically because columnData
+    // is now shorter; viewOffset must stay the same to keep the active column
+    // pinned at its on-screen position. viewPos therefore decreases by exactly
+    // removedWidth (the strip slid left under a stationary viewport-relative
+    // anchor).
+    assertClose(strip.viewOffset.current(at: 0), -100, tolerance: 0.1, "viewOffset should be unchanged")
+    assertClose(strip.viewPos(at: 0), viewPosBefore - removedWidth, tolerance: 0.1, "viewPos shifts by exactly removedWidth")
     assertEq(strip.activeColumnIndex, 1, "active index should decrement")
+}
+
+section("removeColumn — left of active keeps active column on-screen")
+do {
+    // Regression: when a left-of-active column was removed (e.g. HealthCheck
+    // killing the prior Fork window after a repo swap inserted the new window
+    // to its right via snapshot restore), the viewport jumped left by 2×
+    // removedWidth, leaving the focused window off-center to the right and the
+    // window one to its left visually centered.
+    var strip = makeStrip(columnCount: 3)
+    strip.activeColumnIndex = 2
+    strip.viewOffset = .static(strip.snapTargetForActive(at: 0))
+    let activeOnScreenBefore = strip.columnX(at: 2, time: 0) - strip.viewPos(at: 0)
+    strip.removeColumn(at: 0, at: 0)
+    let activeOnScreenAfter = strip.columnX(at: strip.activeColumnIndex, time: 0) - strip.viewPos(at: 0)
+    assertClose(activeOnScreenAfter, activeOnScreenBefore, tolerance: 0.1, "active column's on-screen X must not move when a left column is removed")
 }
 
 section("removeColumn — right of active preserves viewOffset")
