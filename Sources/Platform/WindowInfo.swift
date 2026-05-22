@@ -87,6 +87,19 @@ public func windowLayer(for windowID: CGWindowID) -> Int {
     return first[kCGWindowLayer as String] as? Int ?? 0
 }
 
+/// Whether the given window is currently on-screen (i.e., on the active Space
+/// and not minimized/hidden). Targeted query — cheaper than enumerating all
+/// on-screen windows via `getAllWindowInfo()` when you only need one ID.
+public func isWindowOnScreen(_ windowID: CGWindowID) -> Bool {
+    guard let windowList = CGWindowListCopyWindowInfo(
+        [.optionOnScreenOnly, .optionIncludingWindow],
+        windowID
+    ) as? [[String: Any]] else {
+        return false
+    }
+    return !windowList.isEmpty
+}
+
 // MARK: - Application Window Discovery
 
 /// Get all AXUIElement windows for a given application PID.

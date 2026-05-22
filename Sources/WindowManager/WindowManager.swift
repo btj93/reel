@@ -492,6 +492,27 @@ public final class WindowManager: @unchecked Sendable {
             self?.titleBarInteraction?.overlay.hide()
         }
 
+        // Self-focus click: when the user clicks a tile whose window is
+        // already its app's AX-focused window, neither kAXFocusedWindowChanged
+        // nor didActivateApplication fires, so the .windowFocused / .appActivated
+        // handlers don't pull the column into view. Route any non-modifier
+        // click on a tracked tile through scrollToWindow(.incrementalSnap) —
+        // idempotent when the column is already fully visible, so it's safe
+        // to fire even in the cases where AX events do arrive.
+        titleBar.onWindowFrameClick = { [weak self] (tileID: TileID) in
+            guard let self = self, !self.isPaused else { return }
+            for (_, sc) in self.stripControllers {
+                guard sc.windowMap[tileID] != nil else { continue }
+                // Cancel any pending AX-driven scroll — this click is a stronger
+                // signal of user intent than the debounced focus follow-up.
+                self.pendingFocusScroll?.cancel()
+                sc.scrollToWindow(tileID: tileID, mode: .incrementalSnap)
+                sc.userActiveTileID = tileID
+                sc.userActiveTileIDTime = TimeUtil.now()
+                return
+            }
+        }
+
         let titleBarOk = titleBar.start()
         self.titleBarInteraction = titleBar
         print("[WM] title bar interaction: \(titleBarOk)")

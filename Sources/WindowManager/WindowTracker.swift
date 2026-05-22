@@ -288,7 +288,20 @@ public final class WindowTracker: @unchecked Sendable {
             if let wid = event.windowID {
                 // If this window isn't tracked yet, adopt it — this catches windows
                 // that were created without a kAXWindowCreatedNotification.
-                if windows[wid] == nil, !ignoredWindows.contains(wid), !floatingWindows.contains(wid) {
+                //
+                // BUT: only adopt if the window is currently on the active Space.
+                // Some apps (e.g. Arc's PIP) programmatically focus a paired window
+                // that lives on another Space. Adopting it inserts a phantom column
+                // into the current strip — visually empty (the window isn't on this
+                // screen) — that the 500ms health check later removes, leaving the
+                // strip's active column shifted. The HealthCheck "adopt unmanaged
+                // on-screen window" pass still catches genuine misses where a
+                // window appears on the current Space without a creation event.
+                if windows[wid] == nil,
+                   !ignoredWindows.contains(wid),
+                   !floatingWindows.contains(wid),
+                   isWindowOnScreen(wid)
+                {
                     let bundleID = apps[event.pid]?.bundleIdentifier
                     let window = AXWindow(element: event.element, windowID: wid, pid: event.pid)
                     registerWindow(window, bundleID: bundleID)

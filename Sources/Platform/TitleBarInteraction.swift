@@ -35,6 +35,12 @@ public final class TitleBarInteraction: @unchecked Sendable {
     public var onMenuShow: ((Int, CGPoint) -> Void)?
     public var onMenuSelect: ((Int) -> Void)?
     public var onMenuDismiss: (() -> Void)?
+    /// Fires on any non-modifier leftMouseDown that lands inside a tracked
+    /// tile's full frame. Used to recover the "click an already-AX-focused
+    /// window to re-center it" path — AX doesn't emit kAXFocusedWindowChanged
+    /// when the clicked window is already its app's focused window, so the
+    /// strip would otherwise not know to slide the column into view.
+    public var onWindowFrameClick: ((TileID) -> Void)?
 
     // Event taps
     var eventTap: CFMachPort?
@@ -144,8 +150,45 @@ public final class TitleBarInteraction: @unchecked Sendable {
 
     private func handleMouseDown(event: CGEvent, location: CGPoint) -> CGEvent? {
         guard case .idle = state else { return event }
+
+        let info = onNeedsManagedFrames?()
+
+        // Non-modifier click: fire onWindowFrameClick only when macOS itself
+        // reports the click went to a tracked tile. We use the event's
+        // `mouseEventWindowUnderMousePointer` field (the window number macOS
+        // chose as the click target) rather than a geometric hit-test, because
+        // floating PIP-style windows (Arc PIP, AVKit PIP) use
+        // CAWindowSharingType.readWriteOnTop and do NOT appear in
+        // CGWindowListCopyWindowInfo — a CGWindowList z-order check would skip
+        // them and falsely report the tracked tile beneath as topmost. The
+        // mouseEventWindowUnderMousePointer field is set by the window server
+        // and reflects the actual hit, so PIP clicks correctly return the
+        // PIP's wid (which won't match any tracked TileID, so we no-op).
+        //
+        // Fn-modified clicks fall through to the title-bar drag/menu logic
+        // below and should NOT also fire this — re-centering during drag init
+        // would fight the user's intent.
+        if !event.flags.contains(requiredModifier),
+           let onWindowFrameClick,
+           let frames = info?.frames
+        {
+            let widUnderRaw = event.getIntegerValueField(.mouseEventWindowUnderMousePointer)
+            // Field is 0 when the click didn't land on any window (e.g. menu
+            // bar gap, between displays). Frame containment is still required
+            // as a sanity check — if our last-known frame says the wid isn't
+            // where we think it is, skip rather than scroll to the wrong place.
+            if widUnderRaw > 0,
+               let widUnder = UInt32(exactly: widUnderRaw)
+            {
+                let candidate = TileID(widUnder)
+                if let frame = frames[candidate], frame.contains(location) {
+                    onWindowFrameClick(candidate)
+                }
+            }
+        }
+
         guard event.flags.contains(requiredModifier) else { return event }
-        guard let info = onNeedsManagedFrames?() else { return event }
+        guard let info else { return event }
 
         guard let (columnIndex, tileID) = hitTestTitleBar(
             cgPoint: location,
