@@ -106,6 +106,12 @@ public func isWindowOnScreen(_ windowID: CGWindowID) -> Bool {
 public func getAppWindows(pid: pid_t) -> [AXUIElement] {
     let appElement = AXUIElementCreateApplication(pid)
 
+    // Aggressive messaging timeout (100ms) so a hung/SIGSTOPped app cannot
+    // block the main thread for the ~6s AX default. Mirrors AXApp.init and
+    // AXWindow.init — this element is created ad-hoc per call, so the timeout
+    // must be applied here before we message it.
+    AXUIElementSetMessagingTimeout(appElement, 0.1)
+
     var value: AnyObject?
     let err = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value)
     guard err == .success, let windows = value as? [AXUIElement] else {

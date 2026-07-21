@@ -27,6 +27,12 @@ final class ReorderOverlayController {
     private var insertionIndex: Int = 0
     private var isReady: Bool = false
     private var bufferedCursorPositions: [CGPoint] = []
+
+    /// Monotonic session id. Bumped on every `show()`. A background capture stamps the
+    /// generation it was launched under; its main-thread completion is discarded unless
+    /// the counter still matches, so a slow capture from a superseded drag can never
+    /// install its thumbnails or flip `isReady` over a newer session.
+    private var generation: Int = 0
     private var screenFrame: CGRect = .zero
     private var primaryScreenHeight: Double = 0
     private var thumbnailStyle: String = "screenshot"
@@ -62,6 +68,10 @@ final class ReorderOverlayController {
         }
 
         // 2. Store parameters, reset readiness, clear buffered positions.
+        //    Bump the generation first so any capture still in flight from a previous
+        //    show() is stamped as stale and its completion will be rejected below.
+        generation += 1
+        let myGeneration = generation
         self.columns = columns
         self.draggedIndex = draggedIndex
         self.insertionIndex = draggedIndex
@@ -82,11 +92,24 @@ final class ReorderOverlayController {
         window.thumbnailGap = gap
         self.overlayWindow = window
 
-        // Keep a weak reference for the background block.
+        // 5. Snapshot every input the background capture needs into immutable locals.
+        //    The capture block MUST NOT read self's stored properties: a re-entrant
+        //    show() on the main thread reassigns columns / draggedIndex /
+        //    nonDraggedColumns / thumbnailStyle, and an unsynchronized Array read racing
+        //    a copy-on-write mutation is undefined behavior (torn buffer pointer, or an
+        //    out-of-range index when the new strip has fewer columns).
+        let capturedDraggedCol = columns[draggedIndex]
+        let capturedNonDragged = self.nonDraggedColumns
+        let capturedStyle = thumbnailStyle
+        let capturedThumbnailHeight = thumbnailHeight
+
+        // Keep a weak reference for the background block. Only the pure, stateless
+        // helpers (captureWindow / scaleImage) are reached through self off the main
+        // thread — never any stored property.
         weak var weakSelf = self
         weak var weakWindow = window
 
-        // 5. Capture screenshots on background queue.
+        // 6. Capture screenshots on background queue.
         DispatchQueue.global(qos: .userInitiated).async {
             guard let self = weakSelf else { return }
 
@@ -95,12 +118,12 @@ final class ReorderOverlayController {
                 let aspectRatio = col.frameWidth > 0 && col.frameHeight > 0
                     ? col.frameWidth / col.frameHeight
                     : 1.0
-                let scaledWidth = thumbnailHeight * aspectRatio
+                let scaledWidth = capturedThumbnailHeight * aspectRatio
 
-                if self.thumbnailStyle == "screenshot",
+                if capturedStyle == "screenshot",
                    let cgImage = self.captureWindow(windowID: col.windowID) {
                     // Scale immediately and release the raw CGImage.
-                    let nsImage = self.scaleImage(cgImage, toHeight: thumbnailHeight)
+                    let nsImage = self.scaleImage(cgImage, toHeight: capturedThumbnailHeight)
                     return (nsImage, scaledWidth)
                 } else {
                     // Fall back to app icon.
@@ -110,19 +133,25 @@ final class ReorderOverlayController {
             }
 
             // Capture the dragged column's thumbnail.
-            let draggedCol = self.columns[self.draggedIndex]
-            let draggedResult = makeThumbnail(for: draggedCol)
+            let draggedResult = makeThumbnail(for: capturedDraggedCol)
 
             // Capture non-dragged column thumbnails.
-            let nonDraggedResults = self.nonDraggedColumns.map { col in
+            let nonDraggedResults = capturedNonDragged.map { col in
                 makeThumbnail(for: col)
             }
 
-            // 6. Back on main thread: configure and show the overlay.
+            // 7. Back on main thread: configure and show the overlay.
             DispatchQueue.main.async {
                 guard let self = weakSelf, let window = weakWindow else { return }
 
-                // Guard: if show() was called again while we were capturing, bail out.
+                // Guard: reject a completion superseded by a newer show(). The generation
+                // check and the window-identity check are belt-and-suspenders — either
+                // alone rejects a stale capture, but together they make the intent
+                // explicit: only the current session installs thumbnails and, crucially,
+                // only it may flip isReady and drain bufferedCursorPositions (which now
+                // belong to the newer session). A stale capture returns here without
+                // touching either.
+                guard self.generation == myGeneration else { return }
                 guard self.overlayWindow === window else { return }
 
                 window.configureThumbnails(
@@ -266,11 +295,14 @@ final class ReorderOverlayController {
     // MARK: - Private: captureWindow
 
     private func captureWindow(windowID: CGWindowID) -> CGImage? {
+        // Capture at nominal (1x) resolution: the result is downscaled to a ~160pt-tall
+        // thumbnail anyway, so Retina .bestResolution just burns capture time and memory
+        // (a 4K window at 2x is a ~130MB transient CGImage) that scaleImage throws away.
         CGWindowListCreateImage(
             .null,
             .optionIncludingWindow,
             windowID,
-            [.boundsIgnoreFraming, .bestResolution]
+            [.boundsIgnoreFraming, .nominalResolution]
         )
     }
 
@@ -292,7 +324,9 @@ final class ReorderOverlayController {
               ) else {
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         }
-        ctx.interpolationQuality = .high
+        // .medium is ample for a small downscaled thumbnail and noticeably cheaper than
+        // .high; the source is already near-1x after the nominal-resolution capture.
+        ctx.interpolationQuality = .medium
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let scaled = ctx.makeImage() else {
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))

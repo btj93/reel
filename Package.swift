@@ -68,5 +68,12 @@ let package = Package(
             dependencies: ["Core", "Config", "IPC", "WindowManager", "Platform"],
             path: "Tests/CoreTests"
         ),
+
+        // E2E smoke helper: hosts plain NSWindows driven over stdin/stdout (no product —
+        // test-only, mirrors RunTests). Needs no Accessibility permission.
+        .executableTarget(
+            name: "TestWindowHost",
+            path: "Tests/E2E/TestWindowHost"
+        ),
     ]
 )

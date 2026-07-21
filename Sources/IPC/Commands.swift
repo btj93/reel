@@ -18,6 +18,10 @@ public enum ReelCommand: String, Codable, CaseIterable, Sendable {
     case listPositions = "list-positions"
     case clearPositions = "clear-positions"
     case recover = "recover"
+    case pause = "pause"
+    case resume = "resume"
+    case getStatus = "get-status"
+    case reloadConfig = "reload-config"
     case quit = "quit"
 }
 
@@ -35,9 +39,25 @@ public struct ReelResponse: Codable, Sendable {
 }
 
 /// Socket path for IPC.
+///
+/// Resolution order:
+///   1. `REEL_SOCKET_PATH` environment override — used by the test harness to
+///      give each run a hermetic, namespaced socket that never collides with a
+///      live instance.
+///   2. Production default: `reel_<uid>.sock` inside the per-user temporary
+///      directory (`NSTemporaryDirectory()`, e.g. `/var/folders/.../T/`). macOS
+///      creates that directory mode 0700 owned by the current user, so — unlike
+///      the old sticky-bit `/tmp/reel_<uid>.sock` — no other local user can
+///      squat the path or bind an impostor socket there.
+///
+/// Both `SocketServer` and `reel-msg` call this single function, so the server
+/// and CLI always agree on the location.
 public func reelSocketPath() -> String {
+    if let override = ProcessInfo.processInfo.environment["REEL_SOCKET_PATH"], !override.isEmpty {
+        return override
+    }
     let uid = getuid()
-    return "/tmp/reel_\(uid).sock"
+    return (NSTemporaryDirectory() as NSString).appendingPathComponent("reel_\(uid).sock")
 }
 
 public struct IPCMessage: Codable, Sendable {

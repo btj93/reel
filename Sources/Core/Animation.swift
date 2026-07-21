@@ -127,9 +127,6 @@ public struct SpringParams: Sendable {
     /// Window movement animation.
     public static let windowMovement = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
 
-    /// Workspace switching.
-    public static let workspaceSwitch = SpringParams(dampingRatio: 1.0, stiffness: 1000, epsilon: 0.0001)
-
     /// Solve the damped harmonic oscillator: m*x'' + b*x' + k*x = 0
     /// Returns (displacement, velocity) at time t.
     public func solve(x0: Double, v0: Double, t: Double) -> (Double, Double) {

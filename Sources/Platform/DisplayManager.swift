@@ -1,4 +1,5 @@
 import AppKit
+import Core
 import CoreGraphics
 import Foundation
 
@@ -257,5 +258,41 @@ public final class DisplayManager: @unchecked Sendable {
             abs(a.maxX - b.minX) <= eps || abs(b.maxX - a.minX) <= eps
         let yOverlap = max(a.minY, b.minY) < min(a.maxY, b.maxY)
         return xAdjacent && yOverlap
+    }
+
+    // MARK: - Group Working Area
+
+    /// Build a `GroupWorkingArea` for a group of display IDs. Pure computation —
+    /// no side effects, safe to unit-test in isolation.
+    ///
+    /// Regions are sorted left-to-right by `frame.minX`; each region's rect is
+    /// that display's struts-adjusted working area in CG coords (top-left origin).
+    /// `referenceMidX` is the macOS main display's working-area midpoint when the
+    /// main display is a member of `members`, otherwise the leftmost region's
+    /// midpoint (`regions.first?.rect.midX`, falling back to 0 when empty).
+    public static func groupWorkingArea(
+        members: [CGDirectDisplayID],
+        displays: [CGDirectDisplayID: DisplayInfo],
+        mainDisplayID: CGDirectDisplayID?,
+        struts: Struts,
+        primaryScreenHeight: CGFloat
+    ) -> GroupWorkingArea {
+        let sortedMembers = members.sorted { (a, b) in
+            (displays[a]?.frame.minX ?? 0) < (displays[b]?.frame.minX ?? 0)
+        }
+        let regions: [DisplayRegion] = sortedMembers.compactMap { id in
+            guard let info = displays[id] else { return nil }
+            let rect = info.workingArea(struts: struts, primaryScreenHeight: primaryScreenHeight)
+            return DisplayRegion(displayID: UInt32(id), rect: rect)
+        }
+        let referenceMidX: CGFloat
+        if let main = mainDisplayID, members.contains(main),
+           let mainInfo = displays[main] {
+            let mainRect = mainInfo.workingArea(struts: struts, primaryScreenHeight: primaryScreenHeight)
+            referenceMidX = mainRect.midX
+        } else {
+            referenceMidX = regions.first?.rect.midX ?? 0
+        }
+        return GroupWorkingArea(regions: regions, referenceMidX: referenceMidX)
     }
 }

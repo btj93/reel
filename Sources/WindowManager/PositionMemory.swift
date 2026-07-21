@@ -121,6 +121,12 @@ public class StripSnapshotStore {
 
     private var pendingDebounces: [SnapshotKey: DispatchWorkItem] = [:]
 
+    /// Upper bound on live snapshots retained per group. macOS realistically has
+    /// a handful of Spaces per display; this cap only fires under pathological
+    /// fingerprint drift, evicting the least-recently-updated entries (LRU by
+    /// `lastUpdated`) so `liveSnapshots` can't grow without bound over a long session.
+    private let maxSnapshotsPerGroup = 32
+
     public init(filePath: URL) {
         self.filePath = filePath
         // Legacy file is in the same directory
@@ -228,16 +234,55 @@ public class StripSnapshotStore {
 
     /// Store a snapshot for the given key. Replaces any existing entry.
     public func save(_ snapshot: StripSnapshot, for key: SnapshotKey) {
+        // Evict superseded live snapshots for the same group: any prior key whose
+        // fingerprint is a near-duplicate (Jaccard > 0.5) of this one represents the
+        // same logical Space with drifted window IDs. Without this, revisiting a
+        // Space after windows opened/closed minted a brand-new key while the old
+        // one lingered for the whole session — the exact leak in finding #25.
+        // The > 0.5 threshold mirrors the fuzzy-lookup notion of "same Space", so
+        // distinct Spaces on the same display (low Jaccard) are never disturbed.
+        let superseded = liveSnapshots.keys.filter { existing in
+            existing != key
+                && existing.groupID == key.groupID
+                && jaccardSimilarity(existing.spaceFingerprint, key.spaceFingerprint) > 0.5
+        }
+        for staleKey in superseded {
+            liveSnapshots.removeValue(forKey: staleKey)
+        }
+
         liveSnapshots[key] = snapshot
+        evictLiveSnapshotsIfNeeded(groupID: key.groupID)
         isDirty = true
+    }
+
+    /// Bound live snapshots per group at `maxSnapshotsPerGroup`, dropping the
+    /// least-recently-updated entries first (LRU by `lastUpdated`). Backstop for
+    /// fingerprint drift that stays below the > 0.5 supersede threshold.
+    private func evictLiveSnapshotsIfNeeded(groupID: [UInt32]) {
+        let groupKeys = liveSnapshots.keys.filter { $0.groupID == groupID }
+        guard groupKeys.count > maxSnapshotsPerGroup else { return }
+        let oldestFirst = groupKeys.sorted {
+            (liveSnapshots[$0]?.lastUpdated ?? .distantPast)
+                < (liveSnapshots[$1]?.lastUpdated ?? .distantPast)
+        }
+        for staleKey in oldestFirst.prefix(groupKeys.count - maxSnapshotsPerGroup) {
+            liveSnapshots.removeValue(forKey: staleKey)
+        }
     }
 
     /// Schedule a debounced save (1s) for the given key. Cancels only the pending save for the same key.
     public func scheduleSnapshotSave(key: SnapshotKey, capture: @escaping () -> StripSnapshot?) {
         pendingDebounces[key]?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, let snapshot = capture() else { return }
+            guard let self else { return }
+            // Remove the entry unconditionally *before* deciding whether to save.
+            // capture() returns nil whenever the strip has no qualifying slots
+            // (e.g. the last window on a Space was just closed); the old early
+            // return skipped this removal, leaking the executed work item — and
+            // the StripController its capture closure retains — for keys whose
+            // fingerprint never recurs.
             self.pendingDebounces.removeValue(forKey: key)
+            guard let snapshot = capture() else { return }
             self.save(snapshot, for: key)
         }
         pendingDebounces[key] = work
@@ -281,7 +326,7 @@ public class StripSnapshotStore {
 
         var fileEntries: [SnapshotFileEntry] = []
 
-        // Write all live snapshots
+        // Write all live snapshots, deduping near-identical entries within a group.
         for (key, snapshot) in liveSnapshots {
             var diskSlots = snapshot.slots
             // Nil out windowIDs (ephemeral)
@@ -290,10 +335,25 @@ public class StripSnapshotStore {
             }
             let bundleIDs = Set(snapshot.slots.map(\.bundleID))
             let signature = bundleIDs.sorted()
-            fileEntries.append(SnapshotFileEntry(
+            let candidate = SnapshotFileEntry(
                 groupID: key.groupID,
                 spaceSignature: signature,
-                snapshot: StripSnapshot(slots: diskSlots, lastUpdated: snapshot.lastUpdated)))
+                snapshot: StripSnapshot(slots: diskSlots, lastUpdated: snapshot.lastUpdated))
+
+            // Live-vs-live dedup: two live keys for the same group whose bundleID
+            // signatures overlap by > 0.8 Jaccard are the same Space written twice
+            // (finding #25). Keep only the most recently updated one so the file
+            // doesn't accumulate redundant per-Space entries each write tick.
+            if let dupIndex = fileEntries.firstIndex(where: {
+                $0.groupID == candidate.groupID
+                    && jaccardSimilarityStrings(Set($0.spaceSignature), bundleIDs) > 0.8
+            }) {
+                if candidate.snapshot.lastUpdated > fileEntries[dupIndex].snapshot.lastUpdated {
+                    fileEntries[dupIndex] = candidate
+                }
+            } else {
+                fileEntries.append(candidate)
+            }
         }
 
         // Also write unconsumed disk entries (spaces not visited this session)

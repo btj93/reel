@@ -5,26 +5,50 @@ import Core
 /// Manages AX observation for a single application.
 /// Runs on a dedicated thread with its own CFRunLoop to prevent
 /// hung apps from blocking the main thread.
-public final class AXApp: @unchecked Sendable {
+///
+/// `open` for testing only — the test target subclasses this to stub out AX
+/// observation/dispatch. Do NOT subclass in `Sources/`.
+open class AXApp: @unchecked Sendable {
     public let pid: pid_t
     public let bundleIdentifier: String?
     public let appElement: AXUIElement
 
+    /// Serial queue for this app's AX writes (`setFrame`/`setPosition`).
+    /// StripController routes every write for a window owned by this app through
+    /// here, guaranteeing per-window ordering (an older mid-animation frame can
+    /// never land after the final frame) and confining the `axCallCostEMA`
+    /// read-modify-write to a single thread (finding #2).
+    public let writeQueue: DispatchQueue
+
+    /// Guards `observer`, `runLoop`, and `stopRequested`, which are written on
+    /// the observer thread and read/written from the main thread (finding #4).
+    private let lock = NSLock()
     private var observer: AXObserver?
     private var thread: Thread?
     private var runLoop: CFRunLoop?
-    private let runLoopReady = DispatchSemaphore(value: 0)
+    /// Set when `stopObserving()` runs before the observer thread reaches
+    /// `CFRunLoopRun`, so the thread self-terminates instead of blocking forever.
+    private var stopRequested = false
+
+    /// App-level notifications observed for the lifetime of the observer.
+    private static let appNotifications: [String] = [
+        kAXWindowCreatedNotification,
+        kAXFocusedWindowChangedNotification,
+    ]
 
     /// Callback closure invoked on the main thread when events occur.
     public var onEvent: ((AXAppEvent) -> Void)?
 
     /// Per-app AX call cost tracking (exponential moving average in seconds).
+    /// Mutated only from `writeQueue` (via `dispatchSet*`), so the read-modify-write
+    /// is serialized. A future reader must hop onto `writeQueue` to observe it.
     public private(set) var axCallCostEMA: Double = 0.002
 
     public init(pid: pid_t, bundleIdentifier: String?) {
         self.pid = pid
         self.bundleIdentifier = bundleIdentifier
         self.appElement = AXUIElementCreateApplication(pid)
+        self.writeQueue = DispatchQueue(label: "reel.ax.write.\(pid)", qos: .userInteractive)
 
         // Set messaging timeout on the app element too
         AXUIElementSetMessagingTimeout(appElement, 0.1)
@@ -37,9 +61,36 @@ public final class AXApp: @unchecked Sendable {
     // MARK: - Thread & Observer Lifecycle
 
     /// Start observing this app on a dedicated thread.
-    public func startObserving() {
+    open func startObserving() {
+        // Create the observer synchronously, before spawning the thread, so an
+        // observeWindow() that races the spawn (WindowTracker discovers windows
+        // immediately after registerApp) always finds a live observer instead of
+        // silently dropping the subscription. AXObserverCreate and
+        // AXObserverAddNotification are thread-agnostic; only the run-loop source
+        // must be added on the observer thread. (finding #4)
+        var obs: AXObserver?
+        let err = AXObserverCreate(pid, axObserverCallback, &obs)
+        guard err == .success, let observer = obs else {
+            print("[AXApp] AXObserverCreate failed pid=\(pid) err=\(err.rawValue)")
+            fflush(stdout)
+            return
+        }
+        lock.lock()
+        self.observer = observer
+        lock.unlock()
+
+        // Subscribe to app-level notifications now (thread-agnostic).
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        for notification in Self.appNotifications {
+            let addErr = AXObserverAddNotification(observer, appElement, notification as CFString, refcon)
+            if addErr != .success {
+                print("[AXApp] app AXObserverAddNotification failed pid=\(pid) note=\(notification) err=\(addErr.rawValue)")
+                fflush(stdout)
+            }
+        }
+
         let t = Thread { [weak self] in
-            self?.observerThreadMain()
+            self?.observerThreadMain(observer: observer)
         }
         t.name = "AXApp-\(pid)"
         t.qualityOfService = .userInteractive
@@ -48,65 +99,67 @@ public final class AXApp: @unchecked Sendable {
     }
 
     /// Stop observing and tear down the thread.
-    public func stopObserving() {
+    open func stopObserving() {
         guard thread != nil else { return }  // never started
-        _ = runLoopReady.wait(timeout: .now() + 0.5)
-        if let rl = runLoop {
-            CFRunLoopStop(rl)
+
+        lock.lock()
+        stopRequested = true
+        let rl = runLoop
+        lock.unlock()
+
+        // Deliver the stop as a run-loop block + wakeup rather than a bare
+        // CFRunLoopStop: the latter is a no-op on a loop that has not yet entered
+        // CFRunLoopRun, which would leak the thread + AXApp. The block fires
+        // whenever the loop next runs. If the thread hasn't recorded its run loop
+        // yet, `stopRequested` makes it self-terminate before running. (finding #4)
+        if let rl = rl {
+            CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode.rawValue) {
+                CFRunLoopStop(CFRunLoopGetCurrent())
+            }
+            CFRunLoopWakeUp(rl)
         }
+
+        lock.lock()
         observer = nil
-        thread = nil
         runLoop = nil
-        runLoopReady.signal()  // allow safe re-entry from deinit
+        lock.unlock()
+        thread = nil
     }
 
-    private func observerThreadMain() {
-        runLoop = CFRunLoopGetCurrent()
-        runLoopReady.signal()
+    private func observerThreadMain(observer: AXObserver) {
+        let rl = CFRunLoopGetCurrent()
 
-        // Create the AX observer
-        var obs: AXObserver?
-        let err = AXObserverCreate(pid, axObserverCallback, &obs)
-        guard err == .success, let observer = obs else {
+        // Add the observer's run loop source (must happen on this thread).
+        CFRunLoopAddSource(rl, AXObserverGetRunLoopSource(observer), .defaultMode)
+
+        // Record the run loop and bail early if a stop already arrived — both
+        // under the lock so stopObserving() and this method can't miss each
+        // other (finding #4).
+        lock.lock()
+        if stopRequested {
+            lock.unlock()
+            CFRunLoopRemoveSource(rl, AXObserverGetRunLoopSource(observer), .defaultMode)
             return
         }
-        self.observer = observer
-
-        // Subscribe to app-level notifications
-        let appNotifications: [String] = [
-            kAXWindowCreatedNotification,
-            kAXFocusedWindowChangedNotification,
-        ]
-
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        for notification in appNotifications {
-            AXObserverAddNotification(observer, appElement, notification as CFString, refcon)
-        }
-
-        // Add the observer's run loop source
-        CFRunLoopAddSource(
-            CFRunLoopGetCurrent(),
-            AXObserverGetRunLoopSource(observer),
-            .defaultMode
-        )
+        runLoop = rl
+        lock.unlock()
 
         // Run the loop — blocks until stopped
         CFRunLoopRun()
 
         // Cleanup: remove all notifications
-        for notification in appNotifications {
+        for notification in Self.appNotifications {
             AXObserverRemoveNotification(observer, appElement, notification as CFString)
         }
-        CFRunLoopRemoveSource(
-            CFRunLoopGetCurrent(),
-            AXObserverGetRunLoopSource(observer),
-            .defaultMode
-        )
+        CFRunLoopRemoveSource(rl, AXObserverGetRunLoopSource(observer), .defaultMode)
     }
 
     /// Subscribe to per-window notifications.
-    public func observeWindow(_ element: AXUIElement) {
-        guard let observer = observer else { return }
+    open func observeWindow(_ element: AXUIElement) {
+        lock.lock()
+        let obs = observer
+        lock.unlock()
+        guard let observer = obs else { return }
         let refcon = Unmanaged.passUnretained(self).toOpaque()
 
         let windowNotifications: [String] = [
@@ -119,13 +172,20 @@ public final class AXApp: @unchecked Sendable {
         ]
 
         for notification in windowNotifications {
-            AXObserverAddNotification(observer, element, notification as CFString, refcon)
+            let addErr = AXObserverAddNotification(observer, element, notification as CFString, refcon)
+            if addErr != .success && addErr != .notificationAlreadyRegistered {
+                print("[AXApp] window AXObserverAddNotification failed pid=\(pid) note=\(notification) err=\(addErr.rawValue)")
+                fflush(stdout)
+            }
         }
     }
 
     /// Unsubscribe from per-window notifications.
-    public func unobserveWindow(_ element: AXUIElement) {
-        guard let observer = observer else { return }
+    open func unobserveWindow(_ element: AXUIElement) {
+        lock.lock()
+        let obs = observer
+        lock.unlock()
+        guard let observer = obs else { return }
 
         let windowNotifications: [String] = [
             kAXUIElementDestroyedNotification,
@@ -143,9 +203,10 @@ public final class AXApp: @unchecked Sendable {
 
     // MARK: - AX Call Dispatching
 
-    /// Execute a setFrame call on this app's thread, tracking cost.
+    /// Execute a setFrame call, tracking cost. Must run on `writeQueue` — the
+    /// `axCallCostEMA` read-modify-write is serialized by that queue (finding #2).
     @discardableResult
-    public func dispatchSetFrame(_ window: AXWindow, frame: CGRect) -> AXResult<Void> {
+    open func dispatchSetFrame(_ window: AXWindow, frame: CGRect) -> AXResult<Void> {
         let start = TimeUtil.now()
         let result = window.setFrame(frame)
         let duration = TimeUtil.now() - start
@@ -155,9 +216,10 @@ public final class AXApp: @unchecked Sendable {
         return result
     }
 
-    /// Execute a setPosition-only call (cheaper during animation).
+    /// Execute a setPosition-only call (cheaper during animation). Must run on
+    /// `writeQueue` (see `dispatchSetFrame`).
     @discardableResult
-    public func dispatchSetPosition(_ window: AXWindow, position: CGPoint) -> AXResult<Void> {
+    open func dispatchSetPosition(_ window: AXWindow, position: CGPoint) -> AXResult<Void> {
         let start = TimeUtil.now()
         let result = window.setPosition(position)
         let duration = TimeUtil.now() - start
@@ -188,7 +250,7 @@ public final class AXApp: @unchecked Sendable {
     /// Returns nil if the app has no focused window or the AX call fails/times out.
     /// Thread-safe: `appElement` is immutable after init. Bounded by the app element's
     /// 100ms messaging timeout, so a hung app fails fast instead of blocking the caller.
-    public func focusedWindowID() -> CGWindowID? {
+    open func focusedWindowID() -> CGWindowID? {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(
             appElement,

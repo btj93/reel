@@ -53,7 +53,6 @@ public func computeTargetFrames(
     time: Double,
     sliverWidth: Double = 1,
     nearBufferColumns: Int = 2,
-    mode: LayoutMode = .normal,
     raiseHeight: Double = 0
 ) -> [TargetFrame] {
     guard !strip.columns.isEmpty else { return [] }

@@ -7,7 +7,10 @@ import Core
 /// Wraps an AXUIElement representing a single macOS window.
 /// Handles all AX quirks: double-resize, AXEnhancedUserInterface toggle,
 /// messaging timeout, and typed error handling.
-public final class AXWindow: @unchecked Sendable {
+///
+/// `open` for testing only — the test target subclasses this to inject fake AX
+/// behavior without touching real windows. Do NOT subclass in `Sources/`.
+open class AXWindow: @unchecked Sendable {
     /// The underlying AX element reference.
     public let element: AXUIElement
 
@@ -20,9 +23,11 @@ public final class AXWindow: @unchecked Sendable {
     /// The TileID used in the Strip model.
     public let tileID: TileID
 
-    /// Cached result of whether AXEnhancedUserInterface is settable on this window.
-    /// Queried once on first toggleEnhancedUI call and reused thereafter.
-    private var _enhancedUISettable: Bool?
+    /// Whether AXEnhancedUserInterface is settable on this window. Resolved once
+    /// in `init` so the value is immutable thereafter — the lazy `Bool?` it
+    /// replaced was a shared mutable field written from the several threads that
+    /// call `setFrame` (main + the AX write queue), a data race (finding #8).
+    private let enhancedUISettable: Bool
 
     public init(element: AXUIElement, windowID: CGWindowID, pid: pid_t) {
         self.element = element
@@ -33,12 +38,19 @@ public final class AXWindow: @unchecked Sendable {
         // Set aggressive messaging timeout (100ms) to prevent hung apps
         // from blocking for the default 6 seconds.
         AXUIElementSetMessagingTimeout(element, 0.1)
+
+        // Resolve AXEnhancedUserInterface settability up front (bounded by the
+        // 100ms timeout above) so `toggleEnhancedUI` never lazily mutates shared
+        // state from concurrent setFrame calls (finding #8).
+        var settable: DarwinBoolean = false
+        AXUIElementIsAttributeSettable(element, "AXEnhancedUserInterface" as CFString, &settable)
+        self.enhancedUISettable = settable.boolValue
     }
 
     // MARK: - Frame Operations
 
     /// Get the current window frame.
-    public func getFrame() -> AXResult<CGRect> {
+    open func getFrame() -> AXResult<CGRect> {
         let position = getPosition()
         let size = getSize()
 
@@ -54,7 +66,7 @@ public final class AXWindow: @unchecked Sendable {
 
     /// Set the window frame using the size→position→size workaround.
     /// This handles macOS constraints where setting position changes size.
-    public func setFrame(_ frame: CGRect) -> AXResult<Void> {
+    open func setFrame(_ frame: CGRect) -> AXResult<Void> {
         // Temporarily disable AXEnhancedUserInterface to prevent app animations
         let wasEnhanced = toggleEnhancedUI(false)
 
@@ -79,7 +91,7 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Set position only (cheaper than full setFrame during animation).
-    public func setPosition(_ point: CGPoint) -> AXResult<Void> {
+    open func setPosition(_ point: CGPoint) -> AXResult<Void> {
         var p = point
         guard let value = AXValueCreate(.cgPoint, &p) else {
             return .failure(.transientFailure(.failure))
@@ -90,7 +102,7 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Set size only.
-    public func setSize(_ size: CGSize) -> AXResult<Void> {
+    open func setSize(_ size: CGSize) -> AXResult<Void> {
         var s = size
         guard let value = AXValueCreate(.cgSize, &s) else {
             return .failure(.transientFailure(.failure))
@@ -103,7 +115,7 @@ public final class AXWindow: @unchecked Sendable {
     // MARK: - Window Properties
 
     /// Get the current position.
-    public func getPosition() -> AXResult<CGPoint> {
+    open func getPosition() -> AXResult<CGPoint> {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value)
         guard err == .success else { return .failure(.from(err)) }
@@ -116,7 +128,7 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Get the current size.
-    public func getSize() -> AXResult<CGSize> {
+    open func getSize() -> AXResult<CGSize> {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &value)
         guard err == .success else { return .failure(.from(err)) }
@@ -129,7 +141,7 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Get the window title.
-    public func getTitle() -> String? {
+    open func getTitle() -> String? {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &value)
         guard err == .success else { return nil }
@@ -137,7 +149,7 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Get the AX role (e.g., "AXWindow").
-    public func getRole() -> String? {
+    open func getRole() -> String? {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value)
         guard err == .success else { return nil }
@@ -145,7 +157,7 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Get the AX subrole (e.g., "AXStandardWindow", "AXDialog").
-    public func getSubrole() -> String? {
+    open func getSubrole() -> String? {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &value)
         guard err == .success else { return nil }
@@ -153,7 +165,7 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Check if the window is minimized.
-    public func isMinimized() -> Bool {
+    open func isMinimized() -> Bool {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &value)
         guard err == .success else { return false }
@@ -161,7 +173,7 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Check if the window is in native fullscreen.
-    public func isFullscreen() -> Bool {
+    open func isFullscreen() -> Bool {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, "AXFullScreen" as CFString, &value)
         guard err == .success else { return false }
@@ -169,35 +181,35 @@ public final class AXWindow: @unchecked Sendable {
     }
 
     /// Check if the window is resizable.
-    public func isResizable() -> Bool {
+    open func isResizable() -> Bool {
         var settable: DarwinBoolean = false
         let err = AXUIElementIsAttributeSettable(element, kAXSizeAttribute as CFString, &settable)
         return err == .success && settable.boolValue
     }
 
     /// Check if the window has a close button.
-    public func hasCloseButton() -> Bool {
+    open func hasCloseButton() -> Bool {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &value)
         return err == .success && value != nil
     }
 
     /// Check if the window has a minimize button.
-    public func hasMinimizeButton() -> Bool {
+    open func hasMinimizeButton() -> Bool {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXMinimizeButtonAttribute as CFString, &value)
         return err == .success && value != nil
     }
 
     /// Check if the window has a zoom (maximize/fullscreen) button.
-    public func hasZoomButton() -> Bool {
+    open func hasZoomButton() -> Bool {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXZoomButtonAttribute as CFString, &value)
         return err == .success && value != nil
     }
 
     /// Build WindowProperties for classification.
-    public func getProperties() -> WindowProperties {
+    open func getProperties() -> WindowProperties {
         WindowProperties(
             role: getRole(),
             subrole: getSubrole(),
@@ -216,7 +228,7 @@ public final class AXWindow: @unchecked Sendable {
 
     /// Fast classification-only properties. Skips hasMinimizeButton and
     /// hasZoomButton which are not consulted by `classifyWindow`.
-    public func getPropertiesFast() -> WindowProperties {
+    open func getPropertiesFast() -> WindowProperties {
         WindowProperties(
             role: getRole(),
             subrole: getSubrole(),
@@ -236,14 +248,14 @@ public final class AXWindow: @unchecked Sendable {
     // MARK: - Focus
 
     /// Raise the window to the front.
-    public func raise() -> AXResult<Void> {
+    open func raise() -> AXResult<Void> {
         let err = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
         if err == .success { return .success(()) }
         return .failure(.from(err))
     }
 
     /// Close the window by pressing its close button via AX.
-    public func close() -> AXResult<Void> {
+    open func close() -> AXResult<Void> {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &value)
         guard err == .success, let closeButton = value else {
@@ -256,7 +268,7 @@ public final class AXWindow: @unchecked Sendable {
 
     /// Give this window keyboard focus: activate the owning app, set it as the
     /// focused window, and raise it.
-    public func focus() {
+    open func focus() {
         // Activate the owning application
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.activate(options: .activateIgnoringOtherApps)
@@ -276,14 +288,7 @@ public final class AXWindow: @unchecked Sendable {
     /// Toggle AXEnhancedUserInterface. Returns the previous value.
     @discardableResult
     private func toggleEnhancedUI(_ enabled: Bool) -> Bool {
-        if _enhancedUISettable == nil {
-            var settable: DarwinBoolean = false
-            AXUIElementIsAttributeSettable(
-                element, "AXEnhancedUserInterface" as CFString, &settable
-            )
-            _enhancedUISettable = settable.boolValue
-        }
-        guard _enhancedUISettable == true else { return false }
+        guard enhancedUISettable else { return false }
 
         var currentValue: AnyObject?
         let getErr = AXUIElementCopyAttributeValue(

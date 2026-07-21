@@ -44,6 +44,14 @@ struct ReelCLI {
             Foundation.exit(1)
         }
 
+        // Never let a write to a server that closed the connection mid-response
+        // raise SIGPIPE and kill reel-msg outright — surface it as a normal
+        // write error instead (#28 hardening).
+        var noSigPipe: Int32 = 1
+        _ = setsockopt(
+            fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+            socklen_t(MemoryLayout<Int32>.size))
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = socketPath.utf8CString

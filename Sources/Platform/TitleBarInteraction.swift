@@ -396,14 +396,20 @@ private func titleBarCallback(
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
         }
-        return Unmanaged.passRetained(event)
+        // Passing through the SAME incoming event: it arrives +0, so hand it
+        // back unretained. passRetained would leak a reference the framework
+        // never balances (#21).
+        return Unmanaged.passUnretained(event)
     }
 
-    guard let userInfo = userInfo else { return Unmanaged.passRetained(event) }
+    guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
     let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
 
     if let result = handler.handleMouseEvent(event, type: type) {
-        return Unmanaged.passRetained(result)
+        // The handler either returns the same incoming event (pass unretained)
+        // or a freshly-created synthetic mouseDown (+1, must be passed retained
+        // so it survives past this call). Distinguish by identity.
+        return result === event ? .passUnretained(event) : .passRetained(result)
     }
     return nil
 }
@@ -421,10 +427,11 @@ private func escapeCallback(
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
         }
-        return Unmanaged.passRetained(event)
+        // Same incoming event passed through: unretained (see titleBarCallback).
+        return Unmanaged.passUnretained(event)
     }
 
-    guard let userInfo = userInfo else { return Unmanaged.passRetained(event) }
+    guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
     let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
 
     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
@@ -432,5 +439,5 @@ private func escapeCallback(
         handler.handleEscapeKey()
         return nil
     }
-    return Unmanaged.passRetained(event)
+    return Unmanaged.passUnretained(event)
 }

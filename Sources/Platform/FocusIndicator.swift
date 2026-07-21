@@ -37,6 +37,14 @@ public final class FocusIndicator: @unchecked Sendable {
     /// Spring params (injected from config, matches scroll animation).
     public var springParams: SpringParams = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
 
+    /// When true, all animation/tracking state still updates but the overlay
+    /// window is never created or ordered front. Test hook (headless runs).
+    public var overlaySuppressed = false
+
+    /// Last frame applied to the overlay window. Lets positionOverlay skip
+    /// redraws and window-server ordering calls when nothing changed.
+    private var appliedFrame: CGRect?
+
     /// True when any animation is in flight — used by StripController.isFullySettled.
     public var isAnimating: Bool {
         springX != nil || flashEasing != nil || fadeOutEasing != nil
@@ -88,6 +96,8 @@ public final class FocusIndicator: @unchecked Sendable {
             view.borderWidth = width
             view.cornerRadius = cornerRadius
             view.needsDisplay = true
+            // Force the next positionOverlay to re-apply ring geometry.
+            appliedFrame = nil
         }
     }
 
@@ -123,6 +133,8 @@ public final class FocusIndicator: @unchecked Sendable {
     /// Keeps the indicator exactly synchronized with the focused window's computed position.
     public func trackFrame(_ frame: CGRect) {
         guard style == .ring || style == .flash else { return }
+        // Nothing moved (e.g. another column's raise keeps the loop alive) — skip.
+        if frame == currentFrame { return }
         springX = nil; springY = nil; springW = nil; springH = nil
         currentFrame = frame
         positionOverlay(at: frame)
@@ -203,6 +215,7 @@ public final class FocusIndicator: @unchecked Sendable {
     // MARK: - Overlay management
 
     private func ensureOverlay() {
+        guard !overlaySuppressed else { return }
         guard overlayWindow == nil else { return }
         guard style == .ring || style == .flash else { return }
 
@@ -231,41 +244,55 @@ public final class FocusIndicator: @unchecked Sendable {
     private func destroyOverlay() {
         overlayWindow?.orderOut(nil)
         overlayWindow = nil
+        appliedFrame = nil
     }
 
     private func positionOverlay(at frame: CGRect) {
         guard style == .ring || style == .flash else { return }
+        // Seam E: keep tracking state, but never create/order the overlay when suppressed.
+        guard !overlaySuppressed else { return }
 
         ensureOverlay()
         guard let window = overlayWindow,
               let view = window.contentView as? FocusIndicatorView else { return }
 
-        if style == .ring {
-            // Ring: draw border around the window
-            let inset = width + 2
-            let overlayFrame = CGRect(
+        // Resolve the target window frame for the current style.
+        let inset = width + 2
+        let overlayFrame: CGRect = (style == .ring)
+            ? CGRect(
                 x: frame.minX - inset,
                 y: frame.minY - inset,
                 width: frame.width + inset * 2,
                 height: frame.height + inset * 2
             )
-            view.borderColor = color
-            view.borderWidth = width
-            view.cornerRadius = cornerRadius + inset
-            view.drawMode = .ring
-            view.innerRect = CGRect(x: inset, y: inset, width: frame.width, height: frame.height)
-            window.setFrame(overlayFrame, display: false)
-        } else {
-            // Flash: fill the window frame
-            view.fillColor = color.withAlphaComponent(0.2)
-            view.drawMode = .flash
-            view.innerRect = CGRect(x: 0, y: 0, width: frame.width, height: frame.height)
-            window.setFrame(frame, display: false)
-        }
+            : frame
 
-        view.needsDisplay = true
+        // The ring/flash content depends only on size; a pure move (scroll animation)
+        // needs no redraw or view-geometry update — just reposition the window.
+        if appliedFrame?.size != overlayFrame.size {
+            if style == .ring {
+                view.borderColor = color
+                view.borderWidth = width
+                view.cornerRadius = cornerRadius + inset
+                view.drawMode = .ring
+                view.innerRect = CGRect(x: inset, y: inset, width: frame.width, height: frame.height)
+            } else {
+                view.fillColor = color.withAlphaComponent(0.2)
+                view.drawMode = .flash
+                view.innerRect = CGRect(x: 0, y: 0, width: frame.width, height: frame.height)
+            }
+            window.setFrame(overlayFrame, display: false)
+            view.needsDisplay = true
+        } else if appliedFrame?.origin != overlayFrame.origin {
+            window.setFrameOrigin(overlayFrame.origin)
+        }
+        appliedFrame = overlayFrame
+
         window.alphaValue = fadeOutEasing != nil ? window.alphaValue : 1.0
-        window.orderFrontRegardless()
+        // Only issue a window-server ordering call when not already on screen.
+        if !window.isVisible {
+            window.orderFrontRegardless()
+        }
     }
 }
 

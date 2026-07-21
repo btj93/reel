@@ -43,6 +43,14 @@ public final class GestureCapture: @unchecked Sendable {
     /// Whether a gesture is currently active.
     private var isGesturing: Bool = false
 
+    /// Set when a captured gesture ends, so we keep swallowing its momentum
+    /// tail. macOS emits momentumPhase events only *after* the gesture-ended
+    /// phase (by which point `isGesturing` is already false), and it may keep
+    /// emitting them after the modifier is released — so momentum ownership
+    /// can't be inferred from `isGesturing`/the modifier at momentum time.
+    /// Cleared on the momentum-ended phase or when a fresh gesture begins.
+    private var suppressMomentum: Bool = false
+
     /// Set when the swipe direction was decided as not-horizontal.
     /// Stays true until the gesture ends so we don't re-evaluate mid-swipe.
     private var gestureRejected: Bool = false
@@ -94,6 +102,7 @@ public final class GestureCapture: @unchecked Sendable {
         eventTap = nil
         runLoopSource = nil
         isGesturing = false
+        suppressMomentum = false
     }
 
     // MARK: - Event Handling
@@ -114,6 +123,23 @@ public final class GestureCapture: @unchecked Sendable {
         // print("[ScrollEvt] cont=\(isContinuous) mom=\(momentumPhase) phase=\(dbgPhase) fn=\(hasFn) shift=\(hasShift) ptY=\(dbgAxis1) ptX=\(dbgAxis2) intY=\(dbgIntAxis1) intX=\(dbgIntAxis2)")
         fflush(stdout)
         #endif
+
+        // Momentum tail of a gesture we captured: keep consuming it until the
+        // momentum-ended phase, regardless of `isGesturing` (already cleared)
+        // or whether the modifier is still held (the user may have released fn
+        // during the flick). Checked before the modifier guard below so the
+        // native momentum stream can't leak to the app under the cursor —
+        // we run our own momentum via SwipeTracker. (momentumPhase: 1=begin,
+        // 2=continue, 3=ended.)
+        if suppressMomentum {
+            if momentumPhase != 0 {
+                if momentumPhase == 3 { suppressMomentum = false }
+                return true  // swallow our gesture's momentum
+            }
+            // A non-momentum event means the tail is over (or a new gesture is
+            // starting); stop suppressing and fall through to normal handling.
+            suppressMomentum = false
+        }
 
         // All scroll handling requires the configured modifier (fn by default).
         // Shift+scroll wheel: macOS converts vertical→horizontal and marks as
@@ -217,6 +243,7 @@ public final class GestureCapture: @unchecked Sendable {
                     onFocusSwipe?(focusSwipeTracker.velocity())
                 }
                 isGesturing = false
+                suppressMomentum = true  // swallow the flick's momentum tail
                 gestureMode = nil
                 focusCumulativeDelta = 0
             } else {
@@ -245,6 +272,9 @@ public final class GestureCapture: @unchecked Sendable {
     private func endGesture(_ event: CGEvent) {
         guard isGesturing else { return }
         isGesturing = false
+        // The flick's native momentum tail arrives after this point; keep
+        // swallowing it (finding: momentum leaking to the app under the cursor).
+        suppressMomentum = true
         let timestamp = TimeUtil.now()
         onGestureEnd?(timestamp)
     }
@@ -267,11 +297,13 @@ private func scrollCallback(
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
         }
-        return Unmanaged.passRetained(event)
+        // Pass the original event through at +0. The tap runtime owns and
+        // releases it; passRetained here would leak one CGEvent per event.
+        return Unmanaged.passUnretained(event)
     }
 
     guard type == .scrollWheel, let userInfo = userInfo else {
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
     let capture = Unmanaged<GestureCapture>.fromOpaque(userInfo).takeUnretainedValue()
@@ -280,5 +312,7 @@ private func scrollCallback(
     if consumed {
         return nil  // don't pass to apps
     }
-    return Unmanaged.passRetained(event)
+    // Pass the original event through at +0 (see above) — ~120 scroll ticks/sec
+    // during a flick, so a +1 leak here accumulates fast.
+    return Unmanaged.passUnretained(event)
 }

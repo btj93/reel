@@ -72,7 +72,7 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 **Dock click across Spaces**: `.appActivated` stores the pid in `recentAppActivation` (500ms TTL). `handleSpaceChange` reads it to override `savedFocusTile` with the activated app's AX-focused window on the destination strip. The field is one-shot — consumed on same-space resolution, on space-change consumption, and at the end of the new-space discovery path.
 
-**Off-screen windows**: 1px sliver at screen edge (primary), corner-hiding at (-10000,-10000) (fallback for resistant apps).
+**Off-screen windows**: 1px sliver at screen edge — the only technique production actually applies. A corner-hide at (-10000,-10000) is *recognized* by the `get-layouts` diagnostics but nothing ever writes that position; an app whose sliver write fails just stays in the `dirtyTileIDs` retry loop (known gap, pinned by the `TODO(prod-finding)` test in `SimFocusTests`). If a real fallback is implemented, put it behind the sliver-failure path in `StripController` and flip that test.
 
 **Space switching**: saves strip state keyed by on-screen window ID fingerprint. Restores on return, discovers new windows, removes closed ones.
 
@@ -102,6 +102,19 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 ## Testing
 
 `Tests/CoreTests/main.swift` — standalone executable. Uses `check()`, `assertEq()`, `assertClose()`. Add tests as `section("name") do { ... }` blocks. Run: `swift run RunTests`.
+
+**Smoke suite (Layer 3, opt-in)**: `Tests/Smoke/smoke.sh` (+ `lib.sh`) drives a REAL `.build/debug/Reel` against `TestWindowHost` NSWindows over `reel-msg`/`jq`. It STOPS your live Reel and opens real windows, so it is gated behind `REEL_E2E_CONFIRM=1` and never runs in `swift run RunTests`.
+- `make smoke` — build + run the suite (requires `REEL_E2E_CONFIRM=1` in the env; the developer command is `REEL_E2E_CONFIRM=1 make smoke`).
+- `make smoke-check` — `bash -n` + shellcheck (if installed) + a `SMOKE_DRY_RUN=1` walk (validates every jq filter against embedded get-layout/get-status/report fixtures) + a clean build. Launches nothing, touches no window — safe to run anytime.
+- Preflight captures the live Reel's exact command (`ps -o command=`), quits it gracefully, and a `trap` relaunches it + polls its socket on exit (even on failure).
+
+**Test env overrides** (production reads them; unset/empty ⇒ normal behavior — the smoke harness sets all four to sandbox itself):
+- `REEL_SOCKET_PATH` — IPC socket path (default `NSTemporaryDirectory()/reel_<uid>.sock`). `reelSocketPath()` in `IPC/Commands.swift`; used by both `SocketServer` and `reel-msg`.
+- `REEL_CONFIG_DIR` — config dir (default `~/.config/reel`). `ReelConfig.configDir`.
+- `REEL_STATE_DIR` — state/snapshot dir (default `~/.local/state/reel`). `ReelConfig.stateDir`.
+- `REEL_MANAGE_ONLY_PIDS` — comma-separated pid allowlist; Reel manages ONLY these pids (garbage/empty ⇒ inert = manage all). `WindowTracker.registerApp` guard. The smoke harness pins this to the TestWindowHost pids so the test instance is structurally unable to rearrange real windows.
+
+IPC commands supporting the harness: `pause`/`resume` (route through `togglePause()`), `get-status` (returns `isPaused`/`version`/`socketPath`/`configDir`/`stateDir`/`managedPids` — the split-brain guard), `reload-config` (same reload as the menu-bar button).
 
 ## Config
 

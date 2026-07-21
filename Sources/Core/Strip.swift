@@ -413,7 +413,11 @@ public struct Strip: Sendable {
         }
 
         // Determine the owning region for the target column at the adjusted offset.
-        let viewPosAtAdjusted = newColX + adjustedOffset
+        // Cached-width basis (see `regionForColumn(_:at:)`): the passed `viewPos`
+        // must match the cached-width `midXInStrip` walk inside the private overload,
+        // otherwise an in-flight width animation left of `colIndex` selects the wrong
+        // region. `newColX` (animated) would reintroduce the mixed-basis defect.
+        let viewPosAtAdjusted = cachedColumnX(at: colIndex) + adjustedOffset
         let colRegion = regionForColumn(colIndex, viewPos: viewPosAtAdjusted)
         let colRegionWidth = Double(colRegion.rect.width)
 
@@ -482,7 +486,7 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
             let (snapIdx, targetOffset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -516,7 +520,7 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
             let (snapIdx, targetOffset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -549,7 +553,7 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
             let (snapIdx, targetOffset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -579,7 +583,7 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
             let (snapIdx, targetOffset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -607,7 +611,7 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
             let (snapIdx, offset) = nextSnapMilestoneLeft(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -638,7 +642,7 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: newColX + adjustedOffset).rect.width)
+            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
             let (snapIdx, offset) = nextSnapMilestoneRight(
                 currentOffset: adjustedOffset,
                 snapPoints: snapPoints,
@@ -798,6 +802,18 @@ public struct Strip: Sendable {
 
     // MARK: - Per-Display Snap Helpers
 
+    /// Cumulative strip-space X of column `index` computed from SETTLED (cached)
+    /// widths only — never the animated `currentWidth`. Region assignment must
+    /// stay stable during an in-flight width animation, so the viewport-left used
+    /// for region lookup shares the same cached-width basis as `midXInStrip`.
+    private func cachedColumnX(at index: Int) -> Double {
+        var x: Double = 0
+        for i in 0..<max(0, min(index, columnData.count)) {
+            x += columnData[i].cachedWidth + gap
+        }
+        return x
+    }
+
     /// Region whose CG-X range owns a column's rendered midX. Uses `cachedWidth`
     /// for the cumulative-X walk so that snap targets are stable — they do NOT
     /// drift with in-flight A2-interpolated widths during a scroll animation.
@@ -814,7 +830,14 @@ public struct Strip: Sendable {
         }
         let colW = columnData[idx].cachedWidth
         let midXInStrip = cumX + colW / 2
-        let viewPos = viewPos(at: time)
+        // Both operands must share ONE width basis. `viewPos(at:)` derives the
+        // viewport-left through `columnX` → `currentWidth` (the ANIMATED width);
+        // subtracting it from a `cachedWidth`-derived `midXInStrip` mixes bases, so
+        // during an in-flight width animation on a column left of the active one the
+        // ~hundreds-of-px width delta would shift `midXOnScreen` into the neighbouring
+        // display's rect and select the wrong region. Use a cached-width viewport-left:
+        // the region follows only the live scroll offset, never the animated widths.
+        let viewPos = cachedColumnX(at: activeColumnIndex) + viewOffset.current(at: time)
         let midXOnScreen = midXInStrip - viewPos + Double(groupArea.totalSpan.minX)
 
         var best = groupArea.regions[0]

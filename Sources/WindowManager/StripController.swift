@@ -139,6 +139,41 @@ public final class StripController: @unchecked Sendable {
     /// Frame loop for animated scrolling (nil until Phase 2 is wired).
     public var frameLoop: FrameLoop?
 
+    /// True while management is paused (mirrors `WindowManager.isPaused`).
+    /// `WindowManager.togglePause` does a one-shot `focusIndicator.hide()`, but the
+    /// frame loop and gesture/title-bar callbacks aren't pause-aware and can re-enter
+    /// `updateFocusIndicator` (e.g. an `fn`+trackpad pan), re-showing the overlay.
+    /// Gating the indicator on this flag keeps the pause-time hide durable.
+    ///
+    /// On the false→true edge we also cancel the debounced recenter and freeze any
+    /// in-flight scroll/width/raise animation at its current value: a pause landing
+    /// mid-animation must not later fire `applyLayout()` via the recenter work item,
+    /// nor have `resume()` replay a stale spring against the user's windows once
+    /// management resumes. `applyLayout`/`handleFrameTick` are additionally gated on
+    /// this flag as backstops.
+    public var isPaused: Bool = false {
+        didSet {
+            guard isPaused, !oldValue else { return }
+            // Cancel the debounced recenter so it can't fire applyLayout() during pause.
+            resizeRecenterWork?.cancel()
+            resizeRecenterWork = nil
+            // Freeze in-flight animations to their current value.
+            let time = TimeUtil.now()
+            strip.viewOffset = .static(strip.viewOffset.current(at: time))
+            for i in strip.columnData.indices {
+                if strip.columnData[i].widthAnimation != nil {
+                    // cachedWidth write must nil out the width spring (invariant).
+                    strip.columnData[i].cachedWidth = strip.columnData[i].currentWidth(at: time)
+                    strip.columnData[i].widthAnimation = nil
+                }
+                if strip.columnData[i].raiseAnimation != nil {
+                    strip.columnData[i].cachedRaiseTarget = strip.columnData[i].currentRaiseOffset(at: time)
+                    strip.columnData[i].raiseAnimation = nil
+                }
+            }
+        }
+    }
+
     public init(workingArea: CGRect, primaryScreenHeight: CGFloat) {
         self.strip = Strip(workingArea: workingArea)
         self.primaryScreenHeight = primaryScreenHeight
@@ -176,7 +211,13 @@ public final class StripController: @unchecked Sendable {
             fflush(stdout)
             return
         }
+        // getTitle() is a synchronous AX round-trip; keep it out of release builds
+        // (finding #33) so window adoption never pays for-logging AX latency.
+        #if DEBUG
         print("[Strip] addWindow: tileID=\(window.tileID.rawValue) pid=\(window.pid) app=\(app.bundleIdentifier ?? "?") title=\(logTitle(window.getTitle()))")
+        #else
+        print("[Strip] addWindow: tileID=\(window.tileID.rawValue) pid=\(window.pid) app=\(app.bundleIdentifier ?? "?")")
+        #endif
         fflush(stdout)
         windowMap[window.tileID] = window
         apps[window.pid] = app
@@ -251,10 +292,15 @@ public final class StripController: @unchecked Sendable {
             // Pre-position the new window immediately before the full layout pass.
             // This eliminates the flicker where the window briefly appears at its
             // native/app-default position before snapping to the strip position.
-            let frames = computeTargetFrames(strip: strip, time: TimeUtil.now(), raiseHeight: raiseHeight)
-            if let target = frames.first(where: { $0.tileID == window.tileID }) {
-                _ = window.setFrame(target.frame)
-                lastCommittedFrames[window.tileID] = target.frame
+            // Skip while paused — this is a direct setFrame on the reconcile →
+            // addWindow path and must not move the user's window; applyLayout()
+            // (also pause-guarded) will position it on resume.
+            if !isPaused {
+                let frames = computeTargetFrames(strip: strip, time: TimeUtil.now(), raiseHeight: raiseHeight)
+                if let target = frames.first(where: { $0.tileID == window.tileID }) {
+                    _ = window.setFrame(target.frame)
+                    lastCommittedFrames[window.tileID] = target.frame
+                }
             }
             applyLayout()
         }
@@ -270,6 +316,9 @@ public final class StripController: @unchecked Sendable {
         windowMap.removeValue(forKey: tileID)
         lastCommittedFrames.removeValue(forKey: tileID)
         dirtyTileIDs.remove(tileID)
+        // Also drop this window from any stashed Space snapshot so it can't pin
+        // a dead AXWindow/AXApp there (finding #22).
+        pruneSavedSpaces(removedTileID: tileID)
         applyLayout()
     }
 
@@ -339,7 +388,7 @@ public final class StripController: @unchecked Sendable {
 
     // MARK: - Trackpad Focus (velocity-aware)
 
-    func focusLeftAnimated(velocity: Double) {
+    package func focusLeftAnimated(velocity: Double) {
         let time = TimeUtil.now()
         let oldActive = strip.activeColumnIndex
         if animationEnabled {
@@ -359,7 +408,7 @@ public final class StripController: @unchecked Sendable {
         focusActiveWindow()
     }
 
-    func focusRightAnimated(velocity: Double) {
+    package func focusRightAnimated(velocity: Double) {
         let time = TimeUtil.now()
         let oldActive = strip.activeColumnIndex
         if animationEnabled {
@@ -412,7 +461,7 @@ public final class StripController: @unchecked Sendable {
         }
     }
 
-    func setWidthPreset(index: Int) {
+    package func setWidthPreset(index: Int) {
         let time = TimeUtil.now()
         strip.setWidthPreset(
             index: index,
@@ -475,7 +524,7 @@ public final class StripController: @unchecked Sendable {
     // MARK: - Pill Bar Menu
 
     /// Build pill items for the active column's current state.
-    func buildPillItems(for columnIndex: Int) -> [PillItem] {
+    package func buildPillItems(for columnIndex: Int) -> [PillItem] {
         guard columnIndex >= 0, columnIndex < strip.columns.count else { return [] }
         let col = strip.columns[columnIndex]
         let isFloating = false  // floating windows are not in the strip
@@ -514,13 +563,13 @@ public final class StripController: @unchecked Sendable {
     }
 
     /// Dispatch a pill bar action. Returns the action for WindowManager to handle (for float toggle).
-    enum PillAction {
+    package enum PillAction {
         case widthPreset(Int)
         case fullWidth
         case toggleFloat
     }
 
-    func pillAction(for index: Int) -> PillAction? {
+    package func pillAction(for index: Int) -> PillAction? {
         let presetCount = strip.widthPresets.count
         if index < presetCount {
             return .widthPreset(index)
@@ -713,7 +762,13 @@ public final class StripController: @unchecked Sendable {
         }
         guard let colIndex = strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) else { return }
         let window = windowMap[tileID]
+        // getTitle() is a synchronous AX round-trip on the hot focus path; keep
+        // it out of release builds (finding #33).
+        #if DEBUG
         print("[Strip] scrollTo wid=\(window?.windowID ?? 0) tileID=\(tileID.rawValue) col=\(colIndex) mode=\(mode) app=\(window.flatMap { apps[$0.pid]?.bundleIdentifier } ?? "?") title=\(logTitle(window?.getTitle()))")
+        #else
+        print("[Strip] scrollTo wid=\(window?.windowID ?? 0) tileID=\(tileID.rawValue) col=\(colIndex) mode=\(mode) app=\(window.flatMap { apps[$0.pid]?.bundleIdentifier } ?? "?")")
+        #endif
         fflush(stdout)
 
         let time = TimeUtil.now()
@@ -768,9 +823,81 @@ public final class StripController: @unchecked Sendable {
         }
     }
 
-    // MARK: - Layout Application
+    // MARK: - AX Write Dispatch (injectable + coalesced)
 
-    private var currentLayoutMode: LayoutMode { .normal }
+    /// Off-main executor for a single AX write. The production default routes the
+    /// work through the owning app's serial `writeQueue`, so all writes for one
+    /// window are ordered and can never land out of sequence (finding #2). Tests
+    /// override this to run inline for single-threaded, virtual-clock determinism.
+    public var frameDispatch: @Sendable (AXApp, @Sendable @escaping () -> Void) -> Void =
+        { app, work in app.writeQueue.async(execute: work) }
+
+    /// Main-thread hop for dirty-tile retry bookkeeping (`dirtyTileIDs` is
+    /// main-confined). Production default is `DispatchQueue.main.async`; tests run
+    /// it inline.
+    public var mainHop: @Sendable (@Sendable @escaping () -> Void) -> Void =
+        { work in DispatchQueue.main.async(execute: work) }
+
+    /// Latest undelivered write per tile. A newer frame supersedes an older one
+    /// instead of queueing every 120Hz tick, decimating input to the app's real
+    /// AX throughput and bounding queued work to one block per tile (finding #2).
+    /// Guarded by `writeLock`.
+    private var pendingWrites: [TileID: PendingWrite] = [:]
+    /// Tiles with a drain block already in flight on their app's write queue.
+    /// Guarded by `writeLock`.
+    private var inFlightTiles: Set<TileID> = []
+    private let writeLock = NSLock()
+    /// Serial fallback for the (defensive) case where a tile's window has no
+    /// tracked AXApp — preserves ordering without the concurrent global queue.
+    private let fallbackWriteQueue = DispatchQueue(label: "reel.ax.write.fallback", qos: .userInteractive)
+
+    private struct PendingWrite {
+        let app: AXApp?
+        let apply: @Sendable () -> AXResult<Void>
+    }
+
+    /// Debug-introspection for the test settle helper.
+    package var debugDirtyCount: Int { dirtyTileIDs.count }
+
+    /// Enqueue an AX write for `tileID`, coalescing with any undelivered write for
+    /// the same tile. At most one drain block per tile is ever in flight; a
+    /// superseding frame just replaces the pending target (finding #2).
+    private func enqueueWrite(tileID: TileID, app: AXApp?, apply: @escaping @Sendable () -> AXResult<Void>) {
+        writeLock.lock()
+        pendingWrites[tileID] = PendingWrite(app: app, apply: apply)
+        let alreadyInFlight = inFlightTiles.contains(tileID)
+        if !alreadyInFlight { inFlightTiles.insert(tileID) }
+        writeLock.unlock()
+        // A drain block is already running for this tile; it will pick up the
+        // target we just stored.
+        guard !alreadyInFlight else { return }
+        if let app = app {
+            frameDispatch(app) { [weak self] in self?.drainWrites(tileID) }
+        } else {
+            fallbackWriteQueue.async { [weak self] in self?.drainWrites(tileID) }
+        }
+    }
+
+    /// Drain coalesced writes for `tileID` on the owning app's serial write queue.
+    /// Applies the latest pending target, then re-checks for a newer one that
+    /// arrived while applying, until none remain — then clears the in-flight flag.
+    private func drainWrites(_ tileID: TileID) {
+        while true {
+            writeLock.lock()
+            guard let pending = pendingWrites.removeValue(forKey: tileID) else {
+                inFlightTiles.remove(tileID)
+                writeLock.unlock()
+                return
+            }
+            writeLock.unlock()
+            let result = pending.apply()
+            if case .failure = result {
+                mainHop { [weak self] in self?.dirtyTileIDs.insert(tileID) }
+            }
+        }
+    }
+
+    // MARK: - Layout Application
 
     private var raiseHeight: Double {
         focusIndicator.style == .raise ? Double(focusIndicator.raiseHeight) : 0
@@ -814,6 +941,12 @@ public final class StripController: @unchecked Sendable {
     /// Compute target frames and apply to real windows.
     /// This is the Phase 1 "instant" mode.
     public func applyLayout() {
+        // Backstop: never dispatch AX writes while paused. reconcileDisplayTopology
+        // stays pause-reachable, so a hot-plug while paused runs reconcile →
+        // addWindow → applyLayout; this guard keeps it from moving the user's
+        // windows. A resume triggers a fresh layout.
+        guard !isPaused else { return }
+
         // Sync raise targets for columns without in-flight animations.
         // Handles startup, config reload, space restore, and new window insertion.
         let rh = raiseHeight
@@ -827,7 +960,7 @@ public final class StripController: @unchecked Sendable {
         let time = TimeUtil.now()
         lastLayoutTime = time
 
-        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode, raiseHeight: raiseHeight)
+        let frames = computeTargetFrames(strip: strip, time: time, raiseHeight: raiseHeight)
 
         // Hot-path logging removed — fires at 120Hz during animation
 
@@ -857,31 +990,18 @@ public final class StripController: @unchecked Sendable {
             applied += 1
 
             let tileID = target.tileID
+            let app = apps[window.pid]
             if target.isOffScreen {
+                // Off-screen sliver/corner-hide: position-only, no cost tracking.
                 let position = target.frame.origin
-                DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-                    let result = window.setPosition(position)
-                    if case .failure = result {
-                        DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
-                    }
-                }
+                enqueueWrite(tileID: tileID, app: app) { window.setPosition(position) }
             } else {
                 let frame = target.frame
-                if let app = apps[window.pid] {
-                    DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-                        let result = app.dispatchSetFrame(window, frame: frame)
-                        if case .failure = result {
-                            DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
-                        }
-                    }
+                if let app = app {
+                    enqueueWrite(tileID: tileID, app: app) { app.dispatchSetFrame(window, frame: frame) }
                 } else {
-                    // Fallback: dispatch setFrame directly when app not in dict
-                    DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-                        let result = window.setFrame(frame)
-                        if case .failure = result {
-                            DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
-                        }
-                    }
+                    // Fallback: setFrame directly when app not in dict (defensive).
+                    enqueueWrite(tileID: tileID, app: nil) { window.setFrame(frame) }
                 }
             }
         }
@@ -896,7 +1016,13 @@ public final class StripController: @unchecked Sendable {
     public func focusActiveWindow() {
         guard let activeTile = strip.activeColumn?.activeTile,
               let window = windowMap[activeTile] else { return }
+        // getTitle() is a synchronous AX round-trip on the hot focus path; keep
+        // it out of release builds (finding #33).
+        #if DEBUG
         print("[Strip] focus wid=\(window.windowID) tileID=\(activeTile.rawValue) col=\(strip.activeColumnIndex) app=\(apps[window.pid]?.bundleIdentifier ?? "?") title=\(logTitle(window.getTitle()))")
+        #else
+        print("[Strip] focus wid=\(window.windowID) tileID=\(activeTile.rawValue) col=\(strip.activeColumnIndex) app=\(apps[window.pid]?.bundleIdentifier ?? "?")")
+        #endif
         fflush(stdout)
         window.focus()
     }
@@ -905,13 +1031,10 @@ public final class StripController: @unchecked Sendable {
 
     /// Called by FrameLoop every vsync frame during animation.
     public func handleFrameTick(time: Double) {
-        // Keep echo suppression armed for the full animation. We dispatch AX
-        // writes every tick below; their echoes arrive with AX-observer latency
-        // that can exceed the 150ms window if we only rely on the initial
-        // applyLayout bump. Re-bumping each tick makes suppression self-sustaining
-        // while the frame loop is active (it pauses on settle, so suppression
-        // expires normally when we stop writing).
-        lastLayoutTime = time
+        // Backstop: WindowManager gates its onTick on pause, but harden against
+        // any other caller. Animations are frozen on the pause edge, so there is
+        // nothing to advance here anyway.
+        guard !isPaused else { return }
 
         // Advance focus indicator animations first (unconditional)
         focusIndicator.tick(time: time)
@@ -920,6 +1043,24 @@ public final class StripController: @unchecked Sendable {
         let widthSettled = !strip.settleWidthAnimations(at: time)
         let raiseSettled = !strip.settleRaiseAnimations(at: time)
         let scrollSettled = strip.viewOffset.isSettled(at: time)
+
+        // Keep echo suppression armed for the full animation. We dispatch AX
+        // writes every tick below; their echoes arrive with AX-observer latency
+        // that can exceed the 150ms window if we only rely on the initial
+        // applyLayout bump. Re-bumping each tick makes suppression self-sustaining
+        // while the frame loop is active (it pauses on settle, so suppression
+        // expires normally when we stop writing).
+        //
+        // Only re-arm while this strip is actually writing frames this tick.
+        // WindowManager ticks EVERY strip whenever ANY strip or the focus
+        // indicator is animating, so a fully-settled strip would otherwise keep
+        // re-arming its echo window at 120Hz and swallow genuine user
+        // move/resize events on THIS strip (finding #18). When everything is
+        // settled the one-shot settle-latch applyLayout() below arms suppression
+        // for its final write; subsequent settled ticks write nothing.
+        if !(scrollSettled && widthSettled && raiseSettled) {
+            lastLayoutTime = time
+        }
 
         // Settle latch: once scroll+width settle, do one-shot work then hold until fully settled
         if scrollSettled && widthSettled {
@@ -975,7 +1116,7 @@ public final class StripController: @unchecked Sendable {
         }
 
         // Compute frames with animation evaluated at this timestamp
-        let frames = computeTargetFrames(strip: strip, time: time, mode: currentLayoutMode, raiseHeight: raiseHeight)
+        let frames = computeTargetFrames(strip: strip, time: time, raiseHeight: raiseHeight)
 
         // Dispatch position updates to per-app threads IN PARALLEL.
         // This prevents a slow Electron app from blocking a fast native app.
@@ -1001,21 +1142,11 @@ public final class StripController: @unchecked Sendable {
                     if widthSettled && raiseSettled {
                         // Width and raise done, only horizontal position changing — position-only is cheaper
                         let position = target.frame.origin
-                        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-                            let result = app.dispatchSetPosition(window, position: position)
-                            if case .failure = result {
-                                DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
-                            }
-                        }
+                        enqueueWrite(tileID: tileID, app: app) { app.dispatchSetPosition(window, position: position) }
                     } else {
                         // Width still animating — need full setFrame to resize
                         let frame = target.frame
-                        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-                            let result = app.dispatchSetFrame(window, frame: frame)
-                            if case .failure = result {
-                                DispatchQueue.main.async { self?.dirtyTileIDs.insert(tileID) }
-                            }
-                        }
+                        enqueueWrite(tileID: tileID, app: app) { app.dispatchSetFrame(window, frame: frame) }
                     }
                 }
                 lastCommittedFrames[target.tileID] = target.frame
@@ -1260,6 +1391,16 @@ public final class StripController: @unchecked Sendable {
     private func updateFocusIndicator(frames: [TargetFrame]) {
         guard focusIndicator.style != .none else { return }
 
+        // While paused, keep the indicator hidden. The frame loop and gesture
+        // callbacks aren't pause-aware, so each tick/pan would otherwise re-show
+        // the overlay via snapTo/trackFrame — undoing the pause-time hide().
+        guard !isPaused else {
+            focusIndicator.hide()
+            lastRaisedTileID = nil
+            lastIndicatorTileID = nil
+            return
+        }
+
         guard let activeTile = strip.activeColumn?.activeTile,
               let target = frames.first(where: { $0.tileID == activeTile && $0.isVisible }) else {
             focusIndicator.hide()
@@ -1372,8 +1513,69 @@ public final class StripController: @unchecked Sendable {
             viewOffset: strip.viewOffset,
             windowMap: windowMap,
             apps: apps,
-            lastCommittedFrames: lastCommittedFrames
+            lastCommittedFrames: lastCommittedFrames,
+            savedAt: TimeUtil.now()
         )
+        evictStaleSavedSpaces()
+    }
+
+    /// Cap the number of stashed Space snapshots so orphaned entries — spaces
+    /// whose window population drifts past the Jaccard match threshold, or spaces
+    /// deleted in Mission Control — can't pin dead AXWindow/AXApp objects for the
+    /// life of the process. Drops least-recently-saved entries beyond the cap
+    /// (finding #22).
+    public static let maxSavedSpaces = 16
+    private func evictStaleSavedSpaces() {
+        guard savedSpaces.count > Self.maxSavedSpaces else { return }
+        let overflow = savedSpaces.count - Self.maxSavedSpaces
+        let oldest = savedSpaces.sorted { $0.value.savedAt < $1.value.savedAt }.prefix(overflow)
+        for (key, _) in oldest {
+            savedSpaces.removeValue(forKey: key)
+        }
+    }
+
+    /// Prune a destroyed window from every stashed Space snapshot so closed
+    /// windows don't keep pinning dead AXWindow/AXApp objects (each holds a CF
+    /// AXUIElement) in `savedSpaces`. Removes the tile from its column (dropping
+    /// the column, and the snapshot itself, if it becomes empty) and drops AXApp
+    /// references for pids no longer used by any remaining stashed window.
+    /// Safe to call from the window-removed handler / health check (finding #22).
+    public func pruneSavedSpaces(removedTileID tileID: TileID) {
+        // Snapshot the affected keys before mutating `savedSpaces`.
+        let affected = savedSpaces.filter { $0.value.windowMap[tileID] != nil }.map { $0.key }
+        for key in affected {
+            guard var s = savedSpaces[key] else { continue }
+            s.windowMap.removeValue(forKey: tileID)
+            s.lastCommittedFrames.removeValue(forKey: tileID)
+
+            // Remove the tile from its column; collect columns left empty.
+            var dropIndices: [Int] = []
+            for i in s.columns.indices {
+                if let ti = s.columns[i].tiles.firstIndex(of: tileID) {
+                    s.columns[i].tiles.remove(at: ti)
+                }
+                if s.columns[i].tiles.isEmpty { dropIndices.append(i) }
+            }
+            for i in dropIndices.reversed() {
+                s.columns.remove(at: i)
+                if i < s.columnData.count { s.columnData.remove(at: i) }
+                if i < s.snapIndices.count { s.snapIndices.remove(at: i) }
+                if i < s.activeColumnIndex { s.activeColumnIndex -= 1 }
+            }
+            if s.activeColumnIndex >= s.columns.count {
+                s.activeColumnIndex = max(0, s.columns.count - 1)
+            }
+
+            // Drop AXApp refs for pids no longer referenced by any window.
+            let livePids = Set(s.windowMap.values.map { $0.pid })
+            s.apps = s.apps.filter { livePids.contains($0.key) }
+
+            if s.columns.isEmpty {
+                savedSpaces.removeValue(forKey: key)
+            } else {
+                savedSpaces[key] = s
+            }
+        }
     }
 
     /// Switch to a new Space. Saves current state, restores if we've been here before,
@@ -1475,12 +1677,14 @@ public final class StripController: @unchecked Sendable {
 
 /// Saved state for a Space's strip layout.
 struct SavedStripState {
-    let columns: [Column]
-    let columnData: [ColumnData]
-    let snapIndices: [Int]
-    let activeColumnIndex: Int
-    let viewOffset: ViewOffset
-    let windowMap: [TileID: AXWindow]
-    let apps: [pid_t: AXApp]
-    let lastCommittedFrames: [TileID: CGRect]
+    var columns: [Column]
+    var columnData: [ColumnData]
+    var snapIndices: [Int]
+    var activeColumnIndex: Int
+    var viewOffset: ViewOffset
+    var windowMap: [TileID: AXWindow]
+    var apps: [pid_t: AXApp]
+    var lastCommittedFrames: [TileID: CGRect]
+    /// When this snapshot was last saved. Drives LRU eviction (finding #22).
+    var savedAt: Double
 }

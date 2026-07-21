@@ -19,6 +19,21 @@ public final class WindowTracker: @unchecked Sendable {
     /// Windows classified as ignored (not managed at all).
     public private(set) var ignoredWindows: Set<CGWindowID> = []
 
+    /// Insertion order of `ignoredWindows`, oldest first. Ignored windows are
+    /// never observed (so no destroy notification arrives) and never enter
+    /// `windows` (so `unregisterWindow` can't reach them), which means the set
+    /// otherwise grows for the whole process lifetime as transient popups,
+    /// tooltips, sheets, and panels come and go (finding #24). We cap the set and
+    /// evict oldest-first using this parallel queue.
+    private var ignoredWindowsOrder: [CGWindowID] = []
+    private let maxIgnoredWindows = 1024
+
+    /// Cap on `lastFocusTimeByWindow`. Entries are keyed by any focused CGWindowID
+    /// — including ignored/never-tracked ones — and only removed for *tracked*
+    /// windows, so the map grows unboundedly over a long session (finding #24).
+    /// When over the cap we drop the entries with the oldest focus timestamps.
+    private let maxFocusTimeEntries = 1024
+
     /// Windows that were floated solely because their title was empty at
     /// registration time. Apps like TablePlus open their main window before
     /// populating the title — we re-classify those on `kAXTitleChangedNotification`
@@ -58,7 +73,36 @@ public final class WindowTracker: @unchecked Sendable {
 
     private var workspaceObservers: [NSObjectProtocol] = []
 
-    public init() {}
+    /// When non-nil, the tracker manages *only* these process IDs. Sourced once
+    /// from the `REEL_MANAGE_ONLY_PIDS` environment variable at construction. This
+    /// lets a sandboxed test instance be structurally unable to touch the user's
+    /// real windows — `registerApp` (the single chokepoint both discovery and
+    /// `handleAppLaunched` funnel through) refuses any pid outside the allowlist,
+    /// so no AXApp observer is ever created for it and no window of it is tracked.
+    /// nil = inert (manage every app).
+    private let managedPidAllowlist: Set<pid_t>?
+
+    public init() {
+        self.managedPidAllowlist = Self.parseManagedPidAllowlist()
+    }
+
+    /// Parse `REEL_MANAGE_ONLY_PIDS` once. Comma-separated pids (whitespace
+    /// tolerated). Absent, empty, or fully-unparseable → nil (allowlist inert).
+    private static func parseManagedPidAllowlist() -> Set<pid_t>? {
+        guard let raw = ProcessInfo.processInfo.environment["REEL_MANAGE_ONLY_PIDS"],
+              !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let pids = raw.split(separator: ",").compactMap {
+            pid_t($0.trimmingCharacters(in: .whitespaces))
+        }
+        return pids.isEmpty ? nil : Set(pids)
+    }
+
+    /// Whether the tracker is permitted to manage the given pid. Always true when
+    /// the allowlist is inert.
+    private func isPidAllowed(_ pid: pid_t) -> Bool {
+        guard let allowlist = managedPidAllowlist else { return true }
+        return allowlist.contains(pid)
+    }
 
     deinit {
         stopObserving()
@@ -68,6 +112,13 @@ public final class WindowTracker: @unchecked Sendable {
 
     /// Discover all existing windows and start observing.
     public func startObserving() {
+        if let allowlist = managedPidAllowlist {
+            print("[Tracker] REEL_MANAGE_ONLY_PIDS active — managing only pids \(allowlist.sorted())")
+        } else {
+            print("[Tracker] REEL_MANAGE_ONLY_PIDS inert — managing all apps")
+        }
+        fflush(stdout)
+
         // Observe app launch/terminate
         let nc = NSWorkspace.shared.notificationCenter
 
@@ -136,6 +187,7 @@ public final class WindowTracker: @unchecked Sendable {
     // MARK: - App Registration
 
     private func registerApp(pid: pid_t, bundleID: String?) {
+        guard isPidAllowed(pid) else { return }
         guard apps[pid] == nil else { return }
 
         let app = AXApp(pid: pid, bundleIdentifier: bundleID)
@@ -249,7 +301,19 @@ public final class WindowTracker: @unchecked Sendable {
             onEvent?(.windowAdded(window: window, classification: .float))
 
         case .ignore:
-            ignoredWindows.insert(wid)
+            insertIgnoredWindow(wid)
+        }
+    }
+
+    /// Insert `wid` into `ignoredWindows`, tracking insertion order and evicting
+    /// the oldest entries once the set exceeds `maxIgnoredWindows`. The oldest
+    /// ignored wid is a long-dead transient window, so eviction is safe.
+    private func insertIgnoredWindow(_ wid: CGWindowID) {
+        guard ignoredWindows.insert(wid).inserted else { return }
+        ignoredWindowsOrder.append(wid)
+        while ignoredWindowsOrder.count > maxIgnoredWindows {
+            let oldest = ignoredWindowsOrder.removeFirst()
+            ignoredWindows.remove(oldest)
         }
     }
 
@@ -261,11 +325,26 @@ public final class WindowTracker: @unchecked Sendable {
         }
 
         floatingWindows.remove(wid)
-        ignoredWindows.remove(wid)
+        if ignoredWindows.remove(wid) != nil {
+            ignoredWindowsOrder.removeAll { $0 == wid }
+        }
         floatedDueToEmptyTitle.remove(wid)
         lastFocusTimeByWindow.removeValue(forKey: wid)
 
         onEvent?(.windowRemoved(windowID: wid, tileID: window.tileID))
+    }
+
+    /// Record the focus time for `wid`, bounding the map at `maxFocusTimeEntries`
+    /// by dropping the entries with the oldest timestamps. Focus times for
+    /// untracked/ignored windows are never otherwise removed, so the map would
+    /// grow for the whole process lifetime without this cap (finding #24).
+    private func recordFocusTime(_ wid: CGWindowID) {
+        lastFocusTimeByWindow[wid] = TimeUtil.now()
+        guard lastFocusTimeByWindow.count > maxFocusTimeEntries else { return }
+        let oldestFirst = lastFocusTimeByWindow.sorted { $0.value < $1.value }
+        for (staleWid, _) in oldestFirst.prefix(lastFocusTimeByWindow.count - maxFocusTimeEntries) {
+            lastFocusTimeByWindow.removeValue(forKey: staleWid)
+        }
     }
 
     // MARK: - AX Event Handling
@@ -309,7 +388,7 @@ public final class WindowTracker: @unchecked Sendable {
                 // Some apps (e.g. System Settings) never fire a title-changed
                 // notification, so use focus as another reclassification trigger.
                 tryAdoptFloatedEmpty(wid: wid, pid: event.pid, allowFrameFallback: false)
-                lastFocusTimeByWindow[wid] = TimeUtil.now()
+                recordFocusTime(wid)
                 onEvent?(.windowFocused(windowID: wid))
             }
 

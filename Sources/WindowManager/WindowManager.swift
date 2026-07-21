@@ -56,7 +56,14 @@ public final class WindowManager: @unchecked Sendable {
         if let gid = displayToGroup[activeDisplayID], let sc = stripControllers[gid] {
             return sc
         }
-        return stripControllers.values.first!
+        if let sc = stripControllers.values.first {
+            return sc
+        }
+        // No strips exist — all displays disconnected (clamshell / KVM input
+        // switch / resolution transition). Materialize a synthetic fallback so
+        // callers never crash on an empty dictionary. Preserves the never-empty
+        // invariant that init() also enforces.
+        return ensureFallbackStrip().1
     }
 
     /// True when macOS "Displays have separate Spaces" is ON. In that state
@@ -81,6 +88,12 @@ public final class WindowManager: @unchecked Sendable {
     /// IPC socket server.
     private var ipcServer: SocketServer?
 
+    /// Dispatch sources for graceful-shutdown signals. Retained so they stay
+    /// live; delivering the signal via a dispatch source (rather than a POSIX
+    /// signal handler) keeps handling async-signal-safe.
+    private var sigtermSource: DispatchSourceSignal?
+    private var sigintSource: DispatchSourceSignal?
+
     /// Current configuration.
     public private(set) var config: ReelConfig
 
@@ -92,11 +105,11 @@ public final class WindowManager: @unchecked Sendable {
     /// Pending external focus scroll — debounced to avoid visual flash during space transitions.
     private var pendingFocusScroll: DispatchWorkItem?
 
-    /// Most recent .appActivated event, used by handleSpaceChange to override
-    /// savedFocusTile when a dock click is followed by a space change. Consumed
-    /// (set to nil) once a space-change handles it; expires after 500ms.
-    private var recentAppActivation: (pid: pid_t, time: Double)?
-    private static let appActivationCarryover: Double = 0.5
+    /// Focus-race guard for `.appActivated` → `handleSpaceChange`: remembers the
+    /// most recent app activation (dock click / Cmd+Tab) so a space-change that
+    /// follows can override savedFocusTile with that app's focused window.
+    /// One-shot, 0.5s TTL. Pure logic lives in `FocusEventGate` (Core).
+    private var focusGate = FocusEventGate()
 
     private let reorderOverlay = ReorderOverlayController()
     private var isReorderPending = false
@@ -116,6 +129,26 @@ public final class WindowManager: @unchecked Sendable {
     /// On-screen window IDs at startup. Used to filter initial discovery so windows on
     /// other Spaces aren't added to the current strip. Cleared after initial batch finishes.
     private var startupOnScreenIDs: Set<UInt32>?
+
+    /// Windows that were absent from CGWindowList on the *previous* health check.
+    /// A window must be missing on two consecutive checks before it is reaped, so
+    /// a single-tick disappearance during a Space transition (window server flips
+    /// the on-screen list before activeSpaceDidChange is delivered) can't gut the
+    /// departing Space's saved layout (finding #17).
+    private var healthCheckMissing: Set<CGWindowID> = []
+
+    /// Windows the health-check adoption pass has already classified as
+    /// non-tileable (.ignore). Lets subsequent 500ms sweeps skip them before the
+    /// ~9-call getPropertiesFast() battery. `.float` results go to
+    /// `tracker.floatingWindows` instead; this set covers `.ignore`, for which
+    /// the tracker exposes no public setter. Pruned to the on-screen set each
+    /// sweep so it can't grow unbounded (finding #32).
+    private var healthCheckIgnored: Set<CGWindowID> = []
+
+    /// Hash of the last crash-recovery state written to disk. `persistState`
+    /// skips the write when the freshly-serialized state hashes identically, so
+    /// the 5s timer stops rewriting an unchanged file forever (finding #35).
+    private var lastPersistedStateHash: Int?
 
     public init() {
         // Load config first
@@ -158,7 +191,7 @@ public final class WindowManager: @unchecked Sendable {
         activeDisplayID = displayManager.mainDisplay?.displayID ?? CGMainDisplayID()
 
         // State file path
-        let stateDir = NSHomeDirectory() + "/.local/state/reel"
+        let stateDir = ReelConfig.stateDir
         self.stateFilePath = stateDir + "/window-state.json"
 
         // Apply config to all subsystems
@@ -277,7 +310,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Initialize snapshot store before window discovery
         if config.positionMemory {
-            let stateDir = NSHomeDirectory() + "/.local/state/reel"
+            let stateDir = ReelConfig.stateDir
             let filePath = URL(fileURLWithPath: stateDir + "/window-snapshots.json")
             snapshotStore = StripSnapshotStore(filePath: filePath)
             snapshotStore?.loadFromDisk()
@@ -312,6 +345,14 @@ public final class WindowManager: @unchecked Sendable {
         self.frameLoop = fl
         fl.onTick = { [weak self] time in
             guard let self = self else { return }
+            // While paused, don't advance any strip's animation — a spring left
+            // in flight when the user paused would otherwise keep dispatching AX
+            // setFrame/setPosition (and the settle-latch would re-hide far-zone
+            // columns), fighting the restoreAllWindows() that togglePause ran.
+            if self.isPaused {
+                self.frameLoop?.pause()
+                return
+            }
             for (_, sc) in self.stripControllers {
                 sc.handleFrameTick(time: time)
             }
@@ -333,25 +374,35 @@ public final class WindowManager: @unchecked Sendable {
 
         // Phase 2: Gesture capture for trackpad scrolling
         let gestureCapture = GestureCapture()
+        // All trackpad gesture callbacks mutate layout (scroll / dispatch AX
+        // setPosition), so gate them on pause — an fn+swipe while paused would
+        // otherwise scroll and re-sliver the whole strip. onGestureCancel is a
+        // pure state reset and stays ungated so a gesture in flight when pause
+        // toggles still tears down cleanly.
         gestureCapture.onGestureBegin = { [weak self] time in
-            self?.stripController.handleGestureBegin(time: time)
+            guard let self, !self.isPaused else { return }
+            self.stripController.handleGestureBegin(time: time)
         }
         gestureCapture.onGestureUpdate = { [weak self] deltaX, time in
-            self?.stripController.handleGestureUpdate(deltaX: deltaX, time: time)
+            guard let self, !self.isPaused else { return }
+            self.stripController.handleGestureUpdate(deltaX: deltaX, time: time)
         }
         gestureCapture.onGestureEnd = { [weak self] time in
-            self?.stripController.handleGestureEnd(time: time)
+            guard let self, !self.isPaused else { return }
+            self.stripController.handleGestureEnd(time: time)
         }
         gestureCapture.onGestureCancel = { [weak self] in
             self?.stripController.handleGestureCancel()
         }
         gestureCapture.onDiscreteScroll = { [weak self] deltaX, time in
-            self?.stripController.handleDiscreteScroll(deltaX: deltaX, time: time)
+            guard let self, !self.isPaused else { return }
+            self.stripController.handleDiscreteScroll(deltaX: deltaX, time: time)
         }
         gestureCapture.requiredModifier = Self.parseModifierFlag(config.gestureModifier)
         gestureCapture.swipeThresholdPx = config.cursor.swipeThresholdPx
         gestureCapture.onFocusSwipe = { [weak self] velocity in
-            guard let sc = self?.stripController else { return }
+            guard let self, !self.isPaused else { return }
+            let sc = self.stripController
             if velocity < 0 {
                 sc.focusLeftAnimated(velocity: velocity)
             } else {
@@ -392,19 +443,43 @@ public final class WindowManager: @unchecked Sendable {
         }
 
         titleBar.onDragBegin = { [weak self] columnIndex in
-            guard let self = self else { return }
+            // Paused: don't open the reorder overlay — committing a drop runs
+            // moveColumn + applyLayout + focusActiveWindow, all layout mutations.
+            guard let self = self, !self.isPaused else { return }
             // Use the strip the cursor is currently on, not the active strip.
             let sc = self.stripControllerUnderCursor()
             let columns = self.buildColumnInfos(from: sc)
-            self.reorderOverlay.onCommit = { [weak self] sourceIndex, insertionIndex in
+            // Identify the dragged column by a STABLE tile ID captured now. A
+            // multi-second drag can outlive the layout it started on: focusUp/
+            // focusDown hotkeys and IPC focus commands are not blocked until drop,
+            // and the 500ms health check can adopt/remove columns mid-drag. Both
+            // shift the frozen drag-begin index. Re-resolving the source column by
+            // this tile at commit time (against the drag-origin strip `sc`, never
+            // the possibly-changed active strip) keeps the reorder correct or
+            // cancels cleanly if the column vanished (finding #20).
+            let draggedTile: TileID? = columnIndex < sc.strip.columns.count
+                ? (sc.strip.columns[columnIndex].activeTile ?? sc.strip.columns[columnIndex].tiles.first)
+                : nil
+            self.reorderOverlay.onCommit = { [weak self] _, insertionIndex in
                 guard let self = self else { return }
+                defer { self.isReorderPending = false }
+                // Re-resolve the source column by its tile on the origin strip.
+                // Bail if the tile is gone (window closed / migrated mid-drag).
+                guard let draggedTile,
+                      let sourceIndex = sc.strip.columns.firstIndex(where: {
+                          $0.tiles.contains(draggedTile)
+                      })
+                else { return }
                 // Convert gap-based insertion index to position index for moveColumn.
                 // moveColumn uses remove-then-insert, so after removing sourceIndex,
-                // indices >= sourceIndex shift down by 1.
-                let destIndex = insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex
+                // indices >= sourceIndex shift down by 1. Clamp into the current
+                // column range — the overlay's gap index was computed against the
+                // drag-begin column list, which may have shrunk.
+                let rawDest = insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex
+                let destIndex = max(0, min(rawDest, sc.strip.columns.count - 1))
                 if sourceIndex != destIndex {
                     let time = TimeUtil.now()
-                    self.stripController.strip.moveColumn(from: sourceIndex, to: destIndex, at: time)
+                    sc.strip.moveColumn(from: sourceIndex, to: destIndex, at: time)
                     // Make the dropped column the new active/focused column. Without
                     // this, when the user drags a non-active column, the old active
                     // stays centered and the dropped column lands at a position that
@@ -412,7 +487,7 @@ public final class WindowManager: @unchecked Sendable {
                     // shifting further right the larger the destination index. Making
                     // the dropped column active pins it at its snap point (centered
                     // by default) regardless of drop index.
-                    self.stripController.strip.activeColumnIndex = destIndex
+                    sc.strip.activeColumnIndex = destIndex
                     // Re-center the viewOffset on the new active column INSTANTLY
                     // (before applyLayout) so applyLayout places windows at their
                     // final positions. If we used the animated variant and called
@@ -420,12 +495,11 @@ public final class WindowManager: @unchecked Sendable {
                     // the stale (old-active-centered) viewOffset, so windows would
                     // visibly snap to the wrong place and only animate to the right
                     // place over the next frames — a visible "wrong then right" jump.
-                    self.stripController.strip.recenterActiveColumn(at: time)
-                    self.stripController.applyLayout()
-                    self.stripController.focusActiveWindow()
-                    self.scheduleSnapshotSave()
+                    sc.strip.recenterActiveColumn(at: time)
+                    sc.applyLayout()
+                    sc.focusActiveWindow()
+                    self.scheduleSnapshotSave(sc: sc)
                 }
-                self.isReorderPending = false
             }
             // Use the full display frame in AppKit coordinates for the overlay window.
             let gid = self.stripControllers.first(where: { $0.value === sc })?.key
@@ -445,11 +519,16 @@ public final class WindowManager: @unchecked Sendable {
         }
 
         titleBar.onDragUpdate = { [weak self] (cgPoint: CGPoint) in
-            self?.reorderOverlay.updateCursor(position: cgPoint)
+            guard let self, !self.isPaused else { return }
+            self.reorderOverlay.updateCursor(position: cgPoint)
         }
 
         titleBar.onDragEnd = { [weak self] (_: Int) in
-            guard let self = self else { return }
+            // Paused: skip commit. onDragBegin was gated so no overlay is
+            // showing; setting isReorderPending here would otherwise stick true
+            // (commitDrop on a nil overlay never resets it), and a stale onCommit
+            // could fire moveColumn. Stay fully inert while paused.
+            guard let self = self, !self.isPaused else { return }
             self.isReorderPending = true
             self.reorderOverlay.commitDrop()
         }
@@ -460,7 +539,9 @@ public final class WindowManager: @unchecked Sendable {
             self.isReorderPending = false
         }
         titleBar.onMenuShow = { [weak self] (columnIndex: Int, cgMousePoint: CGPoint) in
-            guard let self = self else { return }
+            // Paused: don't surface the pill-bar menu — its actions
+            // (setWidthPreset / toggleFullWidth / toggleFloat) all mutate layout.
+            guard let self = self, !self.isPaused else { return }
             // Route to the strip under the cursor so windows on the non-active
             // monitor still get the pill-bar menu.
             let sc = self.stripControllerUnderCursor()
@@ -473,7 +554,7 @@ public final class WindowManager: @unchecked Sendable {
             self.titleBarInteraction?.overlay.show()
         }
         titleBar.onMenuSelect = { [weak self] (actionIndex: Int) in
-            guard let self = self else { return }
+            guard let self = self, !self.isPaused else { return }
             let sc = self.stripControllerUnderCursor()
             if let action = sc.pillAction(for: actionIndex) {
                 switch action {
@@ -526,8 +607,17 @@ public final class WindowManager: @unchecked Sendable {
             self?.persistState()
             self?.snapshotStore?.persistToDisk()
         }
+        // Let the OS coalesce these periodic wakes with other timers instead of
+        // firing on the exact deadline — cheaper on battery for a backstop timer
+        // whose precise phase doesn't matter (finding #35).
+        stateWriteTimer?.tolerance = 1.0
 
         print("[WM] Config loaded from \(ReelConfig.configPath)")
+        fflush(stdout)
+        // Log the effective config / state / socket paths so a sandboxed run
+        // (REEL_CONFIG_DIR / REEL_STATE_DIR / REEL_SOCKET_PATH overrides) makes
+        // it obvious which locations this instance is actually using (W5).
+        print("[WM] Paths: config=\(ReelConfig.configPath) state=\(ReelConfig.stateDir) socket=\(reelSocketPath())")
         fflush(stdout)
 
         // IPC socket server
@@ -567,19 +657,29 @@ public final class WindowManager: @unchecked Sendable {
         healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.checkWindowHealth()
         }
+        healthCheckTimer?.tolerance = 0.1
 
         // Register signal handlers for graceful shutdown via NSApp.terminate
-        // This ensures proper cleanup (menu bar icon removal, window restoration)
-        signal(SIGTERM) { _ in
-            DispatchQueue.main.async {
-                NSApp.terminate(nil)
-            }
-        }
-        signal(SIGINT) { _ in
-            DispatchQueue.main.async {
-                NSApp.terminate(nil)
-            }
-        }
+        // (ensures proper cleanup — menu bar icon removal, window restoration).
+        //
+        // Use DispatchSourceSignal rather than signal(2) + DispatchQueue.main.async:
+        // a POSIX signal handler that calls dispatch_async is NOT async-signal-safe
+        // (it allocates a continuation and takes libdispatch locks). `make run-debug`
+        // routinely SIGTERMs the previous instance; if the signal lands on a thread
+        // mid-malloc (e.g. a background AX dispatch closure) the handler could
+        // deadlock and skip shutdown(), leaving windows slivered off-screen.
+        // SIG_IGN defuses the default handler; the dispatch source then delivers
+        // the notification safely on the main queue.
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+        let sigtermSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        sigtermSrc.setEventHandler { NSApp.terminate(nil) }
+        sigtermSrc.resume()
+        self.sigtermSource = sigtermSrc
+        let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        sigintSrc.setEventHandler { NSApp.terminate(nil) }
+        sigintSrc.resume()
+        self.sigintSource = sigintSrc
 
         print("[Reel] Window manager started")
         print("[Reel] Tracked windows: \(tracker.windows.count)")
@@ -665,7 +765,23 @@ public final class WindowManager: @unchecked Sendable {
             if let tap = hotkeyManager.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: false)
             }
-            for (_, sc) in stripControllers { sc.focusIndicator.hide() }
+            for (_, sc) in stripControllers {
+                sc.isPaused = true
+                sc.focusIndicator.hide()
+            }
+            // Cancel in-flight work so nothing keeps mutating layout after
+            // restoreAllWindows() hands windows back their natural frames:
+            //  - pause the shared frame loop so an in-flight spring stops
+            //    dispatching AX writes,
+            //  - drop any debounced external focus-scroll,
+            //  - tear down any active title-bar drag/menu and nil the reorder
+            //    overlay's onCommit so a stale drop can't fire moveColumn.
+            frameLoop?.pause()
+            pendingFocusScroll?.cancel()
+            pendingFocusScroll = nil
+            titleBarInteraction?.cancelIfActive()
+            reorderOverlay.cancel()
+            isReorderPending = false
             restoreAllWindows()
         } else {
             print("[WM] Resumed")
@@ -679,6 +795,7 @@ public final class WindowManager: @unchecked Sendable {
             adoptUnmanagedWindows(onScreenIDs: onScreenIDs)
             // Clear committed frames so the next applyLayout reapplies everything
             for (_, sc) in stripControllers {
+                sc.isPaused = false
                 sc.clearCommittedFrames()
                 sc.applyLayout()
             }
@@ -699,7 +816,7 @@ public final class WindowManager: @unchecked Sendable {
 
         // Snapshot store (reload-specific: may create)
         if config.positionMemory, snapshotStore == nil {
-            let stateDir = NSHomeDirectory() + "/.local/state/reel"
+            let stateDir = ReelConfig.stateDir
             let filePath = URL(fileURLWithPath: stateDir + "/window-snapshots.json")
             snapshotStore = StripSnapshotStore(filePath: filePath)
             snapshotStore?.loadFromDisk()
@@ -832,13 +949,22 @@ public final class WindowManager: @unchecked Sendable {
             print("[WM] windowRemoved tileID=\(tileID.rawValue)")
             fflush(stdout)
             userToggledFloats.remove(windowID)
-            // Remove from whichever strip has it
+            // Remove from whichever strip has it live
             for (_, sc) in stripControllers {
                 if sc.windowMap[tileID] != nil {
                     sc.removeWindow(tileID: tileID)
                     scheduleSnapshotSave(sc: sc)
                     break
                 }
+            }
+            // The window may also be stashed in another strip's saved Space
+            // (multi-monitor, or a Space that strip visited then left). The
+            // owning strip's removeWindow prunes only itself; prune the destroyed
+            // tile from every strip's stash so no dead AXWindow/AXApp stays pinned
+            // (finding #6/#22). pruneSavedSpaces is idempotent, so re-running it on
+            // the owner is harmless.
+            for (_, sc) in stripControllers {
+                sc.pruneSavedSpaces(removedTileID: tileID)
             }
 
         case .windowFocused(let windowID):
@@ -872,13 +998,13 @@ public final class WindowManager: @unchecked Sendable {
             stripController.userActiveTileIDTime = TimeUtil.now()
 
         case .appActivated(let pid):
-            recentAppActivation = (pid: pid, time: TimeUtil.now())
+            focusGate.recordAppActivation(pid: pid, at: TimeUtil.now())
             // Dock click / Cmd+Tab: resolve which window of this app to scroll to.
             let sc = stripController
             if let tileID = resolveFocusedTileID(forPID: pid, on: sc) {
                 // Same-space resolution: consume the carryover so an unrelated
                 // later space switch can't confuse savedFocusTile with this pid.
-                recentAppActivation = nil
+                focusGate.consumeRecentActivation(at: TimeUtil.now())
                 pendingFocusScroll?.cancel()
                 let work = DispatchWorkItem { [weak self] in
                     guard let self, !self.isPaused else { return }
@@ -906,8 +1032,14 @@ public final class WindowManager: @unchecked Sendable {
         case .windowMinimized(let windowID):
             print("[WM] windowMinimized wid=\(windowID)")
             fflush(stdout)
-            stripController.removeWindow(tileID: TileID(windowID))
-            scheduleSnapshotSave()
+            // Route to the OWNING strip, not just the active one — otherwise a
+            // window minimized on a non-active strip lingers until the 500ms
+            // health check and the wrong (active) strip's snapshot is saved.
+            let tileID = TileID(windowID)
+            let owner = stripControllers.first(where: { $0.value.windowMap[tileID] != nil })?.value
+            let sc = owner ?? stripController
+            sc.removeWindow(tileID: tileID)
+            scheduleSnapshotSave(sc: sc)
 
         case .windowDeminimized(let windowID):
             print("[WM] windowDeminimized wid=\(windowID)")
@@ -927,9 +1059,16 @@ public final class WindowManager: @unchecked Sendable {
             }
 
         case .windowResized(let windowID):
-            // User resized a window — update the strip column width to match
-            stripController.handleUserResize(windowID: windowID)
-            scheduleSnapshotSave()
+            // User resized a window — update the OWNING strip's column width to
+            // match. Routing to the active strip only would hit handleUserResize's
+            // windowMap-miss SKIP path for a window on a non-active strip, leaving
+            // that strip's width model stale (the resize gets reverted on its next
+            // layout pass) and saving the wrong strip's snapshot.
+            let tileID = TileID(windowID)
+            let sc = stripControllers.first(where: { $0.value.windowMap[tileID] != nil })?.value
+                ?? stripController
+            sc.handleUserResize(windowID: windowID)
+            scheduleSnapshotSave(sc: sc)
 
         case .windowMoved(let windowID):
             // User dragged a window — if it now lives on a different group's
@@ -1096,7 +1235,7 @@ public final class WindowManager: @unchecked Sendable {
                         else { continue }
                         let props = window.getPropertiesFast()
                         guard !props.isMinimized && !props.isFullscreen else { continue }
-                        let classification = classifyWindow(props)
+                        let classification = classifyWithRules(props)
                         guard classification == .tile else { continue }
                         tracker.registerTrackedWindow(window)
                         app.observeWindow(window.element)
@@ -1120,15 +1259,15 @@ public final class WindowManager: @unchecked Sendable {
             // crossed spaces) over the saved-focus tile. Fall back to saved.
             let now = TimeUtil.now()
             var dockActivationTile: TileID?
-            if let recent = recentAppActivation,
-               now - recent.time < Self.appActivationCarryover
-            {
+            // One-shot consume — returns the pid iff within the 0.5s TTL, and
+            // always clears the record (so a later unrelated space change can't
+            // reuse it).
+            if let pid = focusGate.consumeRecentActivation(at: now) {
                 dockActivationTile = resolveFocusedTileID(
-                    forPID: recent.pid,
+                    forPID: pid,
                     on: stripController
                 )
             }
-            recentAppActivation = nil  // consume regardless — one-shot
 
             let focusTile = dockActivationTile ?? savedFocusTile
 
@@ -1169,7 +1308,7 @@ public final class WindowManager: @unchecked Sendable {
                 let props = window.getPropertiesFast()
                 guard !props.isMinimized && !props.isFullscreen else { continue }
 
-                let classification = classifyWindow(props)
+                let classification = classifyWithRules(props)
                 guard classification == .tile else { continue }
 
                 tracker.registerTrackedWindow(window)
@@ -1185,7 +1324,7 @@ public final class WindowManager: @unchecked Sendable {
         // discovery path does its own focus ordering via addWindow, and
         // leaving the field set would leak into a subsequent unrelated
         // space change within the 500ms TTL.
-        recentAppActivation = nil
+        focusGate.consumeRecentActivation(at: TimeUtil.now())
 
         print(
             "[WM] space changed: new strip with \(stripController.strip.columns.count) cols"
@@ -1320,8 +1459,6 @@ public final class WindowManager: @unchecked Sendable {
             }
         case .closeWindow:
             sc.closeActiveWindow()
-        case .workspace:
-            break  // TODO: Phase 3
         }
     }
 
@@ -1420,38 +1557,66 @@ public final class WindowManager: @unchecked Sendable {
         // Pass 1: Remove dead windows from every strip (not just the active one).
         // A window on a secondary strip that disappeared from CGWindowList is just
         // as stale as one on the active strip.
+        //
+        // A window is only reaped once it has been absent on TWO consecutive
+        // checks. A single-tick disappearance is almost always a Space transition
+        // in flight: the window server flips to the destination Space's on-screen
+        // list before NSWorkspace.activeSpaceDidChange is delivered on the main
+        // queue, so every departing-Space window momentarily fails the on-screen
+        // test. Reaping on that first miss would gut the whole strip and then
+        // handleSpaceChange would save the emptied layout over the departing
+        // Space's in-session stash (finding #17). By the next check (500ms) the
+        // spaceChanged handler has run switchSpace and moved those windows out of
+        // windowMap, so the second-miss removal never fires for a genuine Space
+        // switch — only for windows that really are gone.
         var changed = false
+        var missingThisCheck: Set<CGWindowID> = []
         for (_, sc) in stripControllers {
             for (tileID, window) in sc.windowMap {
-                if !onScreenIDs.contains(window.windowID) {
-                    if let adoptedAt = recentlyAdoptedWindows[window.windowID],
-                       now.timeIntervalSince(adoptedAt) < 2.0 {
-                        #if DEBUG
-                            print("[HealthCheck] Skipping recently adopted window wid=\(window.windowID)")
-                            fflush(stdout)
-                        #endif
-                        continue
-                    }
-
-                    if let colIndex = sc.strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
-                        let col = sc.strip.columns[colIndex]
-                        let colData = sc.strip.columnData[colIndex]
-                        let width: ColumnWidth = col.width == .auto ? .fixed(colData.cachedWidth) : col.width
-                        recentRemovalsByPID[window.pid] = RecentRemoval(
-                            columnIndex: colIndex, width: width,
-                            presetIndex: col.presetIndex, isFullWidth: col.isFullWidth, date: now)
-                    }
-
-                    print("[HealthCheck] Removing dead window wid=\(window.windowID) tileID=\(tileID.rawValue)")
-                    fflush(stdout)
-                    sc.removeWindow(tileID: tileID)
-                    scheduleSnapshotSave(sc: sc)
-                    tracker.untrackWindow(window.windowID)
-                    recentlyAdoptedWindows.removeValue(forKey: window.windowID)
-                    changed = true
+                guard !onScreenIDs.contains(window.windowID) else { continue }
+                if let adoptedAt = recentlyAdoptedWindows[window.windowID],
+                   now.timeIntervalSince(adoptedAt) < 2.0 {
+                    #if DEBUG
+                        print("[HealthCheck] Skipping recently adopted window wid=\(window.windowID)")
+                        fflush(stdout)
+                    #endif
+                    continue
                 }
+
+                // First consecutive miss: defer removal to the next check.
+                guard healthCheckMissing.contains(window.windowID) else {
+                    missingThisCheck.insert(window.windowID)
+                    continue
+                }
+
+                if let colIndex = sc.strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
+                    let col = sc.strip.columns[colIndex]
+                    let colData = sc.strip.columnData[colIndex]
+                    let width: ColumnWidth = col.width == .auto ? .fixed(colData.cachedWidth) : col.width
+                    recentRemovalsByPID[window.pid] = RecentRemoval(
+                        columnIndex: colIndex, width: width,
+                        presetIndex: col.presetIndex, isFullWidth: col.isFullWidth, date: now)
+                }
+
+                print("[HealthCheck] Removing dead window wid=\(window.windowID) tileID=\(tileID.rawValue)")
+                fflush(stdout)
+                sc.removeWindow(tileID: tileID)
+                scheduleSnapshotSave(sc: sc)
+                tracker.untrackWindow(window.windowID)
+                recentlyAdoptedWindows.removeValue(forKey: window.windowID)
+                // The destroyed tile may also be pinned in ANOTHER strip's stashed
+                // Space snapshot (multi-monitor, or a Space this strip visited then
+                // left). removeWindow prunes only the owning strip; prune the rest
+                // so no dead AXWindow/AXApp stays referenced there (finding #6/#22).
+                for (_, other) in stripControllers where other !== sc {
+                    other.pruneSavedSpaces(removedTileID: tileID)
+                }
+                changed = true
             }
         }
+        // Carry forward this check's misses. Windows that reappeared or were
+        // reaped drop out, so the set stays bounded and self-correcting.
+        healthCheckMissing = missingThisCheck
 
         // Pass 2: Adopt unmanaged windows that should be in the strip.
         // Filter by onScreenIDs to avoid re-adopting windows that Pass 1 just removed
@@ -1466,6 +1631,18 @@ public final class WindowManager: @unchecked Sendable {
         }
     }
 
+    /// Classify a window applying the user's `[[rules]]` first (mirroring the
+    /// canonical `WindowTracker.registerWindow` / `adoptUnmanagedWindows` paths),
+    /// then falling back to the default heuristic. Bare `classifyWindow` ignores
+    /// rules — the Space-discovery loops used it directly and so would force a
+    /// user-floated app into the strip whenever its window first appeared on a
+    /// Space other than the startup one (finding #42). Every discovery site now
+    /// funnels through here so the rule pass can't drift again.
+    private func classifyWithRules(_ props: WindowProperties) -> WindowClassification {
+        tracker.rules.first(where: { $0.matches(props) })?.classification
+            ?? classifyWindow(props)
+    }
+
     /// Discover on-screen windows not currently in the strip and add them.
     /// When `onScreenIDs` is provided, only adopts windows present in that set
     /// (prevents re-adopting windows that CGWindowList doesn't report).
@@ -1477,6 +1654,12 @@ public final class WindowManager: @unchecked Sendable {
         }
         var adopted = false
 
+        // Bound the negative-classification cache to windows still on screen so
+        // it can't grow for the process lifetime (finding #32).
+        if let onScreenIDs {
+            healthCheckIgnored.formIntersection(onScreenIDs)
+        }
+
         for (pid, app) in tracker.apps {
             let newWindows = discoverWindows(pid: pid)
             for window in newWindows {
@@ -1484,25 +1667,35 @@ public final class WindowManager: @unchecked Sendable {
                 guard !stripWindowIDs.contains(window.windowID) else { continue }
                 // Skip windows not confirmed on-screen by CGWindowList
                 if let onScreenIDs, !onScreenIDs.contains(window.windowID) { continue }
-                // Skip windows already tracked as floating/ignored
+                // Skip windows already tracked as floating/ignored, or already
+                // classified non-tileable by a prior sweep — this check MUST come
+                // before getPropertiesFast() (≈9 AX round-trips) so a resident
+                // float/ignore window that missed its create notification isn't
+                // re-probed every 500ms forever (finding #32).
                 guard !tracker.floatingWindows.contains(window.windowID),
-                    !tracker.ignoredWindows.contains(window.windowID)
+                    !tracker.ignoredWindows.contains(window.windowID),
+                    !healthCheckIgnored.contains(window.windowID)
                 else { continue }
 
                 let props = window.getPropertiesFast()
                 guard !props.isMinimized, !props.isFullscreen else { continue }
 
-                // Check rules, then default classification
-                let classification: WindowClassification
-                if let ruleResult = tracker.rules.first(where: { $0.matches(props) })?
-                    .classification
-                {
-                    classification = ruleResult
-                } else {
-                    classification = classifyWindow(props)
-                }
+                let classification = classifyWithRules(props)
 
-                guard classification == .tile else { continue }
+                guard classification == .tile else {
+                    // Record the negative classification so subsequent sweeps
+                    // skip this window before the getPropertiesFast() battery.
+                    // .float → tracker.floatingWindows (also honored by every
+                    // other adoption path's guard, and semantically correct —
+                    // this is a floating window); .ignore → local set (the
+                    // tracker exposes no public ignore setter).
+                    if classification == .float {
+                        tracker.markFloating(window.windowID)
+                    } else {
+                        healthCheckIgnored.insert(window.windowID)
+                    }
+                    continue
+                }
 
                 // Adopt this window into the strip
                 if tracker.windows[window.windowID] == nil {
@@ -1558,10 +1751,20 @@ public final class WindowManager: @unchecked Sendable {
                 ])
             }
         }
+        // Sort by windowID so dictionary iteration order can't make identical
+        // state serialize to different bytes (which would defeat the dirty check).
+        state.sort { ($0["windowID"] as? UInt32 ?? 0) < ($1["windowID"] as? UInt32 ?? 0) }
 
-        if let data = try? JSONSerialization.data(withJSONObject: state) {
-            try? data.write(to: URL(fileURLWithPath: stateFilePath))
-        }
+        // Serialize with sorted keys, then skip the disk write when the bytes
+        // match the last persist. The 5s timer otherwise rewrites an identical
+        // file forever — steady SSD traffic and a recurring wake that blocks
+        // deeper idle states on battery when nothing has changed (finding #35).
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: state, options: [.sortedKeys]) else { return }
+        let hash = data.hashValue
+        guard hash != lastPersistedStateHash else { return }
+        lastPersistedStateHash = hash
+        try? data.write(to: URL(fileURLWithPath: stateFilePath))
     }
 
     private func recoverFromCrash() {
@@ -1665,8 +1868,11 @@ public final class WindowManager: @unchecked Sendable {
                 userToggledFloats.remove(focusedWID)
                 let (gid, sc) = stripControllerEntryForWindow(window)
                 let restored = resolveSnapshotPosition(for: window, on: sc, groupID: gid)
-                stripController.unfloatWindow(window, app: app, restoredPosition: restored)
-                scheduleSnapshotSave()
+                // Unfloat onto the OWNING strip (matches the hotkey path) — the
+                // slot was resolved against `sc`, so unfloating onto the active
+                // strip would drop the window on the wrong monitor.
+                sc.unfloatWindow(window, app: app, restoredPosition: restored)
+                scheduleSnapshotSave(sc: sc)
             } else if let window = stripController.toggleFloating() {
                 saveSnapshotImmediate(sc: stripController)
                 tracker.markFloating(window.windowID)
@@ -1841,7 +2047,8 @@ public final class WindowManager: @unchecked Sendable {
                 window: AXWindow,
                 bundleID: String?,
                 columnWidth: ColumnWidth?,
-                isFullWidth: Bool?
+                isFullWidth: Bool?,
+                workingArea: CGRect
             ) -> [String: Any] {
                 var frame: Any = NSNull()
                 var slivered = false
@@ -1850,10 +2057,14 @@ public final class WindowManager: @unchecked Sendable {
                         "x": f.minX, "y": f.minY,
                         "w": f.width, "h": f.height,
                     ]
-                    // Heuristic: matches our two off-screen hiding techniques.
-                    // 1 px edge sliver (width ≤ 2) or corner-hide at (-10000,-10000).
-                    slivered = f.minX <= -9000 || f.minY <= -9000
-                        || f.width <= 2 || f.height <= 2
+                    // sliverFrame keeps the window at FULL width and leaves only
+                    // ~1px visible at a working-area edge, so the old
+                    // width≤2 / minX≤-9000 heuristic never fired for a genuinely
+                    // hidden window (no display is 9000px wide; the window is
+                    // never shrunk). Use the same geometric off-screen test the
+                    // unsliver watchdog uses so the diagnostic can't drift from
+                    // the real technique again (finding #43).
+                    slivered = self.isFrameOffScreen(f, workingArea: workingArea)
                 }
                 var out: [String: Any] = [
                     "tileID": tileID.rawValue,
@@ -1882,7 +2093,8 @@ public final class WindowManager: @unchecked Sendable {
                         let bundle = tracker.apps[w.pid]?.bundleIdentifier
                         currWindows.append(entry(
                             tileID: tile, window: w, bundleID: bundle,
-                            columnWidth: col.width, isFullWidth: col.isFullWidth
+                            columnWidth: col.width, isFullWidth: col.isFullWidth,
+                            workingArea: strip.workingArea
                         ))
                     }
                 }
@@ -1903,7 +2115,8 @@ public final class WindowManager: @unchecked Sendable {
                     for (tile, axw, bundle, width, isFW) in detail {
                         wins.append(entry(
                             tileID: tile, window: axw, bundleID: bundle,
-                            columnWidth: width, isFullWidth: isFW
+                            columnWidth: width, isFullWidth: isFW,
+                            workingArea: strip.workingArea
                         ))
                     }
                     spaces.append([
@@ -1998,6 +2211,40 @@ public final class WindowManager: @unchecked Sendable {
                 sc.applyLayout()
             }
             return ReelResponse(success: true, message: "Windows recovered")
+        case .pause:
+            // Route through the single togglePause() path — assert the desired
+            // state rather than forking the pause/resume logic, so pause
+            // semantics stay single-sourced.
+            if !isPaused { togglePause() }
+            return ReelResponse(success: true, message: "Paused")
+        case .resume:
+            if isPaused { togglePause() }
+            return ReelResponse(success: true, message: "Resumed")
+        case .reloadConfig:
+            // Same reload the menu bar's "Reload Config" button invokes.
+            reloadConfig()
+            return ReelResponse(success: true, message: "Config reloaded")
+        case .getStatus:
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+                ?? "0.4.0"  // x-release-please-version
+            let status: [String: Any] = [
+                "isPaused": isPaused,
+                "version": version,
+                "socketPath": reelSocketPath(),
+                "configDir": ReelConfig.configDir,
+                "stateDir": ReelConfig.stateDir,
+                // Pids Reel is actively managing (an AXApp observer exists for
+                // each). Under REEL_MANAGE_ONLY_PIDS this equals the allowlist —
+                // registerApp refuses every pid outside it, so none are tracked.
+                "managedPids": tracker.apps.keys.map { Int($0) }.sorted(),
+            ]
+            if let data = try? JSONSerialization.data(
+                withJSONObject: status, options: [.prettyPrinted, .sortedKeys]),
+                let json = String(data: data, encoding: .utf8)
+            {
+                return ReelResponse(success: true, data: json)
+            }
+            return ReelResponse(success: false, message: "Failed to serialize status")
         case .quit:
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return ReelResponse(success: true, message: "Quitting")
@@ -2148,6 +2395,19 @@ public final class WindowManager: @unchecked Sendable {
     /// setFrame if the window is still slivered/corner-hidden. Runs async so
     /// the setFrame dispatches from `finishBatch → applyLayout` have time to
     /// land before we read back.
+    /// Geometric off-screen test matching `LayoutEngine.sliverFrame`'s technique:
+    /// the window keeps its full width and is pushed almost entirely past a
+    /// working-area edge (right edge left of the area, or left edge right of it),
+    /// or corner-hidden at a large negative origin. Shared by the get-layouts
+    /// diagnostic and the replay unsliver watchdog so the two detections of the
+    /// same condition can't drift apart (finding #43).
+    private func isFrameOffScreen(_ frame: CGRect, workingArea: CGRect) -> Bool {
+        frame.maxX < workingArea.minX + 5
+            || frame.minX > workingArea.maxX - 5
+            || frame.origin.x <= -5000
+            || frame.origin.y <= -5000
+    }
+
     private func scheduleUnsliverWatchdog(sc: StripController, windowIDs: Set<UInt32>) {
         guard !windowIDs.isEmpty else { return }
         let workingArea = sc.strip.workingArea
@@ -2159,14 +2419,11 @@ public final class WindowManager: @unchecked Sendable {
                   let target = sc.lastCommittedFrames[tid] else { return nil }
             return (window, target)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
             for (window, target) in pairs {
                 guard case .success(let current) = window.getFrame() else { continue }
-                let slivered = current.maxX < workingArea.minX + 5
-                    || current.minX > workingArea.maxX - 5
-                    || current.origin.x <= -5000
-                    || current.origin.y <= -5000
-                guard slivered else { continue }
+                guard self.isFrameOffScreen(current, workingArea: workingArea) else { continue }
                 print("[WM] replay unsliver wid=\(window.windowID) target=\(target) current=\(current)")
                 fflush(stdout)
                 _ = window.setFrame(target)
@@ -2358,8 +2615,32 @@ public final class WindowManager: @unchecked Sendable {
                 }
             }
         }
-        let primary = stripControllers.first!
-        return (primary.key, primary.value)
+        // No positional match; fall back to any existing strip (or a freshly
+        // materialized one if all displays have disconnected — never crash).
+        return ensureFallbackStrip()
+    }
+
+    /// Ensure at least one strip controller exists, returning an arbitrary entry
+    /// (the first, if any). If `stripControllers` is empty — all displays
+    /// disconnected during a clamshell / KVM / resolution transition — create a
+    /// synthetic fallback exactly as `init()` does, so the never-empty invariant
+    /// that `stripController` and other call sites rely on always holds.
+    @discardableResult
+    private func ensureFallbackStrip() -> (GroupID, StripController) {
+        if let entry = stripControllers.first {
+            return (entry.key, entry.value)
+        }
+        let wa = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let fallbackID = CGMainDisplayID()
+        let gid: GroupID = [fallbackID]
+        let sc = StripController(
+            workingArea: wa, primaryScreenHeight: NSScreen.main?.frame.height ?? 0)
+        applyConfigToStrip(sc)
+        stripControllers[gid] = sc
+        displayToGroup[fallbackID] = gid
+        print("[WM] materialized fallback strip (no displays present)")
+        fflush(stdout)
+        return (gid, sc)
     }
 
     /// Determine which strip controller a window belongs to based on its screen position.
@@ -2392,6 +2673,20 @@ public final class WindowManager: @unchecked Sendable {
     private func reconcileDisplayTopology(
         newDisplays: [CGDirectDisplayID: DisplayInfo]
     ) {
+        // NSScreen.screens can transiently report zero screens during hot-plug /
+        // dock renegotiation / KVM input switch / resolution transitions, and as
+        // a real event on a headless-capable Mac when the sole display sleeps.
+        // Reconciling against an empty set would land every group in removedGIDs
+        // with no successors, silently drop all windows + stashed Space state,
+        // and leave stripControllers EMPTY — after which the never-empty
+        // invariant relied on by `stripController` and `stripControllerEntryForWindow`
+        // is violated. Keep the last-known controllers frozen until a display returns.
+        guard !newDisplays.isEmpty else {
+            print("[WM] reconcile: empty display set — keeping last-known strips")
+            fflush(stdout)
+            return
+        }
+
         let struts = Struts(
             left: CGFloat(config.struts.left),
             right: CGFloat(config.struts.right),
@@ -2415,25 +2710,26 @@ public final class WindowManager: @unchecked Sendable {
         let persistingGIDs = oldGroupIDs.intersection(newGroupIDs)
 
         // Helper: build a GroupWorkingArea for a group of display IDs.
+        // Delegates to the pure `DisplayManager.groupWorkingArea` (unit-tested);
+        // this closure just binds the reconcile-local inputs.
         func buildGroupArea(for members: [CGDirectDisplayID]) -> GroupWorkingArea {
-            let mainID = displayManager.mainDisplay?.displayID
-            let sortedMembers = members.sorted { (a, b) in
-                (newDisplays[a]?.frame.minX ?? 0) < (newDisplays[b]?.frame.minX ?? 0)
-            }
-            let regions: [DisplayRegion] = sortedMembers.compactMap { id in
-                guard let info = newDisplays[id] else { return nil }
-                let rect = info.workingArea(struts: struts, primaryScreenHeight: primaryH)
-                return DisplayRegion(displayID: UInt32(id), rect: rect)
-            }
-            let referenceMidX: CGFloat
-            if let main = mainID, members.contains(main),
-               let mainInfo = newDisplays[main] {
-                let mainRect = mainInfo.workingArea(struts: struts, primaryScreenHeight: primaryH)
-                referenceMidX = mainRect.midX
-            } else {
-                referenceMidX = regions.first?.rect.midX ?? 0
-            }
-            return GroupWorkingArea(regions: regions, referenceMidX: referenceMidX)
+            DisplayManager.groupWorkingArea(
+                members: members,
+                displays: newDisplays,
+                mainDisplayID: displayManager.mainDisplay?.displayID,
+                struts: struts,
+                primaryScreenHeight: primaryH
+            )
+        }
+
+        // Distance from an X coordinate to a working area's horizontal span
+        // (0 if inside). Used to pick the nearest successor on split when a
+        // column's display region isn't owned by any successor group.
+        func distanceX(_ x: Double, from area: CGRect?) -> Double {
+            guard let area else { return .infinity }
+            if x < Double(area.minX) { return Double(area.minX) - x }
+            if x > Double(area.maxX) { return x - Double(area.maxX) }
+            return 0
         }
 
         // 1. Persisting groups — update geometry, refresh primaryScreenHeight.
@@ -2475,15 +2771,34 @@ public final class WindowManager: @unchecked Sendable {
                 print("[WM] group added: \(gid)")
             } else {
                 // Adopt columns from predecessors in X order (leftmost first).
+                // removedGIDs is an unordered Set and windowMap an unordered
+                // Dictionary, so the old code scrambled the user's column order
+                // on every merge. Sort predecessors by their group's leftmost X
+                // and iterate each predecessor's strip.columns in index order,
+                // preserving per-column width / preset / full-width via a
+                // RestoredSlot with a monotonically increasing slot index.
                 sc.beginBatch()
                 var adopted = 0
-                for oldGID in predecessors {
+                let orderedPredecessors = predecessors.sorted {
+                    (stripControllers[$0]?.strip.workingArea.minX ?? 0)
+                        < (stripControllers[$1]?.strip.workingArea.minX ?? 0)
+                }
+                for oldGID in orderedPredecessors {
                     guard let oldSC = stripControllers[oldGID] else { continue }
-                    let entries = oldSC.windowMap.map { ($0.key, $0.value) }
-                    for (_, window) in entries {
-                        guard let app = tracker.apps[window.pid] else { continue }
-                        sc.addWindow(window, app: app)
-                        adopted += 1
+                    for (i, column) in oldSC.strip.columns.enumerated() {
+                        let colData = oldSC.strip.columnData[i]
+                        let width: ColumnWidth =
+                            column.width == .auto ? .fixed(colData.cachedWidth) : column.width
+                        for tile in column.tiles {
+                            guard let window = oldSC.windowMap[tile],
+                                let app = tracker.apps[window.pid] else { continue }
+                            sc.addWindow(window, app: app, restoredPosition: RestoredSlot(
+                                slotIndex: adopted,
+                                width: width,
+                                presetIndex: column.presetIndex,
+                                isFullWidth: column.isFullWidth))
+                            adopted += 1
+                        }
                     }
                     // Clear predecessor's windowMap so the removed-branch's
                     // rehomeWindowsOff is a no-op for these controllers.
@@ -2512,35 +2827,46 @@ public final class WindowManager: @unchecked Sendable {
                 // Pure dissolve — windows migrate to any surviving strip by position.
                 rehomeWindowsOff(dyingSC: dyingSC)
             } else {
-                // Partition dyingSC's windowMap by midpoint-X into successors
-                // (successor controllers were already created in step 2).
+                // Partition dyingSC's columns into successors deterministically:
+                // walk strip.columns in index order and route each column by its
+                // OWNING display region (regionForColumn), not the live AX frame —
+                // a slivered / corner-hidden window reports an off-screen frame
+                // that would otherwise dump every hidden column onto the leftmost
+                // successor in arbitrary order. Preserve per-column width / preset
+                // / full-width and left-to-right order via per-successor slot
+                // counters. (Successor controllers were created in step 2.)
                 var partitioned = 0
-                let entries = dyingSC.windowMap.map { ($0.key, $0.value) }
-                for (_, window) in entries {
-                    guard let app = tracker.apps[window.pid] else { continue }
-                    guard case .success(let frame) = window.getFrame() else { continue }
-                    let centerX = Double(frame.midX)
-                    var chosen: StripController?
-                    var chosenDist: Double = .infinity
-                    for newGID in successors {
-                        guard let newSC = stripControllers[newGID] else { continue }
-                        let span = newSC.strip.workingArea
-                        let dist: Double
-                        if centerX < Double(span.minX) {
-                            dist = Double(span.minX) - centerX
-                        } else if centerX > Double(span.maxX) {
-                            dist = centerX - Double(span.maxX)
-                        } else {
-                            dist = 0
-                        }
-                        if dist < chosenDist {
-                            chosenDist = dist
-                            chosen = newSC
-                        }
+                let now = TimeUtil.now()
+                var slotCounters: [GroupID: Int] = [:]
+                for (i, column) in dyingSC.strip.columns.enumerated() {
+                    let region = dyingSC.strip.regionForColumn(i, at: now)
+                    // Prefer the successor that owns this column's display; else
+                    // pick the successor whose working area is nearest in X.
+                    var targetGID = successors.first(where: { $0.contains(region.displayID) })
+                    if targetGID == nil {
+                        let cx = Double(region.rect.midX)
+                        targetGID = successors.min(by: { a, b in
+                            distanceX(cx, from: stripControllers[a]?.strip.workingArea)
+                                < distanceX(cx, from: stripControllers[b]?.strip.workingArea)
+                        })
                     }
-                    guard let target = chosen else { continue }
-                    target.addWindow(window, app: app)
-                    partitioned += 1
+                    guard let chosenGID = targetGID,
+                        let target = stripControllers[chosenGID] else { continue }
+                    let colData = dyingSC.strip.columnData[i]
+                    let width: ColumnWidth =
+                        column.width == .auto ? .fixed(colData.cachedWidth) : column.width
+                    for tile in column.tiles {
+                        guard let window = dyingSC.windowMap[tile],
+                            let app = tracker.apps[window.pid] else { continue }
+                        let slot = slotCounters[chosenGID, default: 0]
+                        target.addWindow(window, app: app, restoredPosition: RestoredSlot(
+                            slotIndex: slot,
+                            width: width,
+                            presetIndex: column.presetIndex,
+                            isFullWidth: column.isFullWidth))
+                        slotCounters[chosenGID] = slot + 1
+                        partitioned += 1
+                    }
                 }
                 for tileID in Array(dyingSC.windowMap.keys) {
                     dyingSC.removeWindow(tileID: tileID)
@@ -2586,6 +2912,12 @@ public final class WindowManager: @unchecked Sendable {
         sc.focusIndicator.reloadConfig(config.focusIndicator)
         sc.focusIndicator.springParams = config.widthSpringParams
         sc.frameLoop = frameLoop
+        // Inherit the current pause state. A display hot-plug / rearrangement
+        // while paused creates a fresh StripController here (via reconcile) or a
+        // fallback (via ensureFallbackStrip); without this it would default to
+        // isPaused=false, adopt windows, and re-show the focus indicator that
+        // togglePause hid — the exact regression the flag exists to prevent.
+        sc.isPaused = isPaused
     }
 
     /// Migrate windows from other strips whose current frame center lands inside

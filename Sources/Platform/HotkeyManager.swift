@@ -14,7 +14,6 @@ public enum HotkeyAction: Sendable {
     case toggleFullWidth
     case toggleFloating
     case closeWindow
-    case workspace(Int)
 }
 
 /// A registered hotkey binding.
@@ -101,8 +100,24 @@ public final class HotkeyManager: @unchecked Sendable {
     }
 
     /// Parse a key string like "hyper-h", "ctrl-shift-l", "cmd-space" into modifiers + keyCode.
-    private func parseKeyString(_ str: String) -> (CGEventFlags, CGKeyCode)? {
-        let parts = str.lowercased().split(separator: "-").map(String.init)
+    ///
+    /// `package` (not `private`) so RunTests can table-test the parser directly.
+    ///
+    /// An unrecognized modifier token invalidates the whole binding: returning a
+    /// binding with dropped modifiers would collapse to a bare-key global grab
+    /// (every press of that key, in every app, consumed by the tap).
+    package func parseKeyString(_ str: String) -> (CGEventFlags, CGKeyCode)? {
+        // Keep empty subsequences so a binding for the '-' key (written as a
+        // trailing separator, e.g. "alt--") survives instead of being dropped.
+        var parts = str.lowercased()
+            .split(separator: "-", omittingEmptySubsequences: false)
+            .map(String.init)
+        // A '-' key produces trailing empty token(s); fold them back into an
+        // explicit "-" key name so punctuation keys are bindable.
+        if parts.count >= 2, parts.last == "" {
+            while parts.count > 1, parts.last == "" { parts.removeLast() }
+            parts.append("-")
+        }
         guard parts.count >= 2 else { return nil }
 
         var modifiers: CGEventFlags = []
@@ -117,10 +132,17 @@ public final class HotkeyManager: @unchecked Sendable {
                 modifiers.insert(.maskAlternate)
             case "ctrl", "control": modifiers.insert(.maskControl)
             case "shift": modifiers.insert(.maskShift)
-            case "cmd", "command": modifiers.insert(.maskCommand)
+            // "super"/"mod" are niri's names for the main modifier → Command on macOS.
+            case "cmd", "command", "super", "mod": modifiers.insert(.maskCommand)
             case "alt", "opt", "option": modifiers.insert(.maskAlternate)
             case "fn": modifiers.insert(.maskSecondaryFn)
-            default: break
+            default:
+                // Unknown token (typo like "atl", or an unsupported modifier
+                // name). Fail loudly and skip the binding rather than silently
+                // dropping the token and registering a bare-key grab.
+                print("[Hotkey] Unknown modifier '\(part)' in '\(str)' — skipping binding")
+                fflush(stdout)
+                return nil
             }
         }
 
@@ -210,14 +232,39 @@ public final class HotkeyManager: @unchecked Sendable {
 
     // MARK: - Event Matching
 
+    /// Modifier flags that participate in hotkey matching. Flags outside this
+    /// set (caps lock, numeric-keypad, non-coalesced, …) are ignored so they
+    /// never accidentally break or trigger a binding.
+    static let relevantModifiers: CGEventFlags =
+        [.maskCommand, .maskShift, .maskControl, .maskAlternate, .maskSecondaryFn]
+
     fileprivate func matchEvent(_ event: CGEvent) -> HotkeyAction? {
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        let flags = event.flags
+        return matchBinding(keyCode: keyCode, flags: event.flags)
+    }
 
-        for binding in bindings {
-            if binding.keyCode == keyCode && flags.contains(binding.modifiers) {
-                return binding.action
-            }
+    /// Resolve the action bound to a keyCode + modifier set.
+    ///
+    /// Matching precedence (deterministic — never depends on the order bindings
+    /// were registered from the config dictionary):
+    /// 1. Only the modifiers in `relevantModifiers` are considered; the event's
+    ///    other flags are masked off.
+    /// 2. A binding fires only when its modifier set **exactly equals** the
+    ///    event's relevant modifiers. Exact equality is the most-specific match
+    ///    possible, so `alt-shift-h` can never fall through to an `alt-h`
+    ///    binding, and a superset chord like `cmd-alt-h` never steals a plain
+    ///    `alt-h` binding (it simply passes through to the focused app).
+    /// 3. For any valid config there is at most one binding per key+modifier
+    ///    chord, so the match is unique. If a config binds the identical chord
+    ///    to two actions, the first such binding encountered wins; the result
+    ///    is still independent of which overlapping *chords* exist.
+    ///
+    /// `package` so RunTests can table-test matching without synthesizing a real
+    /// `CGEvent`.
+    package func matchBinding(keyCode: CGKeyCode, flags: CGEventFlags) -> HotkeyAction? {
+        let eventModifiers = flags.intersection(Self.relevantModifiers)
+        for binding in bindings where binding.keyCode == keyCode && binding.modifiers == eventModifiers {
+            return binding.action
         }
         return nil
     }
@@ -239,11 +286,14 @@ private func hotkeyCallback(
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
         }
-        return Unmanaged.passRetained(event)
+        // Pass the original event through. The tap runtime owns this event and
+        // releases it; returning it +1 (passRetained) would leak one CGEvent
+        // per passed-through keystroke. passUnretained hands it back at +0.
+        return Unmanaged.passUnretained(event)
     }
 
     guard type == .keyDown, let userInfo = userInfo else {
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
     let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
@@ -257,6 +307,6 @@ private func hotkeyCallback(
         return nil
     }
 
-    // Not our hotkey — pass through
-    return Unmanaged.passRetained(event)
+    // Not our hotkey — pass the original event through at +0 (see above).
+    return Unmanaged.passUnretained(event)
 }

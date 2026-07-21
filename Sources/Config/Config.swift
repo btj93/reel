@@ -89,10 +89,19 @@ public struct ReelConfig: Sendable {
 
     public init() {}
 
-    // MARK: - Config Path
+    // MARK: - Config & State Paths
 
-    public static let configDir = NSHomeDirectory() + "/.config/reel"
+    /// Directory holding the user config. Honors the `REEL_CONFIG_DIR`
+    /// environment override (test harness); defaults to `~/.config/reel`.
+    public static let configDir = ProcessInfo.processInfo.environment["REEL_CONFIG_DIR"]
+        ?? NSHomeDirectory() + "/.config/reel"
     public static let configPath = configDir + "/config.toml"
+
+    /// Directory holding persisted runtime state (strip snapshots, window
+    /// state). Honors the `REEL_STATE_DIR` environment override (test harness);
+    /// defaults to `~/.local/state/reel`.
+    public static let stateDir = ProcessInfo.processInfo.environment["REEL_STATE_DIR"]
+        ?? NSHomeDirectory() + "/.local/state/reel"
 }
 
 /// Window rule from config.
@@ -213,6 +222,20 @@ extension ReelConfig {
         cachedDefaults
     }
 
+    // MARK: - Value clamping
+
+    /// Upper bound for any single strut, in points. Real reserved bars (menu
+    /// bar, dock, third-party panels) are well under ~200 pt; 512 leaves ample
+    /// headroom while keeping the summed insets on any axis below the smallest
+    /// displays macOS realistically drives, so `workingArea` stays positive.
+    /// A defensive floor on the *resulting* working-area size still belongs in
+    /// DisplayInfo.workingArea (Platform), which sees the display dimensions.
+    private static let maxStrut: Double = 512
+
+    private static func clampStrut(_ v: Double) -> Double {
+        min(maxStrut, max(0, v))
+    }
+
     // MARK: - Helpers for reading TOML values
 
     /// Read an integer from a TOML value.
@@ -297,10 +320,15 @@ extension ReelConfig {
             if let v = readBool(layout["animation_enabled"]) { config.animationEnabled = v }
 
             if let struts = readTable(layout["struts"]) {
-                if let v = readDouble(struts["left"]), v.isFinite { config.struts.left = max(0, v) }
-                if let v = readDouble(struts["right"]), v.isFinite { config.struts.right = max(0, v) }
-                if let v = readDouble(struts["top"]), v.isFinite { config.struts.top = max(0, v) }
-                if let v = readDouble(struts["bottom"]), v.isFinite { config.struts.bottom = max(0, v) }
+                // Clamp into [0, maxStrut]. The lower bound rejects negatives;
+                // the upper bound keeps a pathological config (e.g. an extra
+                // zero, or insets copied from a much larger display) from
+                // driving DisplayInfo.workingArea negative — a strut this large
+                // is never a real bar. See maxStrut.
+                if let v = readDouble(struts["left"]), v.isFinite { config.struts.left = clampStrut(v) }
+                if let v = readDouble(struts["right"]), v.isFinite { config.struts.right = clampStrut(v) }
+                if let v = readDouble(struts["top"]), v.isFinite { config.struts.top = clampStrut(v) }
+                if let v = readDouble(struts["bottom"]), v.isFinite { config.struts.bottom = clampStrut(v) }
             }
             if let presetsArray = readArray(layout["width_presets"]) {
                 var presets: [ColumnWidth] = []
@@ -438,74 +466,5 @@ extension ReelConfig {
         try? defaultConfig.write(toFile: configPath, atomically: true, encoding: .utf8)
         print("[Config] Created default config at \(configPath)")
         fflush(stdout)
-    }
-}
-
-// MARK: - File Watcher
-
-/// Watches the config file for changes and reloads.
-public final class ConfigWatcher: @unchecked Sendable {
-    private var source: DispatchSourceFileSystemObject?
-    private var fileDescriptor: Int32 = -1
-
-    public var onConfigChanged: ((ReelConfig) -> Void)?
-
-    public init() {}
-
-    deinit { stop() }
-
-    /// Start watching the config file.
-    public func start() {
-        let path = ReelConfig.configPath
-
-        fileDescriptor = open(path, O_EVTONLY)
-        guard fileDescriptor >= 0 else {
-            print("[Config] Cannot watch \(path) — file not found")
-            fflush(stdout)
-            return
-        }
-
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fileDescriptor,
-            eventMask: [.write, .rename, .delete],
-            queue: .main
-        )
-
-        source.setEventHandler { [weak self] in
-            // Small delay to let the editor finish writing
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self?.reload()
-            }
-        }
-
-        source.setCancelHandler { [weak self] in
-            if let fd = self?.fileDescriptor, fd >= 0 {
-                close(fd)
-                self?.fileDescriptor = -1
-            }
-        }
-
-        source.resume()
-        self.source = source
-        print("[Config] Watching \(path) for changes")
-        fflush(stdout)
-    }
-
-    /// Stop watching.
-    public func stop() {
-        source?.cancel()
-        source = nil
-    }
-
-    private func reload() {
-        let (config, error) = ReelConfig.load()
-        if let error = error {
-            print("[Config] Reload error: \(error)")
-            fflush(stdout)
-            return
-        }
-        print("[Config] Reloaded successfully")
-        fflush(stdout)
-        onConfigChanged?(config)
     }
 }

@@ -1423,21 +1423,6 @@ do {
     assertEq(pairs[0].slotIndex, 0, "first slot takes the candidate")
 }
 
-// MARK: - Layout Mode
-print()
-print("Layout Mode Tests")
-
-section("LayoutMode — normal mode unchanged")
-do {
-    let strip = makeLayoutStrip(widths: [400, 600, 400], activeIndex: 1, viewOffset: 0)
-    let normalFrames = computeTargetFrames(strip: strip, time: 0)
-    let modeFrames = computeTargetFrames(strip: strip, time: 0, mode: .normal)
-    assertEq(normalFrames.count, modeFrames.count, "same count")
-    for i in 0..<normalFrames.count {
-        assertEq(normalFrames[i].frame, modeFrames[i].frame, "frame \(i) matches")
-    }
-}
-
 // MARK: - moveColumn(from:to:)
 
 section("moveColumn — move forward")
@@ -2796,6 +2781,21 @@ do {
     assertClose(strip.columnData[0].cachedWidth, 500, tolerance: 1.0, "col 0 → 0.5 × r0.w = 500")
     assertClose(strip.columnData[1].cachedWidth, 2000, tolerance: 1.0, "col 1 full-width on r1 = 2000")
 }
+
+// ============================================================
+// MARK: - W1 Layer-1 backfill (StripSnapshotStore, topology boundaries, Core gaps)
+runL1StoreTests()
+runL1TopologyTests()
+runL1CoreBackfillTests()
+runL1AuditGapTests()
+runL1GroupAreaTests()
+runL1FocusGateTests()
+
+// ============================================================
+// MARK: - W4 Layer-2 StripController simulation (fakes + virtual clock)
+runSimFocus()
+runSimAnim()
+runSimSpace()
 
 // ============================================================
 print()
