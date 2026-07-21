@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/btj93/reel/compare/v0.4.0...v0.5.0) (2026-07-21)
+
+
+### Features
+
+* fix 43 audited defects and add 3-layer programmatic test infrastructure ([283afe2](https://github.com/btj93/reel/commit/283afe2ef7c49119dd86200937676564eaec8f40))
+
+
+### Bug Fixes
+
+* active window in unwanted position ([ecc2697](https://github.com/btj93/reel/commit/ecc269750bbd6969d589608d728860de00107144))
+
 ## [0.4.0](https://github.com/btj93/reel/compare/v0.3.0...v0.4.0) (2026-05-14)
 
 
