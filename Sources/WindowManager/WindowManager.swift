@@ -222,6 +222,7 @@ public final class WindowManager: @unchecked Sendable {
             sc.animationEnabled = config.animationEnabled
             sc.gestureSnap = config.gestureSnap
             sc.widthSpringParams = config.widthSpringParams
+            applyAnimationConfig(config, to: sc)
             sc.focusIndicator.reloadConfig(config.focusIndicator)
             sc.focusIndicator.springParams = config.widthSpringParams
         }
@@ -366,6 +367,7 @@ public final class WindowManager: @unchecked Sendable {
             sc.animationEnabled = config.animationEnabled
             sc.gestureSnap = config.gestureSnap
             sc.widthSpringParams = config.widthSpringParams
+            applyAnimationConfig(config, to: sc)
             sc.focusIndicator.reloadConfig(config.focusIndicator)
             sc.focusIndicator.springParams = config.widthSpringParams
         }
@@ -2962,6 +2964,7 @@ public final class WindowManager: @unchecked Sendable {
         sc.animationEnabled = config.animationEnabled
         sc.gestureSnap = config.gestureSnap
         sc.widthSpringParams = config.widthSpringParams
+        applyAnimationConfig(config, to: sc)
         sc.focusIndicator.reloadConfig(config.focusIndicator)
         sc.focusIndicator.springParams = config.widthSpringParams
         sc.frameLoop = frameLoop

@@ -130,35 +130,49 @@ public struct SpringParams: Sendable {
     /// Solve the damped harmonic oscillator: m*x'' + b*x' + k*x = 0
     /// Returns (displacement, velocity) at time t.
     public func solve(x0: Double, v0: Double, t: Double) -> (Double, Double) {
+        let displacement: Double
+        let velocity: Double
+
         switch regime {
         case .critical:
             let expTerm = exp(-beta * t)
-            let displacement = expTerm * (x0 + (beta * x0 + v0) * t)
-            let vel = expTerm * ((v0 + beta * x0) - beta * (x0 + (beta * x0 + v0) * t))
-            return (displacement, vel)
+            displacement = expTerm * (x0 + (beta * x0 + v0) * t)
+            velocity = expTerm * ((v0 + beta * x0) - beta * (x0 + (beta * x0 + v0) * t))
 
         case .underdamped(let omegaD):
             let expTerm = exp(-beta * t)
             let cosT = cos(omegaD * t)
             let sinT = sin(omegaD * t)
-            let displacement = expTerm * (x0 * cosT + ((beta * x0 + v0) / omegaD) * sinT)
-            let velocity = expTerm * (
+            displacement = expTerm * (x0 * cosT + ((beta * x0 + v0) / omegaD) * sinT)
+            velocity = expTerm * (
                 -beta * (x0 * cosT + ((beta * x0 + v0) / omegaD) * sinT)
                 + (-x0 * omegaD * sinT + (beta * x0 + v0) * cosT)
             )
-            return (displacement, velocity)
 
         case .overdamped(let omegaBar):
-            let expTerm = exp(-beta * t)
-            let coshT = cosh(omegaBar * t)
-            let sinhT = sinh(omegaBar * t)
-            let displacement = expTerm * (x0 * coshT + ((beta * x0 + v0) / omegaBar) * sinhT)
-            let velocity = expTerm * (
-                -beta * (x0 * coshT + ((beta * x0 + v0) / omegaBar) * sinhT)
-                + (x0 * omegaBar * sinhT + (beta * x0 + v0) * coshT)
-            )
-            return (displacement, velocity)
+            // Two-exponential form. The previous exp(-beta*t) * cosh(omegaBar*t)
+            // underflows one factor to 0 while the other overflows to +inf, giving
+            // NaN — which poisons viewOffset so the animation never settles. Both
+            // exponents here are <= 0 when overdamped (beta > omegaBar), so each
+            // term decays independently and neither can overflow.
+            let r1 = -(beta - omegaBar)
+            let r2 = -(beta + omegaBar)
+            let e1 = exp(r1 * t)
+            let e2 = exp(r2 * t)
+            let c1 = (v0 - r2 * x0) / (r1 - r2)
+            let c2 = x0 - c1
+            displacement = c1 * e1 + c2 * e2
+            velocity = c1 * r1 * e1 + c2 * r2 * e2
         }
+
+        // Single non-finite backstop for every regime. Reporting "settled at the
+        // target" here is what lets `evaluate`, `evaluateWithStatus` and `isDone`
+        // agree: ColumnData.currentWidth then falls back to cachedWidth, the
+        // settle helpers nil the spring, and FocusIndicator releases its springs.
+        // Patching only isDone/evaluateWithStatus would miss ViewOffset.current,
+        // which goes through `evaluate`.
+        guard displacement.isFinite, velocity.isFinite else { return (0, 0) }
+        return (displacement, velocity)
     }
 }
 

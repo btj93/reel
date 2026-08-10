@@ -210,6 +210,65 @@ func runSimAnim() {
     check(TimeUtil.nowProvider == nil, "clock leaked out of section")
 
     // ---- applyLayout while paused dispatches zero writes ----
+    // [animation] config was parsed but only ever reached widthSpringParams; every
+    // scroll used a hard-coded spring and the two bounce fields had no consumer at
+    // all. Drives the real production helper — asserting on a hand-populated Strip
+    // would pass even with the wiring absent.
+    section("config animation values reach an existing strip")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        addFakeWindows(sc, count: 2, width: 700)
+        assertClose(sc.strip.bounceDistance, 40, tolerance: 0.001, "starts at the default")
+        assertClose(sc.strip.scrollSpringParams.stiffness, 800, tolerance: 0.001, "default stiffness")
+
+        var cfg = ReelConfig()
+        cfg.scrollStiffness = 250
+        cfg.scrollDampingRatio = 0.8
+        cfg.bounceDistance = 77
+        cfg.bounceDampingRatio = 0.4
+        applyAnimationConfig(cfg, to: sc)
+
+        assertClose(sc.strip.scrollSpringParams.stiffness, 250, tolerance: 0.001, "stiffness reached the strip")
+        assertClose(sc.strip.bounceDistance, 77, tolerance: 0.001, "bounce distance reached the strip")
+        assertClose(sc.strip.bounceDampingRatio, 0.4, tolerance: 0.001, "bounce damping reached the strip")
+        _ = clock
+    }
+
+    // Storing the value is not enough — the scroll path used to hard-code
+    // `.horizontalScroll` (stiffness 800) at every site, so a configured spring
+    // was stored and then ignored. Assert the animation actually carries it.
+    section("a configured scroll spring is used by the scroll animation")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        var strip = makeStrip(columnCount: 3, gap: 16)
+        strip.activeColumnIndex = 0
+        strip.scrollSpringParams = SpringParams(dampingRatio: 0.8, stiffness: 250, epsilon: 0.5)
+
+        let anim = strip.navigateRight(at: clock.t)
+        check(anim != nil, "navigateRight produced an animation")
+        assertClose(anim!.params.stiffness, 250, tolerance: 0.001,
+            "scroll animation uses the configured stiffness, not the hard-coded 800")
+        // SpringParams stores `damping`; dampingRatio is init-only. Derive it.
+        let ratio = anim!.params.damping / (2 * (anim!.params.stiffness * anim!.params.mass).squareRoot())
+        assertClose(ratio, 0.8, tolerance: 0.001,
+            "scroll animation uses the configured damping ratio")
+    }
+
+    // Same for the rubber-band bounce, whose distance/damping had NO consumer at all.
+    section("configured bounce values are used by the rubber-band animation")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        var strip = makeStrip(columnCount: 2, gap: 16)
+        strip.bounceDampingRatio = 0.35
+        strip.bounceDistance = 90
+        let anim = strip.createRubberBandAnimation(direction: 1, at: clock.t)
+        let bounceRatio = anim.params.damping / (2 * (anim.params.stiffness * anim.params.mass).squareRoot())
+        assertClose(bounceRatio, 0.35, tolerance: 0.001,
+            "bounce uses the configured damping ratio, not the hard-coded 0.6")
+        check(abs(anim.initialVelocity) > 0, "bounce carries a kick velocity derived from bounceDistance")
+    }
+
     section("applyLayout while paused dispatches zero writes")
     do {
         let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }

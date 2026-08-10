@@ -350,7 +350,11 @@ extension ReelConfig {
         // [animation]
         if let anim = readTable(table["animation"]) {
             if let v = readDouble(anim["scroll_stiffness"]), v.isFinite { config.scrollStiffness = max(1, v) }
-            if let v = readDouble(anim["scroll_damping_ratio"]), v.isFinite { config.scrollDampingRatio = max(0.01, v) }
+            // Upper bound matters: ratios above ~4 are physically useless (an
+            // ever-slower crawl to target) and historically drove the overdamped
+            // solve non-finite. Clamped rather than rejected — a config typo must
+            // not crash, so there is deliberately no precondition in SpringParams.
+            if let v = readDouble(anim["scroll_damping_ratio"]), v.isFinite { config.scrollDampingRatio = min(4.0, max(0.01, v)) }
             if let v = readDouble(anim["bounce_distance"]), v.isFinite { config.bounceDistance = max(0, v) }
             if let v = readDouble(anim["bounce_damping_ratio"]), v.isFinite { config.bounceDampingRatio = max(0.01, v) }
         }

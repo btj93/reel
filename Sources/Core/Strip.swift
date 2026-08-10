@@ -37,6 +37,19 @@ public struct Strip: Sendable {
     /// multi-region groups to a singleton on every write, which is unsafe.
     public var workingArea: CGRect { groupArea.totalSpan }
 
+    /// Spring used for every horizontal scroll animation. Injected from config
+    /// (`[animation] scroll_stiffness` / `scroll_damping_ratio`) the same way
+    /// `gap` / `snapPoints` are — Core stays pure and never reads ReelConfig.
+    /// Default matches the former hard-coded `.horizontalScroll`.
+    public var scrollSpringParams = SpringParams(dampingRatio: 1.0, stiffness: 800, epsilon: 0.5)
+
+    /// Rubber-band overshoot distance in px (`[animation] bounce_distance`).
+    public var bounceDistance: Double = 40
+
+    /// Rubber-band damping ratio; < 1 gives the visible bounce-back
+    /// (`[animation] bounce_damping_ratio`).
+    public var bounceDampingRatio: Double = 0.6
+
     /// Column width presets for cycling.
     public var widthPresets: [ColumnWidth]
 
@@ -254,10 +267,10 @@ public struct Strip: Sendable {
     @discardableResult
     public mutating func createRubberBandAnimation(direction: Double, kickVelocity: Double? = nil, at time: Double) -> SpringAnimation {
         let currentPos = viewOffset.current(at: time)
-        let overshoot = 40.0 * direction  // how far to stretch past the edge
+        let overshoot = bounceDistance * direction  // how far to stretch past the edge
 
         // Use underdamped spring (ratio < 1) for a visible bounce-back
-        let bounceParams = SpringParams(dampingRatio: 0.6, stiffness: 600, epsilon: 0.5)
+        let bounceParams = SpringParams(dampingRatio: bounceDampingRatio, stiffness: 600, epsilon: 0.5)
 
         // Animate: current → overshoot position, but target is the canonical snap (so it
         // bounces back to the right place even if currentPos has drifted off the snap from
@@ -301,7 +314,7 @@ public struct Strip: Sendable {
             to: targetOffset,
             initialVelocity: currentVel,
             startTime: time,
-            params: .horizontalScroll
+            params: scrollSpringParams
         )
 
         viewOffset = .animation(anim)
@@ -327,7 +340,7 @@ public struct Strip: Sendable {
             to: targetOffset,
             initialVelocity: velocity,
             startTime: time,
-            params: .horizontalScroll
+            params: scrollSpringParams
         )
 
         viewOffset = .animation(anim)
@@ -347,7 +360,7 @@ public struct Strip: Sendable {
             to: targetOffset,
             initialVelocity: 0,
             startTime: time,
-            params: .horizontalScroll
+            params: scrollSpringParams
         )
 
         viewOffset = .animation(anim)
@@ -454,7 +467,7 @@ public struct Strip: Sendable {
                 to: targetOffset,
                 initialVelocity: 0,
                 startTime: time,
-                params: .horizontalScroll
+                params: scrollSpringParams
             )
             viewOffset = .animation(anim)
             return .scrolledAnimated(from: adjustedOffset, to: targetOffset)

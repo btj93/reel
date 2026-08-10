@@ -187,6 +187,34 @@ func runL1AuditGapTests() {
         assertClose(rVel0, midVel, tolerance: 0.01, "velocity continuous across retarget")
     }
 
+    // MARK: - Overdamped numerical stability
+
+    // The overdamped branch computed exp(-beta*t) * cosh(omegaBar*t). Past
+    // beta*t > 745 the exponential underflows to 0 while cosh overflows to +inf,
+    // giving 0 * inf = NaN — which poisons viewOffset so the animation never
+    // settles. Reachable from config today: scroll_damping_ratio has no upper
+    // bound, and zeta=2 goes non-finite after ~30s of elapsed time.
+    section("overdamped solve stays finite and decaying")
+    do {
+        var checked = 0
+        for zeta in [1.05, 1.1, 2.0, 5.0, 8.0, 10.0, 20.0, 50.0] {
+            for k in [200.0, 800.0, 3000.0] {
+                let p = SpringParams(dampingRatio: zeta, stiffness: k, epsilon: 0.5)
+                var prev = Double.infinity
+                for t in [0.0, 0.1, 0.5, 1.0, 1.5, 2.6, 3.3, 5.0, 30.0, 60.0, 600.0] {
+                    let (d, v) = p.solve(x0: -700, v0: 0, t: t)
+                    check(d.isFinite && v.isFinite,
+                        "non-finite at zeta=\(zeta) k=\(k) t=\(t): d=\(d) v=\(v)")
+                    check(abs(d) <= prev + 1e-6,
+                        "overdamped must decay monotonically at zeta=\(zeta) k=\(k) t=\(t)")
+                    prev = abs(d)
+                    checked += 1
+                }
+            }
+        }
+        assertEq(checked, 264, "swept the full grid")
+    }
+
     section("SpringAnimation.retargeted — velocity carried across all three damping regimes")
     do {
         // Ratios straddle the critical boundary (1.0): underdamped / critical / overdamped.

@@ -1245,7 +1245,7 @@ public final class StripController: @unchecked Sendable {
                     to: snapOffset,
                     initialVelocity: velocity,
                     startTime: time,
-                    params: .horizontalScroll
+                    params: strip.scrollSpringParams
                 )
                 strip.viewOffset = .animation(anim)
             } else {
@@ -1329,7 +1329,7 @@ public final class StripController: @unchecked Sendable {
                 to: target,
                 initialVelocity: 0,
                 startTime: time,
-                params: .horizontalScroll
+                params: strip.scrollSpringParams
             )
             strip.viewOffset = .animation(anim)
         }
