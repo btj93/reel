@@ -316,6 +316,9 @@ public final class StripController: @unchecked Sendable {
         windowMap.removeValue(forKey: tileID)
         lastCommittedFrames.removeValue(forKey: tileID)
         dirtyTileIDs.remove(tileID)
+        // Revoke any queued write: this tile is leaving, so nothing will supersede
+        // the stale target already baked into the pending closure.
+        invalidatePendingWrite(tileID: tileID)
         // Also drop this window from any stashed Space snapshot so it can't pin
         // a dead AXWindow/AXApp there (finding #22).
         pruneSavedSpaces(removedTileID: tileID)
@@ -857,20 +860,66 @@ public final class StripController: @unchecked Sendable {
     /// tracked AXApp — preserves ordering without the concurrent global queue.
     private let fallbackWriteQueue = DispatchQueue(label: "reel.ax.write.fallback", qos: .userInteractive)
 
+    /// Bumped whenever the controller loses ownership of a tile. A drain block
+    /// stamped with an older value is discarded at dequeue. Guarded by `writeLock`.
+    private var writeGeneration: [TileID: UInt64] = [:]
+
     private struct PendingWrite {
         let app: AXApp?
         let apply: @Sendable () -> AXResult<Void>
+        let generation: UInt64
     }
 
     /// Debug-introspection for the test settle helper.
     package var debugDirtyCount: Int { dirtyTileIDs.count }
+
+    /// Revoke any undelivered write for `tileID` and invalidate blocks already
+    /// dispatched for it. Called when the controller loses ownership of a tile —
+    /// removal, float, Space replacement — where no superseding write will ever
+    /// arrive to overwrite the stale target baked into the queued closure.
+    ///
+    /// `inFlightTiles` is deliberately untouched: a dispatched block clears it once
+    /// it finds nothing pending, and clearing it here would allow two concurrent
+    /// drains for one tile.
+    ///
+    /// LIMIT: this cannot stop a block that has ALREADY dequeued, because
+    /// `pending.apply()` runs outside `writeLock` (holding the lock across an AX
+    /// call with a 100ms messaging timeout would stall the caller). Corrective
+    /// writes must therefore be *queue-ordered* via `enqueueRestore`, not merely
+    /// issued after invalidation.
+    package func invalidatePendingWrite(tileID: TileID) {
+        writeLock.lock()
+        pendingWrites.removeValue(forKey: tileID)
+        writeGeneration[tileID, default: 0] &+= 1
+        writeLock.unlock()
+    }
+
+    /// Restore `tileID` to `frame`, ordered behind any write already queued for its
+    /// app. A direct `setFrame` (as `restoreAllWindows` used to do) runs inline on
+    /// the main thread, so an already-dequeued stale write lands afterwards and
+    /// undoes the restore. Going through the same serial queue makes FIFO ordering
+    /// provide the guarantee no lock can.
+    package func enqueueRestore(tileID: TileID, frame: CGRect) {
+        guard let window = windowMap[tileID] else { return }
+        // Bump first so the stale pending entry is dropped, then enqueue — the new
+        // write reads the post-bump generation and therefore survives the check.
+        invalidatePendingWrite(tileID: tileID)
+        let app = apps[window.pid]
+        if let app = app {
+            enqueueWrite(tileID: tileID, app: app) { app.dispatchSetFrame(window, frame: frame) }
+        } else {
+            enqueueWrite(tileID: tileID, app: nil) { window.setFrame(frame) }
+        }
+        lastCommittedFrames[tileID] = frame
+    }
 
     /// Enqueue an AX write for `tileID`, coalescing with any undelivered write for
     /// the same tile. At most one drain block per tile is ever in flight; a
     /// superseding frame just replaces the pending target (finding #2).
     private func enqueueWrite(tileID: TileID, app: AXApp?, apply: @escaping @Sendable () -> AXResult<Void>) {
         writeLock.lock()
-        pendingWrites[tileID] = PendingWrite(app: app, apply: apply)
+        pendingWrites[tileID] = PendingWrite(
+            app: app, apply: apply, generation: writeGeneration[tileID, default: 0])
         let alreadyInFlight = inFlightTiles.contains(tileID)
         if !alreadyInFlight { inFlightTiles.insert(tileID) }
         writeLock.unlock()
@@ -895,7 +944,12 @@ public final class StripController: @unchecked Sendable {
                 writeLock.unlock()
                 return
             }
+            // Discard a write whose tile changed ownership after it was enqueued.
+            // Checked under the lock so an invalidation that lands before dequeue
+            // is always honored.
+            let isStale = pending.generation != writeGeneration[tileID, default: 0]
             writeLock.unlock()
+            if isStale { continue }
             let result = pending.apply()
             if case .failure = result {
                 mainHop { [weak self] in self?.dirtyTileIDs.insert(tileID) }
@@ -1593,6 +1647,11 @@ public final class StripController: @unchecked Sendable {
     public func switchSpace(onScreenWindowIDs: Set<UInt32>) -> Bool {
         // Save current space
         saveCurrentSpace()
+
+        // Revoke queued writes for every tile currently held. switchSpace replaces
+        // windowMap wholesale, so any tile not carried into the new Space has no
+        // successor write and its queued closure would reposition it afterwards.
+        for tileID in windowMap.keys { invalidatePendingWrite(tileID: tileID) }
 
         // Update fingerprint
         currentSpaceFingerprint = onScreenWindowIDs

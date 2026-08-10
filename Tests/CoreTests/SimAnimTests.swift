@@ -269,6 +269,88 @@ func runSimAnim() {
         check(abs(anim.initialVelocity) > 0, "bounce carries a kick velocity derived from bounceDistance")
     }
 
+    // ---- AX write lifecycle ----
+    // A queued write carries its target frame baked in at enqueue time. When the
+    // controller loses ownership of a tile (removal, float, Space replacement) no
+    // superseding write ever arrives, so the stale closure repositions a window the
+    // strip no longer manages.
+    section("removed tile's queued write is revoked before it lands")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        let (_, wins) = addFakeWindows(sc, count: 2, width: 700)
+        let cap = Capture()
+        sc.frameDispatch = { _, work in cap.blocks.append(work) }
+        sc.mainHop = { $0() }
+
+        sc.clearCommittedFrames()
+        sc.strip.viewOffset = .static(-300)
+        sc.applyLayout()
+        check(!cap.blocks.isEmpty, "layout enqueued at least one write")
+
+        let victim = wins[0]
+        let before = victim.currentFrame
+        sc.removeWindow(tileID: TileID(victim.windowID))
+        cap.runAll()
+        assertEq(victim.currentFrame, before, "a revoked write must not move a removed window")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    // Invalidation alone cannot save a corrective restore: once drainWrites has
+    // dequeued an entry it applies it outside the lock. A restore must therefore be
+    // ORDERED BEHIND the stale write on the same serial queue, which is what
+    // enqueueRestore does and a direct main-thread setFrame does not.
+    section("a corrective restore lands after an already-queued stale write")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        let (_, wins) = addFakeWindows(sc, count: 2, width: 700)
+        let cap = Capture()
+        sc.frameDispatch = { _, work in cap.blocks.append(work) }
+        sc.mainHop = { $0() }
+
+        sc.clearCommittedFrames()
+        sc.strip.viewOffset = .static(-900)
+        sc.applyLayout()
+        check(!cap.blocks.isEmpty, "a stale write is queued")
+        let staleTarget = wins[0].currentFrame
+        let logBefore = wins[0].frameLog.count
+
+        let target = CGRect(x: 120, y: 25, width: 700, height: 850)
+        sc.enqueueRestore(tileID: TileID(wins[0].windowID), frame: target)
+        // Nothing has been applied yet: enqueueRestore must not write inline, or it
+        // would be overtaken by the queued write instead of superseding it.
+        assertEq(wins[0].frameLog.count, logBefore, "restore is queued, not applied inline")
+        assertEq(wins[0].currentFrame, staleTarget, "window untouched until the queue drains")
+
+        cap.runAll()
+        assertEq(wins[0].currentFrame, target, "restore is the frame that lands")
+        assertEq(wins[0].frameLog.last, target, "restore is the LAST write applied")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    section("switchSpace revokes writes for tiles it drops")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        let (_, wins) = addFakeWindows(sc, count: 2, width: 700)
+        let cap = Capture()
+        sc.frameDispatch = { _, work in cap.blocks.append(work) }
+        sc.mainHop = { $0() }
+
+        sc.clearCommittedFrames()
+        sc.strip.viewOffset = .static(-300)
+        sc.applyLayout()
+        let before = wins.map { $0.currentFrame }
+
+        _ = sc.switchSpace(onScreenWindowIDs: [])
+        cap.runAll()
+        for (i, w) in wins.enumerated() {
+            assertEq(w.currentFrame, before[i], "dropped tile \(i) must not be moved by a stale write")
+        }
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
     section("applyLayout while paused dispatches zero writes")
     do {
         let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }

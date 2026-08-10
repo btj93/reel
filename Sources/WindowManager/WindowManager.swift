@@ -1815,7 +1815,7 @@ public final class WindowManager: @unchecked Sendable {
             var cascadeOffset: Double = 0
             let cascadeStep: Double = 30
 
-            for (_, window) in sc.windowMap {
+            for (tileID, window) in sc.windowMap {
                 guard case .success(let frame) = window.getFrame() else { continue }
 
                 // Window center is within working area — leave it alone
@@ -1834,7 +1834,12 @@ public final class WindowManager: @unchecked Sendable {
                 let newFrame = CGRect(
                     x: wa.minX + offset, y: wa.minY + offset,
                     width: frame.width, height: frame.height)
-                _ = window.setFrame(newFrame)
+                // Queue-ordered, NOT a direct setFrame. A write already sitting on
+                // this app's serial queue would otherwise land after the inline
+                // restore and undo it — and once such a write has been dequeued,
+                // revoking it is impossible (apply runs outside writeLock). Going
+                // through the same queue makes FIFO ordering guarantee we are last.
+                sc.enqueueRestore(tileID: tileID, frame: newFrame)
                 cascadeOffset += cascadeStep
             }
         }
@@ -2886,6 +2891,21 @@ public final class WindowManager: @unchecked Sendable {
                         partitioned += 1
                     }
                 }
+                // Stop the dying strip from enqueueing FRESH targets for tiles it
+                // has already handed to successors: removeWindow ends in
+                // applyLayout(), so this loop would otherwise write N shrinking-strip
+                // layouts. Being last on each app's serial queue, they land after the
+                // successors' writes and yank migrated windows back to pre-split
+                // coordinates — or re-sliver ones the shrinking strip pushed out of
+                // view, which the successors then never correct because they recorded
+                // lastCommittedFrames during addWindow.
+                //
+                // MUST come after the partition loop above, never before: the
+                // isPaused setter freezes in-flight width springs by writing
+                // cachedWidth = currentWidth, and the loop reads colData.cachedWidth
+                // to build each successor's RestoredSlot. Set early, successors
+                // inherit an interpolated width instead of the animation target.
+                dyingSC.isPaused = true
                 for tileID in Array(dyingSC.windowMap.keys) {
                     dyingSC.removeWindow(tileID: tileID)
                 }
