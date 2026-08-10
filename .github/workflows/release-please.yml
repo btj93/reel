@@ -30,9 +30,10 @@ jobs:
       sha256: ${{ steps.sha.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v6
+      # bundle.sh copies reel-msg in BEFORE signing and verifies the seal, so it is
+      # the only step that writes into the bundle. Do not add a post-sign copy here
+      # again — that is what shipped releases with an invalid code signature.
       - run: bash scripts/bundle.sh release
-      - name: Copy CLI into bundle
-        run: cp .build/release/reel-msg .build/bundled/Reel.app/Contents/MacOS/
       - name: Zip app bundle
         run: |
           cd .build/bundled

@@ -54,6 +54,15 @@ PLIST
 # Only replace the binary — preserves macOS permissions on the .app bundle
 cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
 
+# Ship the CLI inside the bundle so the codesign below seals it as nested code.
+# MUST stay above codesign: adding files to Contents/MacOS/ after signing leaves
+# unsealed nested code and fails strict validation. CI used to copy this in after
+# bundle.sh had already signed, so every release archive shipped a broken seal.
+# Unconditional on purpose — under `set -euo pipefail` a missing product fails
+# loudly here, whereas an `if [ -f ... ]` guard would silently ship a bundle with
+# no CLI, breaking install.sh's symlink and the Homebrew cask's CLI link.
+cp "${BUILD_DIR}/reel-msg" "${BUNDLE_DIR}/Contents/MacOS/"
+
 # Copy SwiftPM resource bundle into the .app.
 # Place in Contents/Resources/ (standard .app location). The Config module's
 # resourceBundle accessor checks both this path and SwiftPM's default path.
@@ -72,6 +81,17 @@ fi
 # every rebuild produces a different hash and macOS revokes permission.
 # Ad-hoc signing (-s -) with a fixed identifier keeps it stable.
 codesign -fs - --identifier "dev.reel.Reel" "${BUNDLE_DIR}"
+
+# Gate the signature. --strict is load-bearing: unsealed nested code is exactly
+# what it rejects. --deep also validates reel-msg's own linker signature.
+# NOT `spctl -a` — an ad-hoc signature can never pass Gatekeeper assessment, so
+# that gate would fail 100% of the time.
+codesign --verify --deep --strict --verbose=2 "${BUNDLE_DIR}"
+
+# The assertion that actually pins the defect: verification alone can pass while
+# the CLI is absent, so confirm reel-msg is SEALED into CodeResources.
+plutil -extract files2 raw -o - "${BUNDLE_DIR}/Contents/_CodeSignature/CodeResources" \
+    | grep -qx 'MacOS/reel-msg'
 
 echo "Bundle updated at: ${BUNDLE_DIR}"
 echo "Run with: open ${BUNDLE_DIR}"

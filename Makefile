@@ -1,4 +1,4 @@
-.PHONY: run run-debug smoke smoke-check
+.PHONY: run run-debug smoke smoke-check bundle-check
 
 run-debug:
 	-pkill -x Reel
@@ -30,3 +30,12 @@ smoke-check:
 	fi
 	REEL_E2E_CONFIRM=1 SMOKE_DRY_RUN=1 bash Tests/Smoke/smoke.sh
 	swift build
+
+# Lint the bundler and prove the signed bundle seals reel-msg. bundle.sh itself
+# runs `codesign --verify --deep --strict` plus a plutil check that
+# MacOS/reel-msg is present in CodeResources, so a successful run IS the
+# assertion. Guards against reintroducing a post-sign copy (which shipped
+# releases with an invalid signature).
+bundle-check:
+	bash -n scripts/bundle.sh
+	bash scripts/bundle.sh release
