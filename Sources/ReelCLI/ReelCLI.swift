@@ -52,14 +52,14 @@ struct ReelCLI {
             fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
             socklen_t(MemoryLayout<Int32>.size))
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = socketPath.utf8CString
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            let bound = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
-            for (i, byte) in pathBytes.enumerated() {
-                bound[i] = byte
-            }
+        // Bounds-checked. Copying an unchecked path into sun_path — a fixed
+        // 104-byte array that is the struct's last member — corrupted the stack for
+        // a long REEL_SOCKET_PATH or inherited TMPDIR. Shares the server's guard.
+        guard var addr = makeUnixSockaddr(path: socketPath) else {
+            FileHandle.standardError.write(
+                Data("Error: socket path too long: \(socketPath)\n".utf8))
+            close(fd)
+            Foundation.exit(1)
         }
 
         let connectResult = withUnsafePointer(to: &addr) { ptr in
@@ -74,10 +74,24 @@ struct ReelCLI {
             Foundation.exit(1)
         }
 
-        // Send command
-        let cmdStr = payload + "\n"
-        cmdStr.withCString { ptr in
-            _ = write(fd, ptr, strlen(ptr))
+        // Send command — loop until every byte is out. A short positive write() is
+        // partial delivery, not success: the server would then parse a truncated
+        // command. Mirrors the server's own write loop; retries on EINTR.
+        let sendOk = (payload + "\n").withCString { base -> Bool in
+            let total = strlen(base)
+            var offset = 0
+            while offset < total {
+                let n = write(fd, base.advanced(by: offset), total - offset)
+                if n > 0 { offset += n; continue }
+                if n < 0 && errno == EINTR { continue }
+                return false
+            }
+            return true
+        }
+        guard sendOk else {
+            FileHandle.standardError.write(Data("Error: failed to send command\n".utf8))
+            close(fd)
+            Foundation.exit(1)
         }
         // Signal EOF so the server's read loop terminates immediately,
         // while keeping the read side open for the response.
@@ -94,8 +108,15 @@ struct ReelCLI {
         }
         close(fd)
 
+        // Exit status must reflect the daemon's verdict. Previously always 0, so a
+        // wrapper doing `reel-msg X || notify` treated "Unknown command" or
+        // "Reorder in progress" as success and consumed the error text as data.
+        // stdout shape is kept byte-identical so smoke-harness jq pipelines are
+        // unaffected; diagnostics go to stderr.
+        var decoded: ReelResponse?
         if !responseData.isEmpty {
             if let response = try? JSONDecoder().decode(ReelResponse.self, from: responseData) {
+                decoded = response
                 if let data = response.data {
                     print(data)
                 } else if let message = response.message {
@@ -105,7 +126,13 @@ struct ReelCLI {
                 }
             } else if let str = String(data: responseData, encoding: .utf8) {
                 print(str)
+                FileHandle.standardError.write(
+                    Data("Error: undecodable response from Reel\n".utf8))
             }
+        } else {
+            FileHandle.standardError.write(
+                Data("Error: no response from Reel (daemon may have exited)\n".utf8))
         }
+        Foundation.exit(reelExitCode(for: decoded))
     }
 }

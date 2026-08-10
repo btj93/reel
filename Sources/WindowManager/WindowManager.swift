@@ -649,6 +649,12 @@ public final class WindowManager: @unchecked Sendable {
                     success: false, message: "Unknown command: \(message.command)")
             }
         }
+        // Terminate only once `quit`'s response has been flushed and the client
+        // socket closed, so `reel-msg quit` reliably receives "Quitting" and exits 0.
+        server.onFlushed = { command in
+            guard command == .quit else { return }
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
         let ipcOk = server.start()
         self.ipcServer = server
         print("[WM] IPC server: \(ipcOk)")
@@ -2273,7 +2279,10 @@ public final class WindowManager: @unchecked Sendable {
             }
             return ReelResponse(success: false, message: "Failed to serialize status")
         case .quit:
-            DispatchQueue.main.async { NSApp.terminate(nil) }
+            // Termination is deferred to `onFlushed` (wired below). Calling
+            // NSApp.terminate here races the response write, which happens after
+            // this handler returns — reel-msg would frequently see an empty reply,
+            // which is why it had to treat that as success.
             return ReelResponse(success: true, message: "Quitting")
         }
     }

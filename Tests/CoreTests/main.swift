@@ -1789,6 +1789,29 @@ do {
 }
 
 // ============================================================
+// MARK: - IPC hardening
+
+// The CLI copied an unchecked path into sockaddr_un.sun_path — a fixed 104-byte
+// buffer that is the last member of the struct — so a long REEL_SOCKET_PATH (or an
+// inherited TMPDIR) corrupted the stack. The server already guarded this.
+section("makeUnixSockaddr rejects an over-long path")
+do {
+    check(makeUnixSockaddr(path: "/tmp/ok.sock") != nil, "normal path accepted")
+    let long = "/tmp/" + String(repeating: "a", count: 200) + ".sock"
+    check(makeUnixSockaddr(path: long) == nil,
+        "over-long path rejected instead of overflowing sun_path")
+}
+
+// reel-msg exited 0 even when the daemon reported failure, so automation read
+// "Unknown command" or "Reorder in progress" as success.
+section("reelExitCode maps daemon-reported failure to nonzero")
+do {
+    assertEq(reelExitCode(for: ReelResponse(success: true, message: "OK")), Int32(0), "success → 0")
+    assertEq(reelExitCode(for: ReelResponse(success: false, message: "Unknown command")), Int32(1), "failure → 1")
+    assertEq(reelExitCode(for: nil), Int32(1), "no decodable response → 1")
+}
+
+// ============================================================
 // MARK: - Reorder Insertion Index
 
 section("Insertion index — cursor left of all thumbnails")

@@ -28,6 +28,13 @@ public final class SocketServer: @unchecked Sendable {
 
     public var onMessage: ((IPCMessage) -> ReelResponse)?
 
+    /// Invoked after a command's response has been fully written and the client
+    /// socket closed. For actions that must not race the reply — `quit` above all,
+    /// since terminating from inside the command handler can kill the process with
+    /// the response still unsent. Runs on `connectionQueue`, so hop to main if the
+    /// action touches main-thread state.
+    public var onFlushed: ((ReelCommand) -> Void)?
+
     public init() {
         self.socketPath = reelSocketPath()
     }
@@ -77,6 +84,10 @@ public final class SocketServer: @unchecked Sendable {
             print("[IPC] Failed to bind to \(socketPath): \(String(cString: strerror(errno)))")
             fflush(stdout)
             close(listenerFD)
+            // Reset so a later stop() cannot close this number again — by then the
+            // descriptor has been recycled by some unrelated open (log handle, AXApp
+            // kqueue, WindowServer connection), and closing it would yank that away.
+            listenerFD = -1
             return false
         }
 
@@ -88,6 +99,7 @@ public final class SocketServer: @unchecked Sendable {
             print("[IPC] Failed to listen")
             fflush(stdout)
             close(listenerFD)
+            listenerFD = -1
             return false
         }
 
@@ -155,6 +167,14 @@ public final class SocketServer: @unchecked Sendable {
     /// Runs on `connectionQueue` (background). Reads the request, executes the
     /// command (hopping to `.main`), and writes the response — all off main.
     private func handleConnection(_ clientFD: Int32) {
+        // Post-flush action, run after the response is written AND the socket is
+        // closed. `quit` used to call NSApp.terminate from inside the command
+        // handler, but the write happens after that handler returns, so the process
+        // could die with the reply unsent — which is why the CLI had to treat an
+        // empty response as success. Registered BEFORE the close defer so LIFO
+        // ordering runs it last.
+        var flushedCommand: ReelCommand?
+        defer { if let flushedCommand { onFlushed?(flushedCommand) } }
         defer { close(clientFD) }
 
         // Bound both directions in time. SO_RCVTIMEO caps an idle read; the
@@ -184,7 +204,8 @@ public final class SocketServer: @unchecked Sendable {
 
         guard !data.isEmpty else { return }
 
-        let response = computeResponse(from: data)
+        let (response, command) = computeResponse(from: data)
+        flushedCommand = command
 
         // Send response — loop write until all bytes are flushed (a single
         // write() may return short, especially for large JSON payloads).
@@ -214,28 +235,34 @@ public final class SocketServer: @unchecked Sendable {
 
     /// Decode the request (pure, safe off-main) and invoke the command handler
     /// on `.main` — WindowManager is main-thread-only.
-    private func computeResponse(from data: Data) -> ReelResponse {
+    /// Returns the response plus the resolved command, so `handleConnection` can
+    /// run post-flush actions (see `onFlushed`) without the command handlers having
+    /// to thread a closure back out.
+    private func computeResponse(from data: Data) -> (ReelResponse, ReelCommand?) {
         guard let rawStr = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) else {
-            return ReelResponse(success: false, message: "Invalid data")
+            return (ReelResponse(success: false, message: "Invalid data"), nil)
         }
 
         // Try JSON protocol first
         if let jsonData = rawStr.data(using: .utf8),
            let message = try? JSONDecoder().decode(IPCMessage.self, from: jsonData) {
-            return executeOnMain {
+            let resolved = ReelCommand(rawValue: message.command)
+            let response = executeOnMain {
                 self.onMessage?(message) ?? self.onCommand.flatMap { handler in
-                    ReelCommand(rawValue: message.command).map { handler($0) }
+                    resolved.map { handler($0) }
                 } ?? ReelResponse(success: false, message: "No handler")
             }
+            return (response, resolved)
         }
         // Fall back to raw string for backward compatibility
         if let command = ReelCommand(rawValue: rawStr) {
-            return executeOnMain {
+            let response = executeOnMain {
                 self.onCommand?(command) ?? ReelResponse(success: false, message: "No handler")
             }
+            return (response, command)
         }
-        return ReelResponse(success: false, message: "Unknown command: \(rawStr)")
+        return (ReelResponse(success: false, message: "Unknown command: \(rawStr)"), nil)
     }
 
     /// Synchronously run `work` on the main thread and return its result.

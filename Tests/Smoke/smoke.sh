@@ -412,7 +412,17 @@ sec_persistence() {
 
     if [ "$DRY" != 1 ]; then
         info "quitting the test instance (persists snapshot on shutdown)…"
-        reel_msg quit >/dev/null 2>&1 || true
+        # Also pins the quit response race: termination used to fire from inside the
+        # command handler, before the connection worker wrote the reply, so the
+        # response was frequently empty and the exit status meaningless. Now the
+        # daemon terminates only after the reply is flushed and the socket closed.
+        local quit_out quit_rc
+        quit_out="$(reel_msg quit 2>/dev/null)"; quit_rc=$?
+        [ "$quit_rc" -eq 0 ] || fail "quit exited $quit_rc, expected 0 (response race?)"
+        case "$quit_out" in
+            *Quitting*) ;;
+            *) fail "quit did not return its response (got '$quit_out')" ;;
+        esac
         for _ in $(seq 1 60); do kill -0 "$TEST_REEL_PID" 2>/dev/null || break; sleep 0.05; done
         kill -9 "$TEST_REEL_PID" 2>/dev/null || true
         TEST_REEL_PID=""

@@ -38,6 +38,35 @@ public struct ReelResponse: Codable, Sendable {
     }
 }
 
+/// Build a `sockaddr_un` for `path`, or nil when it would overflow `sun_path`.
+///
+/// `sun_path` is a fixed 104-byte array and the last member of the struct, so
+/// copying an unchecked path past its end corrupts adjacent stack memory. The CLI
+/// did exactly that while the server guarded correctly — this is the shared guard
+/// both now use.
+public func makeUnixSockaddr(path: String) -> sockaddr_un? {
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    let bytes = path.utf8CString
+    guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else { return nil }
+    withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+        let bound = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
+        for (i, b) in bytes.enumerated() { bound[i] = b }
+    }
+    return addr
+}
+
+/// Exit status for a CLI invocation.
+///
+/// Nonzero for a daemon-reported failure and for a response that could not be read
+/// or decoded — automation must not read truncated or malformed transport as
+/// success. Safe to be strict about empty responses only because `quit` no longer
+/// races its own reply (termination is triggered after the write is flushed).
+public func reelExitCode(for response: ReelResponse?) -> Int32 {
+    guard let response else { return 1 }
+    return response.success ? 0 : 1
+}
+
 /// Socket path for IPC.
 ///
 /// Resolution order:
