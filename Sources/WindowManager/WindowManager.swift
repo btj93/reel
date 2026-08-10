@@ -1868,12 +1868,10 @@ public final class WindowManager: @unchecked Sendable {
                 let newFrame = CGRect(
                     x: wa.minX + offset, y: wa.minY + offset,
                     width: frame.width, height: frame.height)
-                // Queue-ordered, NOT a direct setFrame. A write already sitting on
-                // this app's serial queue would otherwise land after the inline
-                // restore and undo it — and once such a write has been dequeued,
-                // revoking it is impossible (apply runs outside writeLock). Going
-                // through the same queue makes FIFO ordering guarantee we are last.
-                sc.enqueueRestore(tileID: tileID, frame: newFrame)
+                // Revokes any queued write for this tile, then writes inline.
+                // Must stay synchronous: pause/shutdown/recover all require the
+                // restore to be done before they are observable.
+                sc.restoreFrame(tileID: tileID, frame: newFrame)
                 cascadeOffset += cascadeStep
             }
         }

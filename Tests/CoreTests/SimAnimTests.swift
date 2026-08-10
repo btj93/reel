@@ -349,11 +349,10 @@ func runSimAnim() {
     }
     check(TimeUtil.nowProvider == nil, "clock leaked out of section")
 
-    // Invalidation alone cannot save a corrective restore: once drainWrites has
-    // dequeued an entry it applies it outside the lock. A restore must therefore be
-    // ORDERED BEHIND the stale write on the same serial queue, which is what
-    // enqueueRestore does and a direct main-thread setFrame does not.
-    section("a corrective restore lands after an already-queued stale write")
+    // A corrective restore must both (a) apply immediately — pause/shutdown/recover
+    // need it done before they are observable — and (b) revoke the tile's queued
+    // write, so a stale target cannot land afterwards and undo it.
+    section("a corrective restore applies inline and revokes the queued write")
     do {
         let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
         let sc = makeSC()
@@ -366,19 +365,14 @@ func runSimAnim() {
         sc.strip.viewOffset = .static(-900)
         sc.applyLayout()
         check(!cap.blocks.isEmpty, "a stale write is queued")
-        let staleTarget = wins[0].currentFrame
-        let logBefore = wins[0].frameLog.count
 
         let target = CGRect(x: 120, y: 25, width: 700, height: 850)
-        sc.enqueueRestore(tileID: TileID(wins[0].windowID), frame: target)
-        // Nothing has been applied yet: enqueueRestore must not write inline, or it
-        // would be overtaken by the queued write instead of superseding it.
-        assertEq(wins[0].frameLog.count, logBefore, "restore is queued, not applied inline")
-        assertEq(wins[0].currentFrame, staleTarget, "window untouched until the queue drains")
+        sc.restoreFrame(tileID: TileID(wins[0].windowID), frame: target)
+        assertEq(wins[0].currentFrame, target, "restore applies immediately, not deferred")
 
         cap.runAll()
-        assertEq(wins[0].currentFrame, target, "restore is the frame that lands")
-        assertEq(wins[0].frameLog.last, target, "restore is the LAST write applied")
+        assertEq(wins[0].currentFrame, target, "revoked stale write does not undo the restore")
+        assertEq(wins[0].frameLog.last, target, "restore is the last frame applied")
     }
     check(TimeUtil.nowProvider == nil, "clock leaked out of section")
 

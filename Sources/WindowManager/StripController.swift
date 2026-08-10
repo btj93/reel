@@ -924,22 +924,24 @@ public final class StripController: @unchecked Sendable {
         writeLock.unlock()
     }
 
-    /// Restore `tileID` to `frame`, ordered behind any write already queued for its
-    /// app. A direct `setFrame` (as `restoreAllWindows` used to do) runs inline on
-    /// the main thread, so an already-dequeued stale write lands afterwards and
-    /// undoes the restore. Going through the same serial queue makes FIFO ordering
-    /// provide the guarantee no lock can.
-    package func enqueueRestore(tileID: TileID, frame: CGRect) {
+    /// Restore `tileID` to `frame` immediately, revoking any queued write first.
+    ///
+    /// Callers (pause, shutdown, the `recover` IPC command) mean "put this back
+    /// NOW": the write must be complete before the operation is observable. An
+    /// earlier version enqueued this onto the app's serial queue for guaranteed FIFO
+    /// ordering, but that defers the write — at pause the restore then landed AFTER
+    /// the caller had already been told the manager was paused, correcting a window
+    /// a paused manager must leave alone. The smoke suite catches exactly that.
+    ///
+    /// So: revoke, then write inline. Revoking covers the realistic case (a write
+    /// queued but not yet dequeued). A write already dequeued and mid-`apply()` can
+    /// still land afterwards — inherent, since stopping it would mean holding
+    /// `writeLock` across a 100ms AX call. Strictly better than the previous code,
+    /// which revoked nothing.
+    package func restoreFrame(tileID: TileID, frame: CGRect) {
         guard let window = windowMap[tileID] else { return }
-        // Bump first so the stale pending entry is dropped, then enqueue — the new
-        // write reads the post-bump generation and therefore survives the check.
         invalidatePendingWrite(tileID: tileID)
-        let app = apps[window.pid]
-        if let app = app {
-            enqueueWrite(tileID: tileID, app: app) { app.dispatchSetFrame(window, frame: frame) }
-        } else {
-            enqueueWrite(tileID: tileID, app: nil) { window.setFrame(frame) }
-        }
+        _ = window.setFrame(frame)
         lastCommittedFrames[tileID] = frame
     }
 
