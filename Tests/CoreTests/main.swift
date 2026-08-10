@@ -1733,8 +1733,14 @@ do {
     """
     let table = try! TOMLTable(string: toml)
     let config = ReelConfig.load(from: table)
-    assertEq(config.rules.count, 1, "rule should still be added")
-    check(config.rules[0].appIDRegex == nil, "invalid regex should be nil")
+    // RETARGETED (was: count == 1, "rule should still be added"). Keeping the rule
+    // left every predicate nil, so it matched EVERY window — and with floating =
+    // true it floated the entire session. The intent of this section is "an invalid
+    // regex must not crash or be honored", which a dropped rule satisfies; the old
+    // assertion additionally locked in the match-everything behavior. The
+    // `config.rules[0]` check had to go rather than be retargeted: it would index an
+    // empty array.
+    assertEq(config.rules.count, 0, "rule with no usable predicate is dropped, not kept")
 }
 
 // MARK: - IPC Message Round-Trip
@@ -1786,6 +1792,63 @@ do {
         let decoded = try! JSONDecoder().decode(ReelCommand.self, from: encoded)
         check(decoded == cmd, "\(cmd.rawValue) round-trip")
     }
+}
+
+// ============================================================
+// MARK: - Window rule matching
+
+// `if let regex = X, let value = Y` skipped the predicate entirely when the
+// property was nil and fell through to `return true`, so a rule targeting specific
+// apps matched every window whose bundle ID or title could not be read.
+section("rules — unevaluatable predicates fail closed")
+do {
+    let r = WindowRule(appIDRegex: "^com\\.apple\\.", classification: .float)
+    check(!r.matches(WindowProperties(bundleIdentifier: nil, title: "x")),
+        "regex rule must not match a window with no bundle ID")
+    check(r.matches(WindowProperties(bundleIdentifier: "com.apple.Safari", title: "x")),
+        "regex rule still matches a real bundle ID")
+    check(!r.matches(WindowProperties(bundleIdentifier: "com.other.App", title: "x")),
+        "regex rule rejects a non-matching bundle ID")
+
+    let t = WindowRule(titleRegex: "^Prefs", classification: .float)
+    check(!t.matches(WindowProperties(bundleIdentifier: "a.b", title: nil)),
+        "title rule must not match a window with no title")
+    check(t.matches(WindowProperties(bundleIdentifier: "a.b", title: "Prefs — General")),
+        "title rule still matches a real title")
+
+    let empty = WindowRule(classification: .float)
+    check(!empty.matches(WindowProperties(bundleIdentifier: "a.b", title: "x")),
+        "predicate-free rule matches nothing")
+}
+
+// A rule whose only predicate is an invalid regex used to be kept with all
+// predicates nil — matching every window, and with floating = true floating
+// everything.
+section("rules — a rule whose only predicate is invalid is dropped")
+do {
+    let toml = """
+    [[rules]]
+    app_id_regex = "[invalid("
+    floating = true
+    """
+    let table = try! TOMLTable(string: toml)
+    let config = ReelConfig.load(from: table)
+    assertEq(config.rules.count, 0, "predicate-free rule must not be kept")
+}
+
+section("rules — a partially-valid rule keeps its surviving predicate")
+do {
+    let toml = """
+    [[rules]]
+    app_id = "com.example.App"
+    title_regex = "[invalid("
+    floating = true
+    """
+    let table = try! TOMLTable(string: toml)
+    let config = ReelConfig.load(from: table)
+    assertEq(config.rules.count, 1, "rule survives on its valid app_id")
+    check(config.rules[0].titleRegex == nil, "invalid title regex dropped")
+    assertEq(config.rules[0].appID, "com.example.App", "app_id retained")
 }
 
 // ============================================================

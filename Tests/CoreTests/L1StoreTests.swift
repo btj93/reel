@@ -89,6 +89,81 @@ func runL1StoreTests() {
         }
     }
 
+    // A debounced capture that fires after a clear re-creates the snapshot from the
+    // live strip and persists it, so `reel-msg clear-positions` silently undid
+    // itself ~1s later. Asserted via introspection rather than sleeping out the real
+    // debounce, so the check stays deterministic.
+    // The capture-time lookup must stay lenient about LIVE fingerprint drift (one
+    // window closing shifts the fingerprint) while refusing the reader's sole-entry
+    // disk bypass, which would import a foreign Space's slots as ghosts.
+    section("strict capture lookup — survives live fingerprint drift")
+    do {
+        withTempStore { _, filePath in
+            let store = StripSnapshotStore(filePath: filePath)
+            let key = SnapshotKey(groupID: [1], spaceFingerprint: [10, 11, 12])
+            store.save(StripSnapshot(slots: [
+                makeSlot(bundleID: "com.a", title: "A"),
+            ], lastUpdated: fixedDate), for: key)
+
+            // One window closed: 2/3 Jaccard > 0.5, so the live snapshot must hit.
+            let drifted = store.snapshotStrictByBundleIDs(
+                groupID: [1], fingerprint: [10, 11], currentBundleIDs: ["com.a"])
+            check(drifted != nil, "live snapshot survives fingerprint drift")
+        }
+    }
+
+    section("strict capture lookup — refuses a foreign sole disk entry")
+    do {
+        withTempStore { _, filePath in
+            let store = StripSnapshotStore(filePath: filePath)
+            store.save(StripSnapshot(slots: [
+                makeSlot(bundleID: "com.a", title: "A"),
+            ], lastUpdated: fixedDate), for: SnapshotKey(groupID: [1], spaceFingerprint: [10, 11]))
+            store.persistToDisk()
+
+            let reloaded = StripSnapshotStore(filePath: filePath)
+            reloaded.loadFromDisk()
+            // Disjoint fingerprint AND disjoint bundle set: the lenient reader would
+            // still take this as the group's only disk entry.
+            let foreign = reloaded.snapshotStrictByBundleIDs(
+                groupID: [1], fingerprint: [90, 91], currentBundleIDs: ["com.zzz"])
+            check(foreign == nil, "strict lookup refuses a non-matching sole disk entry")
+            // The lenient reader deliberately still accepts it — unchanged behavior.
+            let lenient = reloaded.snapshotFuzzyByBundleIDs(
+                groupID: [1], fingerprint: [90, 91], currentBundleIDs: ["com.zzz"])
+            check(lenient != nil, "reader's sole-entry bypass is left intact")
+        }
+    }
+
+    section("clearAll cancels pending debounced captures")
+    do {
+        withTempStore { _, filePath in
+            let store = StripSnapshotStore(filePath: filePath)
+            let key = SnapshotKey(groupID: [1], spaceFingerprint: [10, 20])
+            store.scheduleSnapshotSave(key: key) {
+                StripSnapshot(slots: [makeSlot(bundleID: "com.a", title: "A")], lastUpdated: fixedDate)
+            }
+            assertEq(store.debugPendingDebounceCount, 1, "a capture is pending")
+            store.clearAll()
+            assertEq(store.debugPendingDebounceCount, 0, "clearAll cancelled the pending capture")
+            assertEq(store.count, 0, "nothing live after clear")
+        }
+    }
+
+    section("clear(bundleID:) cancels pending debounced captures")
+    do {
+        withTempStore { _, filePath in
+            let store = StripSnapshotStore(filePath: filePath)
+            let key = SnapshotKey(groupID: [1], spaceFingerprint: [10, 20])
+            store.scheduleSnapshotSave(key: key) {
+                StripSnapshot(slots: [makeSlot(bundleID: "com.a", title: "A")], lastUpdated: fixedDate)
+            }
+            assertEq(store.debugPendingDebounceCount, 1, "a capture is pending")
+            store.clear(bundleID: "com.a")
+            assertEq(store.debugPendingDebounceCount, 0, "clear(bundleID:) cancelled the pending capture")
+        }
+    }
+
     section("SnapshotKey normalizes groupID ordering (unsorted key still hits)")
     do {
         withTempStore { _, filePath in

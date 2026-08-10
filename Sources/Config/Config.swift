@@ -418,6 +418,14 @@ extension ReelConfig {
                         }
                     }
                     if let v = readBool(rule["floating"]) { rc.floating = v }
+                    // Drop predicate-free rules. A rule whose only predicate was an
+                    // invalid regex ends up with everything nil, which matches every
+                    // window — with floating = true, that floats the whole session.
+                    guard rc.appID != nil || rc.appIDRegex != nil || rc.titleRegex != nil else {
+                        print("[Config] Warning: [[rules]] entry has no usable app_id/app_id_regex/title_regex — ignoring")
+                        fflush(stdout)
+                        continue
+                    }
                     config.rules.append(rc)
                 }
             }

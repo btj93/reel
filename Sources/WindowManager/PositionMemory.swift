@@ -298,13 +298,67 @@ public class StripSnapshotStore {
 
     // MARK: - Clear
 
+    /// Capture-time lookup: same live matching as the general reader, stricter disk
+    /// selection.
+    ///
+    /// Live matching MUST stay fuzzy — closing a single window shifts the
+    /// fingerprint, so an exact-key-only check would drop the live snapshot and lose
+    /// its ghost slots on the very next capture.
+    ///
+    /// Disk selection drops `snapshotFuzzyByBundleIDs`' sole-entry bypass (which
+    /// accepts a group's only entry regardless of similarity). That leniency is
+    /// deliberate for the reader — pinned by "disk-entry scan — single entry matches
+    /// regardless of score" — but a *writer* that adopts a non-matching entry
+    /// persists another Space's layout as ghosts.
+    public func snapshotStrictByBundleIDs(
+        groupID: [UInt32],
+        fingerprint: Set<UInt32>,
+        currentBundleIDs: Set<String>
+    ) -> StripSnapshot? {
+        let key = SnapshotKey(groupID: groupID, spaceFingerprint: fingerprint)
+        if let snap = liveSnapshots[key] { return snap }
+
+        var bestLive: (snapshot: StripSnapshot, score: Double)?
+        for (liveKey, snap) in liveSnapshots where liveKey.groupID == key.groupID {
+            let score = jaccardSimilarity(liveKey.spaceFingerprint, fingerprint)
+            if score > 0.5, score > (bestLive?.score ?? 0) { bestLive = (snap, score) }
+        }
+        if let bestLive { return bestLive.snapshot }
+
+        var bestDisk: (snapshot: StripSnapshot, score: Double)?
+        for entry in diskEntries where entry.groupID == key.groupID {
+            let score = jaccardSimilarityStrings(Set(entry.spaceSignature), currentBundleIDs)
+            if score > 0.5, score > (bestDisk?.score ?? 0) { bestDisk = (entry.snapshot, score) }
+        }
+        return bestDisk?.snapshot
+    }
+
+    /// Debug-introspection: number of scheduled-but-unfired debounced captures.
+    /// Lets tests assert cancellation deterministically instead of sleeping out the
+    /// real 1s debounce.
+    package var debugPendingDebounceCount: Int { pendingDebounces.count }
+
+    /// Cancel every scheduled debounced capture.
+    ///
+    /// Without this a 1s-debounced capture fires after a clear, re-creates the
+    /// snapshot from the live strip, and persists it — so `reel-msg clear-positions`
+    /// appeared to work and then silently undid itself. `saveImmediate` already
+    /// cancels its own key; clears must cancel all of them, since a pending capture
+    /// for any key can reintroduce the cleared state.
+    private func cancelPendingDebounces() {
+        for (_, work) in pendingDebounces { work.cancel() }
+        pendingDebounces.removeAll()
+    }
+
     public func clearAll() {
+        cancelPendingDebounces()
         liveSnapshots.removeAll()
         diskEntries.removeAll()
         isDirty = true
     }
 
     public func clear(bundleID: String) {
+        cancelPendingDebounces()
         for key in liveSnapshots.keys {
             liveSnapshots[key]?.slots.removeAll { $0.bundleID == bundleID }
         }

@@ -519,14 +519,24 @@ public struct WindowRule: Sendable {
     }
 
     public func matches(_ props: WindowProperties) -> Bool {
+        // Defence in depth: a rule with no predicate must never match everything.
+        // Config also drops these at parse time.
+        if appID == nil, appIDRegex == nil, titleRegex == nil { return false }
+
         if let id = appID, props.bundleIdentifier != id { return false }
 
-        if let regex = appIDRegex, let bundleID = props.bundleIdentifier {
-            guard bundleID.range(of: regex, options: .regularExpression) != nil else { return false }
+        // An unevaluatable predicate is a NON-match. The previous
+        // `if let regex, let value` form skipped the check when the property was
+        // nil and fell through to `return true`, so a rule targeting specific apps
+        // matched every window whose bundle ID or title could not be read.
+        if let regex = appIDRegex {
+            guard let bundleID = props.bundleIdentifier,
+                  bundleID.range(of: regex, options: .regularExpression) != nil else { return false }
         }
 
-        if let regex = titleRegex, let title = props.title {
-            guard title.range(of: regex, options: .regularExpression) != nil else { return false }
+        if let regex = titleRegex {
+            guard let title = props.title,
+                  title.range(of: regex, options: .regularExpression) != nil else { return false }
         }
 
         return true

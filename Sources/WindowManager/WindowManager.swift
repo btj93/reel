@@ -1230,6 +1230,7 @@ public final class WindowManager: @unchecked Sendable {
                 sc: entry.sc,
                 groupID: entry.gid,
                 onScreenIDs: onScreenIDs,
+                onScreenInfos: onScreenWindows,
                 exclude: adoptedByReplay)
             adoptedByReplay.formUnion(adopted)
         }
@@ -1263,7 +1264,7 @@ public final class WindowManager: @unchecked Sendable {
                         else { continue }
                         let props = window.getPropertiesFast()
                         guard !props.isMinimized && !props.isFullscreen else { continue }
-                        let classification = classifyWithRules(props)
+                        let classification = classifyWithRules(props, pid: pid)
                         guard classification == .tile else { continue }
                         tracker.registerTrackedWindow(window)
                         app.observeWindow(window.element)
@@ -1336,7 +1337,7 @@ public final class WindowManager: @unchecked Sendable {
                 let props = window.getPropertiesFast()
                 guard !props.isMinimized && !props.isFullscreen else { continue }
 
-                let classification = classifyWithRules(props)
+                let classification = classifyWithRules(props, pid: pid)
                 guard classification == .tile else { continue }
 
                 tracker.registerTrackedWindow(window)
@@ -1666,9 +1667,16 @@ public final class WindowManager: @unchecked Sendable {
     /// user-floated app into the strip whenever its window first appeared on a
     /// Space other than the startup one (finding #42). Every discovery site now
     /// funnels through here so the rule pass can't drift again.
-    private func classifyWithRules(_ props: WindowProperties) -> WindowClassification {
-        tracker.rules.first(where: { $0.matches(props) })?.classification
-            ?? classifyWindow(props)
+    private func classifyWithRules(_ props: WindowProperties, pid: pid_t) -> WindowClassification {
+        // Enrich the bundle ID before matching. On these discovery paths
+        // `props.bundleIdentifier` can be nil, which is precisely what made the
+        // rule-matching bug reachable — and now that an unevaluatable predicate is a
+        // non-match, leaving it nil would make rules that (accidentally) matched
+        // before stop matching. `pid` comes from the enclosing tracker.apps loop.
+        var p = props
+        if p.bundleIdentifier == nil { p.bundleIdentifier = tracker.apps[pid]?.bundleIdentifier }
+        return tracker.rules.first(where: { $0.matches(p) })?.classification
+            ?? classifyWindow(p)
     }
 
     /// Discover on-screen windows not currently in the strip and add them.
@@ -1708,7 +1716,7 @@ public final class WindowManager: @unchecked Sendable {
                 let props = window.getPropertiesFast()
                 guard !props.isMinimized, !props.isFullscreen else { continue }
 
-                let classification = classifyWithRules(props)
+                let classification = classifyWithRules(props, pid: pid)
 
                 guard classification == .tile else {
                     // Record the negative classification so subsequent sweeps
@@ -2344,11 +2352,22 @@ public final class WindowManager: @unchecked Sendable {
         sc: StripController,
         groupID: GroupID,
         onScreenIDs: Set<UInt32>,
+        onScreenInfos: [CGWindowInfo],
         exclude: Set<UInt32>
     ) -> Set<UInt32> {
         guard config.positionMemory, let snapshotStore else { return [] }
 
-        let currentBundleIDs = Set(tracker.apps.values.compactMap { $0.bundleIdentifier })
+        // Compare against the DESTINATION Space's windows, not every running app.
+        // Using all of tracker.apps made the fuzzy match wildly permissive: any
+        // saved Space whose bundle set was a subset of everything running scored a
+        // hit, so an unrelated Space's layout could be replayed here.
+        //
+        // Deliberately NOT sourced from `tracker.windows` — on a first visit those
+        // windows are untracked, which would zero the set and disable replay
+        // entirely, the very thing this function exists to do.
+        let currentBundleIDs = Set(onScreenInfos
+            .filter { onScreenIDs.contains($0.windowID) }
+            .compactMap { tracker.apps[$0.ownerPID]?.bundleIdentifier })
         guard let snapshot = snapshotStore.snapshotFuzzyByBundleIDs(
             groupID: Array(groupID),
             fingerprint: sc.currentSpaceFingerprint,
@@ -2521,7 +2540,15 @@ public final class WindowManager: @unchecked Sendable {
 
         // Merge ghost slots from previous snapshot
         let key = snapshotStoreKey(for: sc)
-        if let prevSnapshot = snapshotStore?.snapshot(for: key) {
+        // Strict variant: `snapshot(for:)` falls through to a disk scan whose
+        // sole-entry bypass accepts a group's only entry regardless of similarity.
+        // Harmless for a reader, but here we are WRITING — adopting a foreign
+        // entry's slots persists another Space's layout as ghosts. Live matching is
+        // unchanged (still fuzzy, so fingerprint drift keeps hitting).
+        if let prevSnapshot = snapshotStore?.snapshotStrictByBundleIDs(
+            groupID: key.groupID,
+            fingerprint: key.spaceFingerprint,
+            currentBundleIDs: buildCurrentBundleIDs(sc: sc)) {
             let now = Date()
 
             // Phase 1: Re-insert surviving non-expired ghosts from previous snapshot.
