@@ -547,6 +547,15 @@ public final class WindowManager: @unchecked Sendable {
             // Route to the strip under the cursor so windows on the non-active
             // monitor still get the pill-bar menu.
             let sc = self.stripControllerUnderCursor()
+            // Capture the target by STABLE TILE, not by index or by re-resolving the
+            // cursor later. Two bugs were possible otherwise: the selection handlers
+            // acted on the ACTIVE column rather than the clicked one, and they called
+            // stripControllerUnderCursor() a second time — so moving the mouse onto
+            // another display while the menu was open retargeted a different strip.
+            self.pendingMenuTile = columnIndex < sc.strip.columns.count
+                ? (sc.strip.columns[columnIndex].activeTile
+                    ?? sc.strip.columns[columnIndex].tiles.first)
+                : nil
             let pills = sc.buildPillItems(for: columnIndex)
             let appKitY = self.displayManager.primaryScreenHeight - cgMousePoint.y
             let anchorFrame = CGRect(x: cgMousePoint.x, y: appKitY, width: 0, height: 0)
@@ -557,21 +566,32 @@ public final class WindowManager: @unchecked Sendable {
         }
         titleBar.onMenuSelect = { [weak self] (actionIndex: Int) in
             guard let self = self, !self.isPaused else { return }
-            let sc = self.stripControllerUnderCursor()
+            defer {
+                self.pendingMenuTile = nil
+                self.titleBarInteraction?.overlay.hide()
+            }
+            // Re-resolve the clicked column from the tile captured at menu-show, on
+            // the strip that actually owns it. Bail if the window vanished while the
+            // menu was open rather than mutating whatever is active now.
+            guard let tile = self.pendingMenuTile,
+                  let (sc, columnIndex) = self.controllerAndColumn(for: tile)
+            else { return }
             if let action = sc.pillAction(for: actionIndex) {
                 switch action {
                 case .widthPreset(let idx):
-                    sc.setWidthPreset(index: idx)
+                    sc.setWidthPreset(index: idx, column: columnIndex)
                 case .fullWidth:
-                    sc.toggleFullWidth()
+                    sc.toggleFullWidth(column: columnIndex)
                 case .toggleFloat:
-                    // Use the same dispatch path as the hotkey
-                    self.performAction(.toggleFloating)
+                    // Tile-targeted, NOT performAction(.toggleFloating): that acts on
+                    // the active window, and its unfloat branch is the destructive
+                    // wrong-target path.
+                    self.toggleFloating(tileID: tile, sc: sc)
                 }
             }
-            self.titleBarInteraction?.overlay.hide()
         }
         titleBar.onMenuDismiss = { [weak self] in
+            self?.pendingMenuTile = nil
             self?.titleBarInteraction?.overlay.hide()
         }
 
@@ -2980,6 +3000,33 @@ public final class WindowManager: @unchecked Sendable {
             print("[WM] activeDisplayID → \(activeDisplayID)")
             fflush(stdout)
         }
+    }
+
+    /// Tile captured when the pill menu opened, so the selection handler mutates the
+    /// column the user actually clicked — not whatever is active, and not whatever
+    /// strip the cursor has since wandered onto. Cleared on select/dismiss.
+    private var pendingMenuTile: TileID?
+
+    /// Locate the controller and column index owning `tileID`, across all strips.
+    private func controllerAndColumn(for tileID: TileID) -> (StripController, Int)? {
+        for (_, sc) in stripControllers {
+            if let i = sc.strip.columns.firstIndex(where: { $0.tiles.contains(tileID) }) {
+                return (sc, i)
+            }
+        }
+        return nil
+    }
+
+    /// Float one specific tile, preserving the bookkeeping the hotkey path does.
+    /// Deliberately not routed through `performAction(.toggleFloating)`, which acts
+    /// on the active window and whose unfloat branch would target the wrong one.
+    private func toggleFloating(tileID: TileID, sc: StripController) {
+        guard let window = sc.floatWindow(tileID: tileID) else { return }
+        saveSnapshotImmediate(sc: sc)
+        tracker.markFloating(window.windowID)
+        userToggledFloats.insert(window.windowID)
+        print("[WM] Window \(window.tileID.rawValue) is now floating (pill menu)")
+        fflush(stdout)
     }
 
     /// Configured struts converted to the Platform `Struts` type.

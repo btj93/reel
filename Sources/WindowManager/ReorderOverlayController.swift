@@ -26,6 +26,11 @@ final class ReorderOverlayController {
     private var draggedIndex: Int = 0
     private var insertionIndex: Int = 0
     private var isReady: Bool = false
+
+    /// Set when the user released before the async thumbnail capture finished.
+    /// The drop is completed from the capture completion instead of being computed
+    /// against geometry that does not exist yet.
+    private var pendingCommit: Bool = false
     private var bufferedCursorPositions: [CGPoint] = []
 
     /// Monotonic session id. Bumped on every `show()`. A background capture stamps the
@@ -61,6 +66,13 @@ final class ReorderOverlayController {
         thumbnailHeight: Double,
         gap: Double
     ) {
+        // 0. A multi-second press can outlive the layout it started on: focus
+        //    hotkeys, IPC commands and the 500ms health check can all remove columns
+        //    between mouse-down and drag-begin. The caller already computes this
+        //    condition for its own tile lookup but still passes the raw index, and
+        //    `columns[draggedIndex]` below would trap.
+        guard draggedIndex >= 0, draggedIndex < columns.count else { return }
+
         // 1. Tear down any existing overlay immediately (handles drag-during-fade-out).
         if let existing = overlayWindow {
             existing.orderOut(nil)
@@ -81,6 +93,8 @@ final class ReorderOverlayController {
         self.thumbnailHeight = thumbnailHeight
         self.isReady = false
         self.bufferedCursorPositions = []
+        // A superseded drag must not auto-commit into this new session.
+        self.pendingCommit = false
 
         // 3. Build nonDraggedColumns (all columns except the dragged one).
         self.nonDraggedColumns = columns.enumerated().compactMap { i, col in
@@ -177,6 +191,14 @@ final class ReorderOverlayController {
                 for pos in buffered {
                     self.processUpdateCursor(position: pos)
                 }
+
+                // The user released while this capture was still running. Now that
+                // thumbnail geometry exists and the buffered cursor samples have been
+                // replayed into insertionIndex, the drop can be resolved correctly.
+                if self.pendingCommit {
+                    self.pendingCommit = false
+                    self.commitDrop()
+                }
             }
         }
     }
@@ -204,10 +226,29 @@ final class ReorderOverlayController {
     /// By firing `onCommit` up front, the real windows rearrange while the ghost
     /// simply fades in place from the cursor's release position.
     func commitDrop() {
+        // Released before the capture landed: thumbnailMidpoints() is still empty, so
+        // computeInsertionIndex would resolve every buffered cursor sample to the last
+        // gap — a fast drag would commit a confidently wrong index (previously it
+        // committed the unchanged one and the drag silently did nothing). Defer.
+        //
+        // Deliberately does NOT bump `generation`: that would make the in-flight
+        // capture fail its own guard, so isReady would never flip and this deferred
+        // commit would never run.
+        // No live session at all (show() bailed on a vanished column, or the overlay
+        // was already torn down). Fire immediately: deferring here would strand
+        // `pendingCommit` forever, and with it the caller's `isReorderPending` flag,
+        // which gates IPC focus commands.
         guard let window = overlayWindow else {
+            pendingCommit = false
             onCommit?(draggedIndex, insertionIndex)
             return
         }
+
+        guard isReady else {
+            pendingCommit = true
+            return
+        }
+        generation += 1   // ready path only: retire this session
 
         onCommit?(draggedIndex, insertionIndex)
 
@@ -223,6 +264,11 @@ final class ReorderOverlayController {
         // CRITICAL: nil out onCommit before anything else so a late-firing completion
         // from an in-progress animateGhostSettle cannot call moveColumn.
         onCommit = nil
+        // Retire the session so an in-flight capture landing before the fade
+        // completes cannot orderFront a dead overlay, and drop any deferred commit
+        // from an abandoned drag.
+        generation += 1
+        pendingCommit = false
 
         if let window = overlayWindow {
             // Animate ghost back to its original position, then fade out.

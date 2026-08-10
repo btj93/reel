@@ -133,6 +133,16 @@ public final class FocusIndicator: @unchecked Sendable {
     /// Keeps the indicator exactly synchronized with the focused window's computed position.
     public func trackFrame(_ frame: CGRect) {
         guard style == .ring || style == .flash else { return }
+        // A completed flash is one-shot. Reviving it here would order the overlay
+        // front at full alpha (positionOverlay sets alphaValue = 1 whenever no
+        // fadeOut is running) with no easing left to take it away — a permanent
+        // tint over the window, triggered by any post-flash move or resize.
+        //
+        // Note the fix is HERE and not "clear currentFrame when the flash ends":
+        // updateFocusIndicator treats currentFrame == nil as bootstrap and calls
+        // snapTo, which starts a NEW flash — so clearing it would re-flash on every
+        // frame of a continuing scroll.
+        if style == .flash && flashEasing == nil { return }
         // Nothing moved (e.g. another column's raise keeps the loop alive) — skip.
         if frame == currentFrame { return }
         springX = nil; springY = nil; springW = nil; springH = nil

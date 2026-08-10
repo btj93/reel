@@ -32,6 +32,56 @@ func runSimFocus() {
         _ = clock
     }
 
+    // The pill menu builds its items for the fn-clicked column but applied them to
+    // the ACTIVE column, so clicking a non-active column mutated the wrong window.
+    section("width preset applies to the targeted column, not the active one")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        addFakeWindows(sc, count: 3, width: 700)
+        sc.strip.activeColumnIndex = 0
+        sc.setWidthPreset(index: 2, column: 2)
+        assertEq(sc.strip.columns[2].presetIndex, 2, "targeted column got the preset")
+        assertEq(sc.strip.columns[0].presetIndex, nil, "active column untouched")
+        assertEq(sc.strip.activeColumnIndex, 0, "a query-then-mutate menu must not steal focus")
+        _ = clock
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    section("toggleFullWidth applies to the targeted column, not the active one")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        addFakeWindows(sc, count: 3, width: 700)
+        sc.strip.activeColumnIndex = 0
+        sc.toggleFullWidth(column: 2)
+        check(sc.strip.columns[2].isFullWidth, "targeted column went full-width")
+        check(!sc.strip.columns[0].isFullWidth, "active column untouched")
+        assertEq(sc.strip.activeColumnIndex, 0, "focus unchanged")
+        _ = clock
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    // Column X is derived from cumulative widths, so resizing a column LEFT of the
+    // active one shifts the active column's strip-space X. Without a re-pin the
+    // focused window visibly slides even though nothing about it changed.
+    section("resizing a column left of the active one keeps the active column pinned")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        let (_, wins) = addFakeWindows(sc, count: 3, width: 700)
+        sc.strip.activeColumnIndex = 2
+        sc.strip.viewOffset = .static(sc.strip.snapTargetForActive(at: clock.t))
+        sc.applyLayout()
+        let activeBefore = wins[2].currentFrame
+
+        sc.setWidthPreset(index: 0, column: 0)   // shrink a column to the LEFT
+
+        assertClose(Double(wins[2].currentFrame.minX), Double(activeBefore.minX), tolerance: 2,
+            "active column stays put when a left-side column resizes")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
     // ---- focus left / right ----
     section("focus left/right — activeColumnIndex + centered fake frame")
     do {

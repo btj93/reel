@@ -468,15 +468,29 @@ public final class StripController: @unchecked Sendable {
         }
     }
 
-    package func setWidthPreset(index: Int) {
+    /// `column` targets a specific column (the pill menu's clicked one); nil means
+    /// the active column, as the hotkey path expects.
+    package func setWidthPreset(index: Int, column: Int? = nil) {
         // See cycleWidthPreset: the animated branch indexes columnData directly.
         guard !strip.columns.isEmpty else { return }
         let time = TimeUtil.now()
         strip.setWidthPreset(
             index: index,
             at: time,
-            params: animationEnabled ? widthSpringParams : nil
+            params: animationEnabled ? widthSpringParams : nil,
+            column: column
         )
+        let target = column ?? strip.activeColumnIndex
+        guard target == strip.activeColumnIndex else {
+            // A non-active column changed width. Column X is DERIVED from cumulative
+            // widths, so a left-side resize shifts the active column's strip-space X
+            // and the focused window would visibly slide. Re-pin it. Safe to call
+            // unconditionally: recenterActiveColumn computes an absolute snap target,
+            // so it is idempotent and cannot double-shift viewOffset.
+            strip.recenterActiveColumn(at: time)
+            applyLayout()
+            return
+        }
         if animationEnabled {
             let targetWidth = strip.columnData[strip.activeColumnIndex].cachedWidth
             let _ = strip.recenterActiveColumnAnimated(at: time, columnWidth: targetWidth)
@@ -489,9 +503,17 @@ public final class StripController: @unchecked Sendable {
         }
     }
 
-    public func toggleFullWidth() {
+    /// `column` targets a specific column; nil means the active column.
+    public func toggleFullWidth(column: Int? = nil) {
         let time = TimeUtil.now()
-        strip.toggleFullWidth(at: time)
+        strip.toggleFullWidth(at: time, column: column)
+        let target = column ?? strip.activeColumnIndex
+        guard target == strip.activeColumnIndex else {
+            // See setWidthPreset: re-pin the active column against the derived-X shift.
+            strip.recenterActiveColumn(at: time)
+            applyLayout()
+            return
+        }
         if animationEnabled {
             // Apply layout immediately so the window resizes right away,
             // then animate the scroll to recenter the column.
@@ -522,6 +544,15 @@ public final class StripController: @unchecked Sendable {
               let window = windowMap[activeTile] else { return nil }
 
         removeWindow(tileID: activeTile)
+        return window
+    }
+
+    /// Float a specific tile (the pill menu's clicked one) rather than the active
+    /// one. Tile→float direction only: the menu is built from a tiled column, so it
+    /// can never target an already-floating window.
+    public func floatWindow(tileID: TileID) -> AXWindow? {
+        guard let window = windowMap[tileID] else { return nil }
+        removeWindow(tileID: tileID)
         return window
     }
 

@@ -780,9 +780,15 @@ public struct Strip: Sendable {
 
     /// Set the active column's width to a specific preset index.
     /// Follows the same pattern as cycleWidthPreset: nils widthAnimation, sets cachedWidth.
-    public mutating func setWidthPreset(index presetIndex: Int, at time: Double, params: SpringParams?) {
+    /// `column` targets a specific column; nil means the active one. Declared
+    /// optional rather than `= activeColumnIndex` because Swift forbids instance
+    /// members in default-argument expressions.
+    public mutating func setWidthPreset(
+        index presetIndex: Int, at time: Double, params: SpringParams?, column: Int? = nil
+    ) {
         guard !columns.isEmpty, presetIndex >= 0, presetIndex < widthPresets.count else { return }
-        let i = activeColumnIndex
+        let i = column ?? activeColumnIndex
+        guard i >= 0, i < columns.count else { return }
         let region = regionForColumn(i, at: time)
         let newWidth = widthPresets[presetIndex]
             .resolve(workingAreaWidth: Double(region.rect.width), gap: gap)
@@ -803,18 +809,21 @@ public struct Strip: Sendable {
     }
 
     /// Toggle the active column to/from full-width mode.
-    public mutating func toggleFullWidth(at time: Double) {
+    /// `column` targets a specific column; nil means the active one.
+    public mutating func toggleFullWidth(at time: Double, column: Int? = nil) {
         guard !columns.isEmpty else { return }
-        columnData[activeColumnIndex].widthAnimation = nil
-        columnData[activeColumnIndex].raiseAnimation = nil
-        let isCurrentlyFull = columns[activeColumnIndex].isFullWidth
-        columns[activeColumnIndex].isFullWidth = !isCurrentlyFull
-        let region = regionForColumn(activeColumnIndex, at: time)
+        let i = column ?? activeColumnIndex
+        guard i >= 0, i < columns.count else { return }
+        columnData[i].widthAnimation = nil
+        columnData[i].raiseAnimation = nil
+        let isCurrentlyFull = columns[i].isFullWidth
+        columns[i].isFullWidth = !isCurrentlyFull
+        let region = regionForColumn(i, at: time)
         if !isCurrentlyFull {
-            columnData[activeColumnIndex].cachedWidth = Double(region.rect.width)
+            columnData[i].cachedWidth = Double(region.rect.width)
         } else {
-            let width = columns[activeColumnIndex].width
-            columnData[activeColumnIndex].cachedWidth = width.resolve(
+            let width = columns[i].width
+            columnData[i].cachedWidth = width.resolve(
                 workingAreaWidth: Double(region.rect.width), gap: gap
             )
         }
