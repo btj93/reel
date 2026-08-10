@@ -19,11 +19,25 @@ public struct DisplayInfo: Sendable {
         // Convert visibleFrame from AppKit (bottom-left) to CG (top-left) coordinates
         let cgY = primaryScreenHeight - visibleFrame.maxY
 
+        // Clamp each inset pair against its own dimension. Subtracting unclamped
+        // struts inverts the rect (negative size) and pushes the origin past the
+        // display, which yields off-screen placement and zero-width resolution.
+        // The config parser caps each side at 512, but two opposing 512s still
+        // exceed the usable height of a 1440x900 panel — and any width below 1024.
+        // NOTE: guard on `size`, not `.width`/`.height`; CGRect's accessors
+        // standardize, so an inverted rect silently reports positive dimensions.
+        let maxW = max(0, visibleFrame.width)
+        let maxH = max(0, visibleFrame.height)
+        let left = min(max(0, struts.left), maxW)
+        let right = min(max(0, struts.right), maxW - left)
+        let top = min(max(0, struts.top), maxH)
+        let bottom = min(max(0, struts.bottom), maxH - top)
+
         return CGRect(
-            x: visibleFrame.minX + struts.left,
-            y: cgY + struts.top,
-            width: visibleFrame.width - struts.left - struts.right,
-            height: visibleFrame.height - struts.top - struts.bottom
+            x: visibleFrame.minX + left,
+            y: cgY + top,
+            width: maxW - left - right,
+            height: maxH - top - bottom
         )
     }
 

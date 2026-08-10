@@ -128,6 +128,45 @@ func runL1GroupAreaTests() {
         assertClose(Double(ga.referenceMidX), 715, tolerance: 0.01, "referenceMidX reflects struts")
     }
 
+    // Struts are capped per-side at 512 by the config parser, but two opposing
+    // 512s still exceed the usable height of a 1440x900 panel. Subtracting them
+    // unclamped inverts the rect: negative height, and an origin past the display.
+    section("oversized struts stay inside the display")
+    do {
+        let displays: [CGDirectDisplayID: DisplayInfo] = [
+            1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900))
+        ]
+        let ga = DisplayManager.groupWorkingArea(
+            members: [1], displays: displays, mainDisplayID: 1,
+            struts: Struts(left: 0, right: 0, top: 512, bottom: 512),
+            primaryScreenHeight: 900)
+        let r = ga.regions[0].rect
+        // Assert on `size`, NOT `.width`/`.height`: CGRect's accessors standardize,
+        // so a rect built with size.height = -124 reports height == 124 and would
+        // hide the inversion entirely.
+        check(r.size.height >= 0, "height not inverted (got size.height=\(r.size.height))")
+        check(r.size.width >= 0, "width not inverted (got size.width=\(r.size.width))")
+        check(r.origin.y >= 0 && r.origin.y + r.size.height <= 900,
+            "stays within display vertically (origin.y=\(r.origin.y) h=\(r.size.height))")
+    }
+
+    // Same inversion on the horizontal axis needs a narrow panel, since the 512
+    // per-side cap cannot exceed a 1440-wide display on its own.
+    section("oversized horizontal struts do not invert a narrow display")
+    do {
+        let displays: [CGDirectDisplayID: DisplayInfo] = [
+            1: makeDisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        ]
+        let ga = DisplayManager.groupWorkingArea(
+            members: [1], displays: displays, mainDisplayID: 1,
+            struts: Struts(left: 512, right: 512, top: 0, bottom: 0),
+            primaryScreenHeight: 600)
+        let r = ga.regions[0].rect
+        check(r.size.width >= 0, "width not inverted (got size.width=\(r.size.width))")
+        check(r.origin.x >= 0 && r.origin.x + r.size.width <= 800,
+            "stays within display horizontally (origin.x=\(r.origin.x) w=\(r.size.width))")
+    }
+
     // A three-display transitive chain, members shuffled, confirms full
     // left-to-right ordering (not just a swap of two).
     section("three-display chain — full ordering by X")

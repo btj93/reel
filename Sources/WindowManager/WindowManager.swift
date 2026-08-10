@@ -822,10 +822,30 @@ public final class WindowManager: @unchecked Sendable {
             snapshotStore?.loadFromDisk()
         }
 
-        // Relayout
-        stripController.strip.recalculateWidths(at: TimeUtil.now())
-        stripController.clearCommittedFrames()
-        stripController.applyLayout()
+        // Relayout EVERY strip against the freshly-loaded struts/gap/widths, not
+        // just the active one — on multi-monitor the others kept stale geometry
+        // until something else happened to touch them.
+        //
+        // The DisplayInfo guard is required: building a GroupWorkingArea for a
+        // member with no live DisplayInfo (display asleep, KVM switched) traps in
+        // GroupWorkingArea's initializer. Such a group still gets its widths
+        // recalculated and re-laid-out, just against its existing area.
+        let reloadTime = TimeUtil.now()
+        let struts = currentStruts
+        for (gid, sc) in stripControllers {
+            if gid.allSatisfy({ displayManager.displays[$0] != nil }) {
+                sc.primaryScreenHeight = displayManager.primaryScreenHeight
+                sc.updateGroupArea(currentGroupArea(
+                    for: gid,
+                    displays: displayManager.displays,
+                    struts: struts,
+                    primaryScreenHeight: displayManager.primaryScreenHeight
+                ))
+            }
+            sc.strip.recalculateWidths(at: reloadTime)
+            sc.clearCommittedFrames()
+            sc.applyLayout()
+        }
 
         print(
             "[WM] Config reloaded (gestureSnap=\(config.gestureSnap), snap=\(config.snapPoints))"
@@ -2710,13 +2730,12 @@ public final class WindowManager: @unchecked Sendable {
         let persistingGIDs = oldGroupIDs.intersection(newGroupIDs)
 
         // Helper: build a GroupWorkingArea for a group of display IDs.
-        // Delegates to the pure `DisplayManager.groupWorkingArea` (unit-tested);
-        // this closure just binds the reconcile-local inputs.
+        // Binds the reconcile-local inputs to the shared `currentGroupArea` so
+        // reloadConfig and this path can never diverge on strut→geometry handling.
         func buildGroupArea(for members: [CGDirectDisplayID]) -> GroupWorkingArea {
-            DisplayManager.groupWorkingArea(
-                members: members,
+            currentGroupArea(
+                for: members,
                 displays: newDisplays,
-                mainDisplayID: displayManager.mainDisplay?.displayID,
                 struts: struts,
                 primaryScreenHeight: primaryH
             )
@@ -2762,9 +2781,6 @@ public final class WindowManager: @unchecked Sendable {
                 sc.setSpaceFingerprint(fp)
             }
             stripControllers[gid] = sc
-            for did in gid {
-                displayToGroup[did] = gid
-            }
 
             if predecessors.isEmpty {
                 rehomeWindows(onto: sc, newGroupID: gid)
@@ -2877,12 +2893,20 @@ public final class WindowManager: @unchecked Sendable {
 
             dyingSC.focusIndicator.hide()
             stripControllers.removeValue(forKey: gid)
-            for did in gid {
-                displayToGroup.removeValue(forKey: did)
-            }
             print("[WM] group removed: \(gid)")
             fflush(stdout)
         }
+
+        // Rebuild the display→group routing in one pass. Doing this inline in the
+        // add/remove loops deleted the entries the add step had just written: for a
+        // merge ([A]+[B] → [A,B]) or a split, every affected display ended up
+        // unroutable while its controller was alive. `reconcileDisplayMap` installs
+        // successors first and prunes only entries still pointing at a dying group.
+        displayToGroup = reconcileDisplayMap(
+            current: displayToGroup,
+            added: Array(addedGIDs),
+            removed: Array(removedGIDs)
+        )
 
         // 4. Snap activeDisplayID to a live display if its group vanished.
         let hasLiveGroup: Bool
@@ -2898,6 +2922,35 @@ public final class WindowManager: @unchecked Sendable {
             print("[WM] activeDisplayID → \(activeDisplayID)")
             fflush(stdout)
         }
+    }
+
+    /// Configured struts converted to the Platform `Struts` type.
+    private var currentStruts: Struts {
+        Struts(
+            left: CGFloat(config.struts.left),
+            right: CGFloat(config.struts.right),
+            top: CGFloat(config.struts.top),
+            bottom: CGFloat(config.struts.bottom)
+        )
+    }
+
+    /// Build a `GroupWorkingArea` for `members`. Delegates to the pure,
+    /// unit-tested `DisplayManager.groupWorkingArea`. Shared by
+    /// `reconcileDisplayTopology` and `reloadConfig` so there is exactly one
+    /// strut→geometry path.
+    private func currentGroupArea(
+        for members: [CGDirectDisplayID],
+        displays: [CGDirectDisplayID: DisplayInfo],
+        struts: Struts,
+        primaryScreenHeight: CGFloat
+    ) -> GroupWorkingArea {
+        DisplayManager.groupWorkingArea(
+            members: members,
+            displays: displays,
+            mainDisplayID: displayManager.mainDisplay?.displayID,
+            struts: struts,
+            primaryScreenHeight: primaryScreenHeight
+        )
     }
 
     /// Apply current config state + frame loop to a fresh StripController.
