@@ -269,6 +269,59 @@ func runSimAnim() {
         check(abs(anim.initialVelocity) > 0, "bounce carries a kick velocity derived from bounceDistance")
     }
 
+    // The settle latch was only cleared by an intervening frame tick, so a
+    // begin/end pair completed inside one frame kept the previous `true` and the
+    // settle branch — which performs the snap — was skipped entirely. Snapping thus
+    // depended on display-link timing. Both variants must snap.
+    section("slow release with gestureSnap snaps, with and without an intervening tick")
+    do {
+        for withTick in [false, true] {
+            let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+            let sc = makeSC(animationEnabled: true)
+            sc.gestureSnap = true
+            addFakeWindows(sc, count: 3, width: 700)
+            sc.strip.activeColumnIndex = 1
+            sc.strip.viewOffset = .static(sc.strip.snapTargetForActive(at: clock.t))
+            sc.applyLayout()
+            // Force the latch true, as a prior settle would leave it.
+            clock.advance(1.0 / 60); sc.handleFrameTick(time: clock.t)
+
+            sc.handleGestureBegin(time: clock.t)
+            if withTick { clock.advance(1.0 / 60); sc.handleFrameTick(time: clock.t) }
+            sc.handleGestureUpdate(deltaX: -40, time: clock.t)
+            clock.advance(0.3)   // slow release: velocity decays below the 50 threshold
+            sc.handleGestureEnd(time: clock.t)
+            settle(sc, clock)
+
+            assertClose(sc.strip.viewOffset.current(at: clock.t),
+                sc.strip.snapTargetForActive(at: clock.t), tolerance: 1.0,
+                "slow release snaps (intervening tick: \(withTick))")
+        }
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    section("slow release without gestureSnap keeps the dropped offset")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC(animationEnabled: true)
+        sc.gestureSnap = false
+        addFakeWindows(sc, count: 3, width: 700)
+        sc.strip.activeColumnIndex = 1
+        sc.strip.viewOffset = .static(sc.strip.snapTargetForActive(at: clock.t))
+        sc.applyLayout()
+
+        sc.handleGestureBegin(time: clock.t)
+        sc.handleGestureUpdate(deltaX: -37, time: clock.t)
+        clock.advance(0.3)
+        sc.handleGestureEnd(time: clock.t)
+        let dropped = sc.strip.viewOffset.current(at: clock.t)
+        settle(sc, clock)
+
+        assertClose(sc.strip.viewOffset.current(at: clock.t), dropped, tolerance: 1.0,
+            "free-scroll drop is not teleported to a snap point")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
     // ---- AX write lifecycle ----
     // A queued write carries its target frame baked in at enqueue time. When the
     // controller loses ownership of a tile (removal, float, Space replacement) no

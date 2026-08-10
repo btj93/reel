@@ -792,13 +792,12 @@ public final class StripController: @unchecked Sendable {
             startRaiseAnimations(oldColumn: oldActive, newColumn: colIndex, at: time)
             strip.snapIndices[colIndex] = strip.defaultSnapIndex
 
-            let snapPoint = strip.snapPoints[strip.snapIndices[colIndex]]
-            let newOffset = computeSnapOffset(
-                snapPoint: snapPoint,
-                columnWidth: strip.columnData[colIndex].currentWidth(at: time),
-                workingAreaWidth: strip.workingArea.width
-            )
-            strip.viewOffset = .static(newOffset)
+            // Region-aware: snapTarget centres the column in its OWNING display and
+            // subtracts the region offset. computeSnapOffset against
+            // workingArea.width used the whole merged span, so on a shared strip the
+            // column landed in the seam between displays. snapIndices was just set
+            // above and the width animation cleared, so this reads the same inputs.
+            strip.viewOffset = .static(strip.snapTarget(forColumn: colIndex, at: time))
             applyLayout()
 
         case .incrementalSnap:
@@ -1231,6 +1230,11 @@ public final class StripController: @unchecked Sendable {
         fflush(stdout)
         #endif
         strip.viewOffset = .gesture(GestureState(currentOffset: current, isTouchpad: true))
+        // Reset the settle latch deterministically. It is otherwise only cleared by
+        // an intervening frame tick, so a begin/end pair completed inside one frame
+        // left it true from the previous settle — the settle branch was skipped and
+        // the release never snapped. Timing-dependent snapping, in other words.
+        scrollWidthSettled = false
         frameLoop?.resume()
     }
 
@@ -1266,7 +1270,12 @@ public final class StripController: @unchecked Sendable {
                 // Determine target column for snap calculation (but don't change focus yet)
                 let targetColumn = columnUnderCursor(gestureOffset: state.currentOffset)
                 let colWidth = strip.columnData[targetColumn].currentWidth(at: time)
-                let wa = strip.workingArea.width
+                // Owning region, not the whole group span. `workingArea.width` on a
+                // merged two-display strip is the COMBINED width, so computeSnapOffset
+                // centred the column across both displays and dropped it in the seam.
+                let region = strip.regionForColumn(targetColumn, at: time)
+                let wa = Double(region.rect.width)
+                let regionOffset = Double(region.rect.minX - strip.groupArea.totalSpan.minX)
 
                 // computeSnapOffset returns offsets assuming the target column IS the
                 // active column. Translate into the current activeColumnIndex coordinate
@@ -1277,20 +1286,20 @@ public final class StripController: @unchecked Sendable {
                 let (snapIdx, rawSnapOffset): (Int, Double)
                 if velocity > 0 {
                     (snapIdx, rawSnapOffset) = nextSnapMilestoneRight(
-                        currentOffset: state.currentOffset - columnDelta,
+                        currentOffset: state.currentOffset - columnDelta + regionOffset,
                         snapPoints: strip.snapPoints,
                         columnWidth: colWidth,
                         workingAreaWidth: wa
                     )
                 } else {
                     (snapIdx, rawSnapOffset) = nextSnapMilestoneLeft(
-                        currentOffset: state.currentOffset - columnDelta,
+                        currentOffset: state.currentOffset - columnDelta + regionOffset,
                         snapPoints: strip.snapPoints,
                         columnWidth: colWidth,
                         workingAreaWidth: wa
                     )
                 }
-                let snapOffset = rawSnapOffset + columnDelta
+                let snapOffset = rawSnapOffset - regionOffset + columnDelta
                 // Store snap index for the target column — will be applied when focus moves on settle
                 strip.snapIndices[targetColumn] = snapIdx
 
@@ -1352,6 +1361,13 @@ public final class StripController: @unchecked Sendable {
             strip.viewOffset = .static(adjustedOffset)
             clearCommittedFrames()
             applyLayout()
+            // Free scroll is a deliberate drop wherever the user let go. Mark the
+            // settle work done so the latch's snapTargetForActive lock-in cannot
+            // teleport it to a snap point on the next tick. Safe because
+            // clearCommittedFrames() above forces applyLayout to rewrite every tile,
+            // including the off-screen slivers the latch's own applyLayout exists to
+            // dispatch. With gestureSnap the latch SHOULD run, so leave it alone.
+            if !gestureSnap { scrollWidthSettled = true }
         }
     }
 

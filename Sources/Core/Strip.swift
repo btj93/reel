@@ -433,26 +433,32 @@ public struct Strip: Sendable {
         let viewPosAtAdjusted = cachedColumnX(at: colIndex) + adjustedOffset
         let colRegion = regionForColumn(colIndex, viewPos: viewPosAtAdjusted)
         let colRegionWidth = Double(colRegion.rect.width)
+        // Offset of the owning region within the group. The milestone helpers work
+        // in region-local space, but viewOffset is group-global: without this the
+        // target is short by the region offset and the column snaps onto the
+        // neighbouring display. Same basis `snapTarget` uses.
+        let colRegionOffset = Double(colRegion.rect.minX - groupArea.totalSpan.minX)
 
         // Pick direction of travel & find first unreached milestone.
-        let (snapIdx, targetOffset): (Int, Double)
+        let (snapIdx, rawSnapTarget): (Int, Double)
         if colRightOnScreen + Double(workingArea.minX) > Double(colRegion.rect.maxX) {
             // Column extends past the right edge of its region → slide leftward on screen.
-            (snapIdx, targetOffset) = nextSnapMilestoneLeft(
-                currentOffset: adjustedOffset,
+            (snapIdx, rawSnapTarget) = nextSnapMilestoneLeft(
+                currentOffset: adjustedOffset + colRegionOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
                 workingAreaWidth: colRegionWidth
             )
         } else {
             // Column extends past the left edge of its region → slide rightward on screen.
-            (snapIdx, targetOffset) = nextSnapMilestoneRight(
-                currentOffset: adjustedOffset,
+            (snapIdx, rawSnapTarget) = nextSnapMilestoneRight(
+                currentOffset: adjustedOffset + colRegionOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
                 workingAreaWidth: colRegionWidth
             )
         }
+        let targetOffset = rawSnapTarget - colRegionOffset
         snapIndices[colIndex] = snapIdx
 
         // If target is the same as adjusted (already on a snap line somehow), just static.
@@ -499,13 +505,16 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
-            let (snapIdx, targetOffset) = nextSnapMilestoneLeft(
-                currentOffset: adjustedOffset,
+            let basis = regionSnapBasis(for: activeColumnIndex, at: adjustedOffset)
+            let (snapIdx, rawSnapTarget) = nextSnapMilestoneLeft(
+                currentOffset: adjustedOffset + basis.regionOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: regionWidth
+                workingAreaWidth: basis.width
             )
+            // Milestone is computed in the owning region's local space; translate
+            // it back to group-global before it becomes a viewOffset.
+            let targetOffset = rawSnapTarget - basis.regionOffset
             snapIndices[activeColumnIndex] = snapIdx
             return createFocusChangeAnimation(from: adjustedOffset, to: targetOffset, at: time)
         } else {
@@ -533,13 +542,16 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
-            let (snapIdx, targetOffset) = nextSnapMilestoneRight(
-                currentOffset: adjustedOffset,
+            let basis = regionSnapBasis(for: activeColumnIndex, at: adjustedOffset)
+            let (snapIdx, rawSnapTarget) = nextSnapMilestoneRight(
+                currentOffset: adjustedOffset + basis.regionOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: regionWidth
+                workingAreaWidth: basis.width
             )
+            // Milestone is computed in the owning region's local space; translate
+            // it back to group-global before it becomes a viewOffset.
+            let targetOffset = rawSnapTarget - basis.regionOffset
             snapIndices[activeColumnIndex] = snapIdx
             return createFocusChangeAnimation(from: adjustedOffset, to: targetOffset, at: time)
         } else {
@@ -566,13 +578,16 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
-            let (snapIdx, targetOffset) = nextSnapMilestoneLeft(
-                currentOffset: adjustedOffset,
+            let basis = regionSnapBasis(for: activeColumnIndex, at: adjustedOffset)
+            let (snapIdx, rawSnapTarget) = nextSnapMilestoneLeft(
+                currentOffset: adjustedOffset + basis.regionOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: regionWidth
+                workingAreaWidth: basis.width
             )
+            // Milestone is computed in the owning region's local space; translate
+            // it back to group-global before it becomes a viewOffset.
+            let targetOffset = rawSnapTarget - basis.regionOffset
             snapIndices[activeColumnIndex] = snapIdx
             return createVelocityAnimation(from: adjustedOffset, to: targetOffset, velocity: velocity, at: time)
         } else {
@@ -596,13 +611,16 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
-            let (snapIdx, targetOffset) = nextSnapMilestoneRight(
-                currentOffset: adjustedOffset,
+            let basis = regionSnapBasis(for: activeColumnIndex, at: adjustedOffset)
+            let (snapIdx, rawSnapTarget) = nextSnapMilestoneRight(
+                currentOffset: adjustedOffset + basis.regionOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: regionWidth
+                workingAreaWidth: basis.width
             )
+            // Milestone is computed in the owning region's local space; translate
+            // it back to group-global before it becomes a viewOffset.
+            let targetOffset = rawSnapTarget - basis.regionOffset
             snapIndices[activeColumnIndex] = snapIdx
             return createVelocityAnimation(from: adjustedOffset, to: targetOffset, velocity: velocity, at: time)
         } else {
@@ -624,13 +642,16 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
-            let (snapIdx, offset) = nextSnapMilestoneLeft(
-                currentOffset: adjustedOffset,
+            let basis = regionSnapBasis(for: activeColumnIndex, at: adjustedOffset)
+            let (snapIdx, rawSnapTarget) = nextSnapMilestoneLeft(
+                currentOffset: adjustedOffset + basis.regionOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: regionWidth
+                workingAreaWidth: basis.width
             )
+            // Milestone is computed in the owning region's local space; translate
+            // it back to group-global before it becomes a viewOffset.
+            let offset = rawSnapTarget - basis.regionOffset
             snapIndices[activeColumnIndex] = snapIdx
             viewOffset = .static(offset)
             return
@@ -655,13 +676,16 @@ public struct Strip: Sendable {
             let newColX = columnX(at: activeColumnIndex, time: time)
             let adjustedOffset = currentOffset + oldColX - newColX
             let newColWidth = columnData[activeColumnIndex].currentWidth(at: time)
-            let regionWidth = Double(regionForColumn(activeColumnIndex, viewPos: cachedColumnX(at: activeColumnIndex) + adjustedOffset).rect.width)
-            let (snapIdx, offset) = nextSnapMilestoneRight(
-                currentOffset: adjustedOffset,
+            let basis = regionSnapBasis(for: activeColumnIndex, at: adjustedOffset)
+            let (snapIdx, rawSnapTarget) = nextSnapMilestoneRight(
+                currentOffset: adjustedOffset + basis.regionOffset,
                 snapPoints: snapPoints,
                 columnWidth: newColWidth,
-                workingAreaWidth: regionWidth
+                workingAreaWidth: basis.width
             )
+            // Milestone is computed in the owning region's local space; translate
+            // it back to group-global before it becomes a viewOffset.
+            let offset = rawSnapTarget - basis.regionOffset
             snapIndices[activeColumnIndex] = snapIdx
             viewOffset = .static(offset)
             return
@@ -939,6 +963,19 @@ public struct Strip: Sendable {
     /// Shorthand for the active column's snap target.
     public func snapTargetForActive(at time: Double) -> Double {
         snapTarget(forColumn: activeColumnIndex, at: time)
+    }
+
+    /// Region-local snap geometry for `idx` at view offset `offset`.
+    ///
+    /// Mirrors `snapTarget`'s basis: the owning region's width for the milestone
+    /// math, and its offset within the group so the result can be translated back
+    /// into group-global space. Callers must pass `offset + regionOffset` into the
+    /// milestone helpers and subtract `regionOffset` from the result — using the
+    /// width alone treats a display-local target as group-global, which on a merged
+    /// strip lands the column on the wrong display.
+    private func regionSnapBasis(for idx: Int, at offset: Double) -> (width: Double, regionOffset: Double) {
+        let r = regionForColumn(idx, viewPos: cachedColumnX(at: idx) + offset)
+        return (Double(r.rect.width), Double(r.rect.minX - groupArea.totalSpan.minX))
     }
 
     /// Finalize completed width animations and return whether any active animations remain.

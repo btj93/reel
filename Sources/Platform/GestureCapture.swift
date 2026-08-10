@@ -103,6 +103,11 @@ public final class GestureCapture: @unchecked Sendable {
         runLoopSource = nil
         isGesturing = false
         suppressMomentum = false
+        // Per-gesture state must not survive a stop/start cycle (config reload
+        // rebuilds the tap), or the first gesture afterwards is swallowed.
+        gestureRejected = false
+        gestureMode = nil
+        focusCumulativeDelta = 0
     }
 
     // MARK: - Event Handling
@@ -151,6 +156,11 @@ public final class GestureCapture: @unchecked Sendable {
             if isGesturing {
                 endGesture(event)
             }
+            // Rejection is per-gesture state, and this guard returns BEFORE the
+            // in-band reset below. Releasing fn mid-rejected-gesture therefore
+            // stranded the flag set, and the next fn+swipe was silently dead until
+            // it too ended. Clear it on the same begin/terminal phases.
+            if phase == 1 || phase == 4 || phase == 8 { gestureRejected = false }
             return false
         }
 
@@ -193,8 +203,10 @@ public final class GestureCapture: @unchecked Sendable {
         // until the gesture ends. Prevents mid-swipe direction changes from
         // accidentally triggering strip scrolling.
         if gestureRejected {
-            // Let end/cancel through to reset the flag
-            if phase == 4 || phase == 8 { gestureRejected = false }
+            // Let begin/end/cancel through to reset the flag. Phase 1 is included so
+            // a NEW gesture starting after a stranded rejection clears it up front
+            // rather than being swallowed for its whole duration.
+            if phase == 1 || phase == 4 || phase == 8 { gestureRejected = false }
             return false
         }
 

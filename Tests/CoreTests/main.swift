@@ -2768,6 +2768,53 @@ do {
     assertClose(targetOffset, -250, tolerance: 1.0, "multi-region: snap to r0 midX")
 }
 
+// `snapTarget` is region-aware: it subtracts regionOffset so a column centres in
+// its OWNING display. Every other snap site (the navigate* family,
+// focusColumnIncremental, gesture snap) computed a display-local milestone and then
+// applied it as a group-global viewOffset — off by the region offset, which lands
+// the column on the wrong display. These pin navigate* against snapTarget, which is
+// the definition of correct here.
+func makeTwoRegionSnapStrip() -> Strip {
+    let r0 = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let r1 = CGRect(x: 1440, y: 0, width: 1440, height: 900)
+    let ga = GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: r0),
+                  DisplayRegion(displayID: 2, rect: r1)],
+        referenceMidX: r0.midX
+    )
+    var strip = Strip(snapPoints: [.middle], gap: 16, groupArea: ga)
+    strip.columns = (1...3).map { Column(tiles: [TileID(UInt32($0))], width: .proportion(0.5)) }
+    strip.columnData = (1...3).map { _ in ColumnData(cachedWidth: 720) }
+    strip.snapIndices = [0, 0, 0]
+    return strip
+}
+
+section("navigateRight on a two-region group targets the owning region")
+do {
+    var strip = makeTwoRegionSnapStrip()
+    strip.activeColumnIndex = 1
+    strip.viewOffset = .static(strip.snapTargetForActive(at: 0))
+    let anim = strip.navigateRight(at: 0)
+    check(anim != nil, "navigateRight produced an animation")
+    if let anim {
+        assertClose(anim.to, strip.snapTarget(forColumn: 2, at: 0), tolerance: 1.0,
+            "navigateRight target must equal the region-aware snapTarget")
+    }
+}
+
+section("navigateLeft on a two-region group targets the owning region")
+do {
+    var strip = makeTwoRegionSnapStrip()
+    strip.activeColumnIndex = 1
+    strip.viewOffset = .static(strip.snapTargetForActive(at: 0))
+    let anim = strip.navigateLeft(at: 0)
+    check(anim != nil, "navigateLeft produced an animation")
+    if let anim {
+        assertClose(anim.to, strip.snapTarget(forColumn: 0, at: 0), tolerance: 1.0,
+            "navigateLeft target must equal the region-aware snapTarget")
+    }
+}
+
 // MARK: - Region-Aware Preset & Full-Width Tests
 print("Region-Aware Preset & Full-Width Tests")
 
