@@ -17,6 +17,21 @@ func runSimFocus() {
     print()
     print("StripController Simulation — focus / mutation (W4a)")
 
+    // Core guards `!columns.isEmpty` and returns, but the controller then indexes
+    // columnData[activeColumnIndex] regardless — a trap on an empty strip, which
+    // the cycle-width hotkey and `reel-msg cycle-width-preset` both reach.
+    section("width preset actions on an empty strip do not crash")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC(animationEnabled: true)
+        assertEq(sc.strip.columns.count, 0, "strip starts empty")
+        sc.cycleWidthPreset()
+        sc.setWidthPreset(index: 0)
+        sc.toggleFullWidth()
+        assertEq(sc.strip.columns.count, 0, "still empty, no trap")
+        _ = clock
+    }
+
     // ---- focus left / right ----
     section("focus left/right — activeColumnIndex + centered fake frame")
     do {

@@ -68,7 +68,15 @@ extension ColumnWidth {
     ) -> Double {
         switch self {
         case .fixed(let f):
-            return f
+            // Clamp exactly as `resolve` does. Returning the literal made Strip
+            // cache a clamped width while LayoutEngine positioned subsequent
+            // columns from the unbounded one — cumulative X drift, bad snap math
+            // and overlapping columns for a wide adopted window.
+            // `blend(p: 1.0, …)` is the area-weighted region width, i.e. the same
+            // bound `resolve` clamps against. Empty overlaps → 0, so fall back to
+            // the literal rather than collapsing the column to zero width.
+            let span = Self.blend(p: 1.0, overlaps: overlaps)
+            return span > 0 ? min(f, span) : f
         case .proportion(let p):
             return Self.blend(p: p, overlaps: overlaps)
         case .auto:

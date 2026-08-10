@@ -15,6 +15,29 @@ func runL1CoreBackfillTests() {
     print()
     print("Window Classification Backfill Tests")
 
+    // `resolve` clamps a fixed width to the working area; `resolveBlended` returned
+    // the literal. Strip caches the clamped value while LayoutEngine positions
+    // later columns from the unbounded one → cumulative X drift and overlap.
+    section("resolveBlended clamps .fixed to the region, matching resolve")
+    do {
+        let region = DisplayRegion(
+            displayID: 1, rect: CGRect(x: 0, y: 0, width: 1440, height: 900))
+        let w = ColumnWidth.fixed(3000)
+        let direct = w.resolve(workingAreaWidth: 1440, gap: 16)
+        let blended = w.resolveBlended(overlaps: [(region, 1.0)], gap: 16)
+        assertClose(blended, direct, tolerance: 0.5,
+            "blended .fixed must clamp exactly like resolve (got \(blended) vs \(direct))")
+        assertClose(blended, 1440, tolerance: 0.5, "clamped to the region width")
+    }
+
+    section("resolveBlended leaves a fitting .fixed width alone")
+    do {
+        let region = DisplayRegion(
+            displayID: 1, rect: CGRect(x: 0, y: 0, width: 1440, height: 900))
+        let blended = ColumnWidth.fixed(600).resolveBlended(overlaps: [(region, 1.0)], gap: 16)
+        assertClose(blended, 600, tolerance: 0.5, "a width that fits is unchanged")
+    }
+
     section("Fullscreen window → ignore")
     do {
         let props = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow",

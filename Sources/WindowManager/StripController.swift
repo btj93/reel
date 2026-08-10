@@ -441,6 +441,10 @@ public final class StripController: @unchecked Sendable {
     }
 
     public func cycleWidthPreset() {
+        // Core no-ops on an empty strip, but the animated branch below still reads
+        // columnData[activeColumnIndex] — an index-out-of-range trap reachable from
+        // the cycle-width hotkey or `reel-msg cycle-width-preset` with no windows.
+        guard !strip.columns.isEmpty else { return }
         let time = TimeUtil.now()
         if animationEnabled {
             strip.cycleWidthPreset(at: time, params: widthSpringParams)
@@ -462,6 +466,8 @@ public final class StripController: @unchecked Sendable {
     }
 
     package func setWidthPreset(index: Int) {
+        // See cycleWidthPreset: the animated branch indexes columnData directly.
+        guard !strip.columns.isEmpty else { return }
         let time = TimeUtil.now()
         strip.setWidthPreset(
             index: index,
