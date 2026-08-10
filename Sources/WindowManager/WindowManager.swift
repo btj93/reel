@@ -1345,6 +1345,18 @@ public final class WindowManager: @unchecked Sendable {
             for tile in sc.windowMap.keys { set.insert(tile.rawValue) }
         }
         for (_, sc) in stripControllers { sc.beginBatch() }
+
+        // Collect every eligible window BEFORE adopting any, then adopt in a
+        // deterministic left-to-right order.
+        //
+        // Adopting inline in discovery order produced a scrambled strip: `tracker.apps`
+        // is a Dictionary (unordered across apps), and `discoverWindows` returns
+        // kAXWindowsAttribute order, which macOS reports front-to-back in z-order —
+        // i.e. newest window first. Three windows opened left-to-right were therefore
+        // adopted right-to-left, so a restart reversed the strip. Sorting by the
+        // window's current on-screen origin makes the adopted order match what the
+        // user is actually looking at, and makes it stable across apps.
+        var candidates: [(window: AXWindow, app: AXApp, originX: Double, originY: Double)] = []
         for (pid, app) in tracker.apps {
             let appWindows = discoverWindows(pid: pid)
             for window in appWindows {
@@ -1360,12 +1372,26 @@ public final class WindowManager: @unchecked Sendable {
                 let classification = classifyWithRules(props, pid: pid)
                 guard classification == .tile else { continue }
 
-                tracker.registerTrackedWindow(window)
-                app.observeWindow(window.element)
-                let (gid, targetSC) = stripControllerEntryForWindow(window)
-                let saved = resolveSnapshotPosition(for: window, on: targetSC, groupID: gid)
-                targetSC.addWindow(window, app: app, restoredPosition: saved)
+                // `getPropertiesFast` already carries the frame; don't pay for a
+                // second AX round-trip per window just to sort.
+                let origin = props.frame?.origin ?? .zero
+                candidates.append((window, app, Double(origin.x), Double(origin.y)))
             }
+        }
+        // Left-to-right, then top-to-bottom, then windowID as a final tiebreak so
+        // the result is fully deterministic even for exactly-stacked windows.
+        candidates.sort {
+            if $0.originX != $1.originX { return $0.originX < $1.originX }
+            if $0.originY != $1.originY { return $0.originY < $1.originY }
+            return $0.window.windowID < $1.window.windowID
+        }
+        for candidate in candidates {
+            let window = candidate.window
+            tracker.registerTrackedWindow(window)
+            candidate.app.observeWindow(window.element)
+            let (gid, targetSC) = stripControllerEntryForWindow(window)
+            let saved = resolveSnapshotPosition(for: window, on: targetSC, groupID: gid)
+            targetSC.addWindow(window, app: candidate.app, restoredPosition: saved)
         }
         for (_, sc) in stripControllers { sc.finishBatch() }
 
@@ -1849,7 +1875,22 @@ public final class WindowManager: @unchecked Sendable {
             var cascadeOffset: Double = 0
             let cascadeStep: Double = 30
 
-            for (tileID, window) in sc.windowMap {
+            // Iterate in STRIP ORDER, not windowMap order. windowMap is a Dictionary,
+            // so the cascade below handed out increasing X offsets in arbitrary order,
+            // physically scrambling the windows' left-to-right arrangement on screen.
+            // Since the next launch adopts windows by their on-screen position, a
+            // single shutdown could permanently reorder — in practice reverse — the
+            // user's columns. Column order is the authority here.
+            var orderedTiles: [TileID] = []
+            for column in sc.strip.columns { orderedTiles.append(contentsOf: column.tiles) }
+            let inColumns = Set(orderedTiles)
+            // Defensive: any tracked window not currently in a column still gets
+            // restored, in a stable order.
+            orderedTiles.append(contentsOf: sc.windowMap.keys.filter { !inColumns.contains($0) }
+                .sorted { $0.rawValue < $1.rawValue })
+
+            for tileID in orderedTiles {
+                guard let window = sc.windowMap[tileID] else { continue }
                 guard case .success(let frame) = window.getFrame() else { continue }
 
                 // Window center is within working area — leave it alone
@@ -2321,8 +2362,14 @@ public final class WindowManager: @unchecked Sendable {
     ) -> RestoredSlot? {
         guard config.positionMemory, let snapshotStore else { return nil }
 
-        let bundleID = tracker.apps[window.pid]?.bundleIdentifier
-        guard let bundleID else { return nil }
+        // Coerce a nil bundle identifier to "" rather than bailing. captureSnapshot
+        // WRITES `app.bundleIdentifier ?? ""`, so refusing to read that back meant
+        // any app without a bundle ID (bare executables, some helpers) had its
+        // layout persisted and then never restored — position memory silently dead,
+        // and on restart the strip fell back to on-screen-position adoption, which
+        // a shutdown cascade has already scrambled.
+        guard let app = tracker.apps[window.pid] else { return nil }
+        let bundleID = app.bundleIdentifier ?? ""
 
         let title = window.getTitle()
         let key = SnapshotKey(
@@ -2385,7 +2432,7 @@ public final class WindowManager: @unchecked Sendable {
         // entirely, the very thing this function exists to do.
         let currentBundleIDs = Set(onScreenInfos
             .filter { onScreenIDs.contains($0.windowID) }
-            .compactMap { tracker.apps[$0.ownerPID]?.bundleIdentifier })
+            .compactMap { info in tracker.apps[info.ownerPID].map { $0.bundleIdentifier ?? "" } })
         guard let snapshot = snapshotStore.snapshotFuzzyByBundleIDs(
             groupID: Array(groupID),
             fingerprint: sc.currentSpaceFingerprint,
@@ -2527,10 +2574,11 @@ public final class WindowManager: @unchecked Sendable {
         for column in sc.strip.columns {
             guard let tile = column.activeTile,
                   let win = sc.windowMap[tile],
-                  let app = tracker.apps[win.pid],
-                  let bid = app.bundleIdentifier
+                  let app = tracker.apps[win.pid]
             else { continue }
-            ids.insert(bid)
+            // "" matches captureSnapshot's `?? ""`; dropping nils here made the
+            // signature disagree with the one on disk.
+            ids.insert(app.bundleIdentifier ?? "")
         }
         return ids
     }

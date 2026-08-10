@@ -86,8 +86,13 @@ teardown() {
     host_quit MAIN
     host_quit REAP
 
-    # 3. Remove the namespace.
-    [ -n "$NS" ] && [ -d "$NS" ] && rm -rf "$NS"
+    # 3. Remove the namespace, unless the developer asked to keep it for debugging
+    #    (SMOKE_KEEP_NS=1 preserves the state dir, host stdout and reel.log).
+    if [ "${SMOKE_KEEP_NS:-0}" = 1 ]; then
+        warn "SMOKE_KEEP_NS=1 — preserving namespace for inspection: $NS"
+    else
+        [ -n "$NS" ] && [ -d "$NS" ] && rm -rf "$NS"
+    fi
 
     # 4. Relaunch the developer's live Reel exactly as it was, then wait for it.
     if [ -n "$LIVE_CMD" ]; then

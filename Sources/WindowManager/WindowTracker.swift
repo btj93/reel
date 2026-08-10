@@ -186,6 +186,31 @@ public final class WindowTracker: @unchecked Sendable {
 
     // MARK: - App Registration
 
+    /// An app's existing windows, ordered left-to-right by their current on-screen
+    /// position.
+    ///
+    /// `discoverWindows` returns `kAXWindowsAttribute` order, which macOS reports
+    /// front-to-back in z-order — newest window first. Callers register these
+    /// straight into the strip, so adopting an app's windows verbatim built the
+    /// strip in reverse creation order: open three windows left-to-right, restart
+    /// Reel, and the columns come back reversed. Sorting by on-screen origin makes
+    /// the adopted strip match what the user is actually looking at. windowID
+    /// breaks ties so exactly-stacked windows are still deterministic.
+    private func discoverWindowsInVisualOrder(pid: pid_t) -> [AXWindow] {
+        var keyed: [(window: AXWindow, x: Double, y: Double)] = []
+        for window in discoverWindows(pid: pid) {
+            var origin = CGPoint.zero
+            if case .success(let frame) = window.getFrame() { origin = frame.origin }
+            keyed.append((window, Double(origin.x), Double(origin.y)))
+        }
+        keyed.sort {
+            if $0.x != $1.x { return $0.x < $1.x }
+            if $0.y != $1.y { return $0.y < $1.y }
+            return $0.window.windowID < $1.window.windowID
+        }
+        return keyed.map(\.window)
+    }
+
     private func registerApp(pid: pid_t, bundleID: String?) {
         guard isPidAllowed(pid) else { return }
         guard apps[pid] == nil else { return }
@@ -197,8 +222,9 @@ public final class WindowTracker: @unchecked Sendable {
         apps[pid] = app
         app.startObserving()
 
-        // Discover existing windows for this app
-        let newWindows = discoverWindows(pid: pid)
+        // Discover existing windows for this app, left-to-right (see
+        // discoverWindowsInVisualOrder — raw AX order is newest-first z-order).
+        let newWindows = discoverWindowsInVisualOrder(pid: pid)
         for window in newWindows {
             registerWindow(window, bundleID: bundleID)
         }
@@ -216,7 +242,7 @@ public final class WindowTracker: @unchecked Sendable {
         for delay in [0.1, 0.3, 0.7] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self = self, self.apps[pid] != nil else { return }
-                let newWindows = discoverWindows(pid: pid)
+                let newWindows = self.discoverWindowsInVisualOrder(pid: pid)
                 for window in newWindows {
                     guard self.windows[window.windowID] == nil else { continue }
                     self.registerWindow(window, bundleID: bundleID)
