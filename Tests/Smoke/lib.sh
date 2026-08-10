@@ -36,7 +36,7 @@
 AG='.groups | map(select(.isActive)) | .[0]'
 
 # Per-host bookkeeping (bash associative arrays).
-declare -A HOST_PID HOST_FD HOST_OUT HOST_RESP
+declare -A HOST_PID HOST_FD HOST_OUT
 
 # ------------------------------- logging -----------------------------------
 
@@ -124,20 +124,27 @@ host_start() {  # <name> [primary_height]  — omit height to let the host infer
     exec {fd}>"$infifo"    # hold the write end open (keeps host alive)
     HOST_FD[$name]=$fd
     HOST_OUT[$name]=$outfile
-    HOST_RESP[$name]=0
 }
 
 # host_cmd <name> <json> : send one command, print its one-line JSON response.
+#
+# Response position is derived from the output file's CURRENT length rather than a
+# running counter. Almost every caller reaches this through command substitution
+# (`report=$(host_report MAIN)`), which runs in a subshell — so an
+# `HOST_RESP[$name]=…` increment there is discarded and the counter drifts behind
+# reality, making later calls return an earlier command's response. That produced
+# `{"ok":true,"windows":[]}` for a `report` whose real answer was two lines further
+# down, and the frames-agree assertion then saw zero host windows.
 host_cmd() {
     local name=$1 json=$2
     if [ "$DRY" = 1 ]; then dry_echo "host[$name] <- $json"; _dry_host_response "$json"; return 0; fi
     local out=${HOST_OUT[$name]} fd=${HOST_FD[$name]}
-    local want=$(( ${HOST_RESP[$name]} + 1 ))
+    local before; before=$(wc -l < "$out" | tr -d ' ')
     printf '%s\n' "$json" >&"$fd"
-    poll_until 3 "[ \"\$(wc -l < '$out' | tr -d ' ')\" -ge $want ]" \
+    poll_until 3 "[ \"\$(wc -l < '$out' | tr -d ' ')\" -gt $before ]" \
         || fail "host[$name]: no response to $json"
-    HOST_RESP[$name]=$want
-    sed -n "${want}p" "$out"
+    # Exactly one response line per command, so the first new line is ours.
+    tail -n "+$((before + 1))" "$out" | head -1
 }
 
 _dry_host_response() {  # dry-run canned responses keyed by cmd
@@ -264,7 +271,17 @@ assertFramesAgree() {  # <host_name> [tolerance_px]
         | "\(.cgWindowID) \((.frameCG.x - $cf.x)) \((.frameCG.y - $cf.y)) \((.frameCG.w - $cf.w)) \((.frameCG.h - $cf.h))"
         ')
     if [ "$DRY" = 1 ]; then dry_note "assertFramesAgree($name, ±${tol}px): matched $(printf '%s' "$rows" | grep -c . ) window(s) in fixture"; return 0; fi
-    [ -n "$rows" ] || fail "assertFramesAgree($name): no host window matched a strip column by CGWindowID"
+    if [ -z "$rows" ]; then
+        # Show both sides — "no match" alone gives the reader nothing to act on.
+        local host_ids strip_ids
+        host_ids=$(printf '%s' "$report" | jq -c '[.windows[].cgWindowID]')
+        strip_ids=$(printf '%s' "$layout" | jq -c "[$AG.currentColumns[].windowID]")
+        fail "assertFramesAgree($name): no host window matched a strip column by CGWindowID
+      host cgWindowIDs : $host_ids
+      strip windowIDs  : $strip_ids
+      raw host report  : $report
+      host stdout tail : $(tail -3 "${HOST_OUT[$name]}" 2>/dev/null | tr '\n' '|')"
+    fi
     local wid dx dy dw dh n=0
     while read -r wid dx dy dw dh; do
         [ -n "$wid" ] || continue

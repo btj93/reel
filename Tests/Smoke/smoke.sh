@@ -282,7 +282,10 @@ sec_width() {
     if [ "$DRY" != 1 ]; then
         { [ "$p1" != "$p0" ] || [ "$w1" != "$w0" ]; } \
             || fail "cycle-width-preset changed neither presetIndex ($p0) nor width ($w0)"
-        ok "cycle-width-preset: preset $p0→$p1, width $w0→$w1"
+        # Brace these: a bare `$p0` immediately followed by the multi-byte arrow is
+        # parsed by this bash as the identifier `p0<e2><86><92>`, which is unset and
+        # aborts under `set -u`.
+        ok "cycle-width-preset: preset ${p0}→${p1}, width ${w0}→${w1}"
     else dry_note "would assert presetIndex/cachedWidth changed after cycle-width-preset"; fi
 
     reel_msg toggle-full-width >/dev/null; waitForSettle

@@ -247,10 +247,10 @@ final class WindowHost {
         // arbitrary — the window manager under test relocates them immediately.
         let offset = CGFloat(id % 12) * 28
         let rect = NSRect(x: 120 + offset, y: 120 + offset, width: width, height: height)
-        let window = NSWindow(contentRect: rect,
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                              backing: .buffered,
-                              defer: false)
+        let window = UnconstrainedWindow(contentRect: rect,
+                                         styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                         backing: .buffered,
+                                         defer: false)
         // We manage lifetime via the `windows` dictionary; don't let close() dealloc it.
         window.isReleasedWhenClosed = false
         window.title = formattedTitle(base: title ?? "window", id: id)
@@ -339,6 +339,20 @@ func writeResponse(_ resp: HostResponse) {
     var data = encodeResponse(resp)
     data.append(0x0A) // '\n' — line-delimited output
     stdoutHandle.write(data)
+}
+
+/// An NSWindow that accepts any frame, including fully off-screen ones.
+///
+/// AppKit's default `constrainFrameRect(_:to:)` keeps a titled window's title bar
+/// reachable, so `setFrame` to a wild coordinate (x=9000) is silently clamped back
+/// on screen. The pause negative test depends on actually parking a window
+/// off-screen and observing that a paused Reel leaves it there — with the default
+/// constraining, the window never left the screen and the assertion failed on its
+/// own terms, blaming Reel for a move AppKit had made.
+final class UnconstrainedWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
 }
 
 private func logDiagnostic(_ message: String) {
