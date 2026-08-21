@@ -181,6 +181,68 @@ func runSimSpace() {
     check(TimeUtil.nowProvider == nil, "clock leaked out of section")
 
     // ---- confirmedUserActiveTileID boundary pair ----
+    // A click-driven focus that has survived its debounce must be the column the
+    // departing Space is stashed with. Before confirmUserActive existed,
+    // _confirmedUserActiveTileID was written only by hotkey nav / addWindow /
+    // space restore, so for a click-navigating user it stayed pinned to the
+    // LAST-ADOPTED column — and because macOS fires a focus event just before
+    // activeSpaceDidChange, saveCurrentSpace's 300ms distrust window always fell
+    // back to that stale tile. Returning to the Space then focused the wrong
+    // window (observed: 5-column strip restored onto col4/apidog while the user
+    // was working in col3).
+    section("saveCurrentSpace stashes the confirmed click column, not the last-adopted one")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        sc.setSpaceFingerprint(fp(1, 2, 3))
+        let (_, ws) = addFakeWindows(sc, count: 3, width: 500)
+        // Three adds → addWindow left _confirmed pinned to the last column (ws[2]).
+        assertEq(sc.strip.activeColumnIndex, 2, "last adopted column is active")
+
+        // User clicks column 1; the debounced scroll survives, so it is confirmed.
+        clock.advance(5.0)
+        sc.scrollToWindow(tileID: ws[1].tileID, mode: .incrementalSnap)
+        sc.confirmUserActive(tileID: ws[1].tileID)
+        assertEq(sc.strip.activeColumnIndex, 1, "click moved the active column")
+
+        // macOS fires a focus event for that same window just BEFORE delivering
+        // activeSpaceDidChange, arming the 300ms distrust window.
+        sc.userActiveTileID = ws[1].tileID
+        sc.userActiveTileIDTime = clock.t
+        clock.advance(0.05)
+        check(sc.confirmedUserActiveTileID == ws[1].tileID,
+              "distrust fallback now names the clicked column, not the last-adopted one")
+
+        // Leave to an unknown Space, then come back.
+        check(!sc.switchSpace(onScreenWindowIDs: fp(9)), "unknown space → fresh")
+        check(sc.switchSpace(onScreenWindowIDs: fp(1, 2, 3)), "returning restores the stash")
+        assertEq(sc.strip.activeColumnIndex, 1,
+                 "restored focus is the clicked column (was col2 before the fix)")
+        check(sc.strip.activeColumn?.activeTile == ws[1].tileID, "and it maps to the clicked tile")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    // Without a promotion, the stale fallback must still be what gets stashed —
+    // this pins the pre-fix behavior so the guard's intent stays visible: a focus
+    // event that a Space change cancels within the debounce is NOT trusted.
+    section("an unconfirmed external focus inside the distrust window is still not stashed")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        sc.setSpaceFingerprint(fp(1, 2))
+        let (_, ws) = addFakeWindows(sc, count: 2, width: 500)
+        clock.advance(5.0)
+        // Focus event arrives but the Space change cancels the debounce, so
+        // confirmUserActive is never reached.
+        sc.userActiveTileID = ws[0].tileID
+        sc.userActiveTileIDTime = clock.t
+        clock.advance(0.05)
+        check(!sc.switchSpace(onScreenWindowIDs: fp(9)), "unknown space → fresh")
+        check(sc.switchSpace(onScreenWindowIDs: fp(1, 2)), "returning restores")
+        assertEq(sc.strip.activeColumnIndex, 1, "uncancelled artifact ignored; prior confirmed kept")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
     section("confirmedUserActiveTileID boundary 0.299 vs 0.301")
     do {
         let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }

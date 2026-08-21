@@ -104,6 +104,14 @@ public final class WindowManager: @unchecked Sendable {
 
     /// Pending external focus scroll — debounced to avoid visual flash during space transitions.
     private var pendingFocusScroll: DispatchWorkItem?
+    /// Tile the queued `pendingFocusScroll` targets. Lets an adoption tell
+    /// "this scroll is for the window I'm adopting" apart from "this scroll
+    /// would drag the view off it".
+    private var pendingFocusScrollTile: TileID?
+
+    /// Timestamp of the previous activeSpaceDidChange, for the `sincePrevMs=`
+    /// diagnostic on the Space-change path.
+    private var lastSpaceChangeTime: Double = 0
 
     /// Focus-race guard for `.appActivated` → `handleSpaceChange`: remembers the
     /// most recent app activation (dock click / Cmd+Tab) so a space-change that
@@ -609,8 +617,12 @@ public final class WindowManager: @unchecked Sendable {
                 // Cancel any pending AX-driven scroll — this click is a stronger
                 // signal of user intent than the debounced focus follow-up.
                 self.pendingFocusScroll?.cancel()
+                self.pendingFocusScroll = nil
+                self.pendingFocusScrollTile = nil
                 sc.scrollToWindow(tileID: tileID, mode: .incrementalSnap)
-                sc.userActiveTileID = tileID
+                // A direct click is unambiguous user intent and is applied
+                // synchronously, so confirm it outright — no debounce to survive.
+                sc.confirmUserActive(tileID: tileID)
                 sc.userActiveTileIDTime = TimeUtil.now()
                 return
             }
@@ -807,6 +819,7 @@ public final class WindowManager: @unchecked Sendable {
             frameLoop?.pause()
             pendingFocusScroll?.cancel()
             pendingFocusScroll = nil
+            pendingFocusScrollTile = nil
             titleBarInteraction?.cancelIfActive()
             reorderOverlay.cancel()
             isReorderPending = false
@@ -920,6 +933,7 @@ public final class WindowManager: @unchecked Sendable {
         if case .windowMoved = event {
             pendingFocusScroll?.cancel()
             pendingFocusScroll = nil
+            pendingFocusScrollTile = nil
         }
 
         // Ignore move/resize/focus events that echo from our own layout calls
@@ -980,6 +994,10 @@ public final class WindowManager: @unchecked Sendable {
                         #endif
                         break
                     }
+                    // Same hazard as windowDeminimized: a window created on this
+                    // Space must not be scrolled away from by a focus scroll that
+                    // was queued before it existed.
+                    cancelStaleFocusScroll(adopting: window.tileID)
                     let (gid, sc) = stripControllerEntryForWindow(window)
                     let saved = resolveSnapshotPosition(for: window, on: sc, groupID: gid)
                     print("[WM] windowAdded wid=\(window.windowID) pid=\(window.pid) app=\(app.bundleIdentifier ?? "?") restored=\(saved != nil)")
@@ -1037,8 +1055,13 @@ public final class WindowManager: @unchecked Sendable {
                 // Incremental snap: if column already visible, no scroll;
                 // otherwise slide to first milestone in travel direction.
                 sc.scrollToWindow(tileID: tileID, mode: .incrementalSnap)
+                // Surviving the 150ms debounce means no space change cancelled
+                // this — so it is real focus, not a transition artifact. Promote
+                // it so saveCurrentSpace's distrust fallback isn't stale.
+                sc.confirmUserActive(tileID: tileID)
             }
             pendingFocusScroll = work
+            pendingFocusScrollTile = tileID
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
             // Update user focus — marked as external so saveCurrentSpace can
             // ignore it if a space switch follows within 300ms.
@@ -1057,8 +1080,12 @@ public final class WindowManager: @unchecked Sendable {
                 let work = DispatchWorkItem { [weak self] in
                     guard let self, !self.isPaused else { return }
                     sc.scrollToWindow(tileID: tileID, mode: .incrementalSnap)
+                    // Same rationale as .windowFocused: it outlived the debounce,
+                    // so it is genuine activation rather than a space-switch echo.
+                    sc.confirmUserActive(tileID: tileID)
                 }
                 pendingFocusScroll = work
+                pendingFocusScrollTile = tileID
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
                 stripController.userActiveTileID = tileID
                 stripController.userActiveTileIDTime = TimeUtil.now()
@@ -1100,6 +1127,9 @@ public final class WindowManager: @unchecked Sendable {
             } else if let window = tracker.windows[windowID],
                 let app = tracker.apps[window.pid]
             {
+                // Adoption is the newer intent and insertColumn centres the new
+                // column, so drop any focus scroll still queued for another tile.
+                cancelStaleFocusScroll(adopting: window.tileID)
                 let (gid, sc) = stripControllerEntryForWindow(window)
                 let saved = resolveSnapshotPosition(for: window, on: sc, groupID: gid)
                 sc.addWindow(window, app: app, restoredPosition: saved)
@@ -1180,7 +1210,138 @@ public final class WindowManager: @unchecked Sendable {
         }
     }
 
+    /// Drop a queued external-focus scroll when a DIFFERENT tile is being adopted.
+    /// `addWindow` → `Strip.insertColumn` makes the new column active and recentres
+    /// the view; a `pendingFocusScroll` created up to 150ms earlier for the
+    /// previously focused tile would otherwise fire afterwards and scroll the
+    /// freshly adopted window back out of view. Keeps a scroll aimed at the tile
+    /// being adopted (harmless and idempotent).
+    private func cancelStaleFocusScroll(adopting tileID: TileID) {
+        guard pendingFocusScroll != nil, pendingFocusScrollTile != tileID else { return }
+        print("[WM] cancelled stale focus scroll (adopting tileID=\(tileID.rawValue))")
+        fflush(stdout)
+        pendingFocusScroll?.cancel()
+        pendingFocusScroll = nil
+        pendingFocusScrollTile = nil
+    }
+
+    /// Elapsed milliseconds since `start`, rounded — for main-thread stall
+    /// diagnostics on the Space-change path.
+    private static func ms(since start: Double) -> Int {
+        Int(((TimeUtil.now() - start) * 1000).rounded())
+    }
+
+    /// How long to wait before believing an EMPTY on-screen read.
+    ///
+    /// A macOS three/four-finger Space swipe fires activeSpaceDidChange
+    /// *optimistically* when the gesture crosses its threshold, and reverts if the
+    /// fingers lift short. Measured round trip on a reverted swipe: ~414ms, during
+    /// which the window server reports nothing on screen. 500ms clears that with
+    /// margin. The delay is only ever paid on a genuinely empty Space, where there
+    /// is nothing on screen to lay out — so it is invisible.
+    private static let emptySpaceConfirmDelay: Double = 0.5
+
+    /// Pending re-read of a suspect (empty) on-screen list.
+    private var emptySpaceConfirmWork: DispatchWorkItem?
+
+    /// Which tiles are parked outside the working area, and on which edge, at the
+    /// moment of a Space switch. Slivered windows sit far beyond the display bounds
+    /// (observed: x=-1205 and x=1799 on an ~1800px display) and macOS reveals them
+    /// while a Space-swipe animation pans the canvas. This records them so a bounce
+    /// can be correlated against their presence and edge.
+    private func offScreenSummary(sc: StripController) -> String {
+        let wa = sc.strip.workingArea
+        var parts: [String] = []
+        for (tileID, frame) in sc.lastCommittedFrames.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
+            guard isFrameOffScreen(frame, workingArea: wa) else { continue }
+            parts.append("\(frame.midX < wa.midX ? "L" : "R"):\(tileID.rawValue)")
+        }
+        return parts.isEmpty ? "none" : "[" + parts.joined(separator: ",") + "]"
+    }
+
+    /// Current Space identity as the window server reports it.
+    private func currentOnScreenIDs() -> (infos: [CGWindowInfo], ids: Set<UInt32>) {
+        let infos = getAllWindowInfo()
+        return (infos, Set(infos.filter { $0.layer == 0 && $0.isOnScreen }.map(\.windowID)))
+    }
+
+    /// Gate in front of `commitSpaceChange`. Filters the two reads that must not be
+    /// acted on, both observed live on this machine:
+    ///
+    ///  1. **Identical fingerprint.** The window server says we are on the Space we
+    ///     already believe we are on — the return leg of a reverted swipe, or a
+    ///     duplicate notification. Committing it re-saves, re-restores and
+    ///     re-centres every window for no reason (the visible "jump" after a
+    ///     bounce). A window lives on exactly one Space, so an identical on-screen
+    ///     ID set can only mean the same Space.
+    ///  2. **Empty read.** Either a genuinely empty Space or a mid-transition
+    ///     artifact — indistinguishable at this instant. Committing wipes the strip,
+    ///     keys `currentSpaceFingerprint` to `[]`, and runs a full per-app AX sweep.
+    ///     `checkWindowHealth` already defends against the same window-server
+    ///     behaviour with its two-consecutive-miss rule; this is the same idea on
+    ///     the Space path. Re-read after the transition settles and commit only if
+    ///     it is still empty.
     private func handleSpaceChange() {
+        guard !isPaused else { return }
+
+        let (onScreenWindows, onScreenIDs) = currentOnScreenIDs()
+
+        if !onScreenIDs.isEmpty, onScreenIDs == stripController.currentSpaceFingerprint {
+            // Any in-flight empty-read confirmation is moot: we are demonstrably
+            // back on the Space we started from.
+            emptySpaceConfirmWork?.cancel()
+            emptySpaceConfirmWork = nil
+            print("[WM] spaceChanged: same fingerprint as current Space — ignored"
+                + " (sincePrevMs=\(lastSpaceChangeTime > 0 ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"))")
+            fflush(stdout)
+            lastSpaceChangeTime = TimeUtil.now()
+            return
+        }
+
+        if onScreenIDs.isEmpty {
+            let fingerprintAtSchedule = stripController.currentSpaceFingerprint
+            let sincePrev = lastSpaceChangeTime > 0
+                ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"
+            lastSpaceChangeTime = TimeUtil.now()
+            print("[WM] spaceChanged: empty on-screen read — deferring \(Int(Self.emptySpaceConfirmDelay * 1000))ms"
+                + " to confirm (sincePrevMs=\(sincePrev))")
+            fflush(stdout)
+
+            emptySpaceConfirmWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, !self.isPaused else { return }
+                self.emptySpaceConfirmWork = nil
+                let (infos, ids) = self.currentOnScreenIDs()
+                if ids == fingerprintAtSchedule {
+                    print("[WM] spaceChanged: transient empty read — same Space after settle, dropped")
+                    fflush(stdout)
+                    return
+                }
+                print("[WM] spaceChanged: empty read confirmed (\(ids.count) on screen) — committing")
+                fflush(stdout)
+                self.commitSpaceChange(onScreenWindows: infos, onScreenIDs: ids, sincePrevMs: "confirmed")
+            }
+            emptySpaceConfirmWork = work
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.emptySpaceConfirmDelay, execute: work)
+            return
+        }
+
+        // A real, non-empty, different Space — supersede any pending confirmation.
+        emptySpaceConfirmWork?.cancel()
+        emptySpaceConfirmWork = nil
+
+        let sincePrev = lastSpaceChangeTime > 0
+            ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"
+        lastSpaceChangeTime = TimeUtil.now()
+        commitSpaceChange(onScreenWindows: onScreenWindows, onScreenIDs: onScreenIDs, sincePrevMs: sincePrev)
+    }
+
+    private func commitSpaceChange(
+        onScreenWindows: [CGWindowInfo],
+        onScreenIDs: Set<UInt32>,
+        sincePrevMs sincePrev: String
+    ) {
         guard !isPaused else { return }
 
         // Cancel any in-progress title bar drag/menu — space transition invalidates context.
@@ -1189,14 +1350,12 @@ public final class WindowManager: @unchecked Sendable {
         // Cancel any pending external focus scroll — it was a space-transition artifact.
         pendingFocusScroll?.cancel()
         pendingFocusScroll = nil
+        pendingFocusScrollTile = nil
 
-        // Get all currently on-screen window IDs to identify this Space
-        let onScreenWindows = getAllWindowInfo()
-        let onScreenIDs = Set(
-            onScreenWindows.filter { $0.layer == 0 && $0.isOnScreen }.map(\.windowID))
+        let spaceChangeStart = TimeUtil.now()
         let leavingTile = stripController.userActiveTileID ?? stripController.strip.activeColumn?.activeTile
         let leavingWindow = leavingTile.flatMap { stripController.windowMap[$0] }
-        print("[WM] spaceChanged leaving wid=\(leavingWindow?.windowID ?? 0) app=\(leavingWindow.flatMap { tracker.apps[$0.pid]?.bundleIdentifier } ?? "?") title=\(logTitle(leavingWindow?.getTitle())) onScreenIDs=\(onScreenIDs)")
+        print("[WM] spaceChanged leaving wid=\(leavingWindow?.windowID ?? 0) app=\(leavingWindow.flatMap { tracker.apps[$0.pid]?.bundleIdentifier } ?? "?") title=\(logTitle(leavingWindow?.getTitle())) onScreenIDs=\(onScreenIDs) sincePrevMs=\(sincePrev) offScreen=\(offScreenSummary(sc: stripController))")
         fflush(stdout)
 
         // With "Displays have separate Spaces" OFF (the required setting for
@@ -1297,10 +1456,20 @@ public final class WindowManager: @unchecked Sendable {
                     }
                 }
 
-                print("[WM] space restored + \(newWindowIDs.count) new windows")
+                #if DEBUG
+                let diag = " (mainThreadMs=\(Self.ms(since: spaceChangeStart)))"
+                #else
+                let diag = ""
+                #endif
+                print("[WM] space restored + \(newWindowIDs.count) new windows\(diag)")
                 fflush(stdout)
             } else {
-                print("[WM] space restored: \(stripController.strip.columns.count) cols")
+                #if DEBUG
+                let diag = " (mainThreadMs=\(Self.ms(since: spaceChangeStart)))"
+                #else
+                let diag = ""
+                #endif
+                print("[WM] space restored: \(stripController.strip.columns.count) cols\(diag)")
                 fflush(stdout)
             }
 
@@ -1357,8 +1526,13 @@ public final class WindowManager: @unchecked Sendable {
         // window's current on-screen origin makes the adopted order match what the
         // user is actually looking at, and makes it stable across apps.
         var candidates: [(window: AXWindow, app: AXApp, originX: Double, originY: Double)] = []
+        var sweptApps = 0
+        var sweptWindows = 0
+        let sweepStart = TimeUtil.now()
         for (pid, app) in tracker.apps {
             let appWindows = discoverWindows(pid: pid)
+            sweptApps += 1
+            sweptWindows += appWindows.count
             for window in appWindows {
                 guard onScreenIDs.contains(window.windowID) else { continue }
                 guard !managedAcrossAllStrips.contains(window.windowID) else { continue }
@@ -1401,9 +1575,13 @@ public final class WindowManager: @unchecked Sendable {
         // space change within the 500ms TTL.
         focusGate.consumeRecentActivation(at: TimeUtil.now())
 
-        print(
-            "[WM] space changed: new strip with \(stripController.strip.columns.count) cols"
-        )
+        #if DEBUG
+        let diag = " (sweep: \(sweptApps) apps / \(sweptWindows) windows in \(Self.ms(since: sweepStart))ms,"
+            + " mainThreadMs=\(Self.ms(since: spaceChangeStart)))"
+        #else
+        let diag = ""
+        #endif
+        print("[WM] space changed: new strip with \(stripController.strip.columns.count) cols\(diag)")
         fflush(stdout)
     }
 

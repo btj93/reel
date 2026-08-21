@@ -103,6 +103,29 @@ public final class StripController: @unchecked Sendable {
     }
     internal var _confirmedUserActiveTileID: TileID?
 
+    /// Promote an *external* focus (tile click, kAXFocusedWindowChanged, dock /
+    /// Cmd+Tab activation) to the CONFIRMED active tile.
+    ///
+    /// Why this exists: `confirmedUserActiveTileID` distrusts any external focus
+    /// younger than 300ms because macOS fires a focus event just BEFORE it
+    /// delivers activeSpaceDidChange (commit 6ac3b1a), and that event can name a
+    /// destination-Space window. But the fallback it uses, `_confirmedUserActiveTileID`,
+    /// was written only by hotkey nav / addWindow / space restore — never by any
+    /// click or trackpad path. For a user who navigates by clicking, it stayed
+    /// pinned to the LAST-ADOPTED column (addWindow below) for as long as the
+    /// Space lived, so `saveCurrentSpace` persisted that arbitrary column as the
+    /// active one and the next return to the Space focused the wrong window.
+    ///
+    /// Call this only once an external focus has survived the debounce that a
+    /// Space change would have cancelled — at that point it is genuine user
+    /// intent, not a transition artifact. The 300ms distrust window is unchanged;
+    /// what changes is that its fallback is now at most one real focus old
+    /// instead of arbitrarily stale.
+    public func confirmUserActive(tileID: TileID) {
+        userActiveTileID = tileID
+        _confirmedUserActiveTileID = tileID
+    }
+
     /// Timestamp of the last layout application. Used to suppress echo AX events.
     public private(set) var lastLayoutTime: Double = 0
 
@@ -1613,6 +1636,14 @@ public final class StripController: @unchecked Sendable {
         } else {
             activeIndex = strip.activeColumnIndex
         }
+
+        #if DEBUG
+        print("[Strip] saveSpace activeIdx=\(activeIndex) stripActiveIdx=\(strip.activeColumnIndex)"
+            + " confirmed=\(_confirmedUserActiveTileID?.rawValue.description ?? "nil")"
+            + " userActive=\(userActiveTileID?.rawValue.description ?? "nil")"
+            + " externalFocusAgeMs=\(Int(((TimeUtil.now() - userActiveTileIDTime) * 1000).rounded()))")
+        fflush(stdout)
+        #endif
 
         savedSpaces[currentSpaceFingerprint] = SavedStripState(
             columns: strip.columns,
