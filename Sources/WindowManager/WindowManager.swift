@@ -699,6 +699,8 @@ public final class WindowManager: @unchecked Sendable {
         }
         healthCheckTimer?.tolerance = 0.1
 
+        startStallWatchdog()
+
         // Register signal handlers for graceful shutdown via NSApp.terminate
         // (ensures proper cleanup — menu bar icon removal, window restoration).
         //
@@ -1244,6 +1246,50 @@ public final class WindowManager: @unchecked Sendable {
     /// Pending re-read of a suspect (empty) on-screen list.
     private var emptySpaceConfirmWork: DispatchWorkItem?
 
+    // MARK: - Main-Thread Stall Watchdog (diagnostic)
+
+    /// Every CGEventTap Reel installs sits on the main run loop at
+    /// `.headInsertEventTap` with `.defaultTap`, which makes HID delivery wait on
+    /// the main thread. A long stall can therefore make macOS abandon an in-flight
+    /// trackpad gesture — including a Space swipe.
+    ///
+    /// The `mainThreadMs=` figures only cover `handleSpaceChange`, i.e. work AFTER
+    /// activeSpaceDidChange has already been delivered. The damaging stall would be
+    /// the one during the swipe, before the notification — and nothing measured
+    /// that. This samples the run loop instead: a repeating timer cannot fire while
+    /// the main thread is blocked, so an over-long gap between fires *is* the
+    /// stall, wherever it came from (AX round-trips, snapshot writes,
+    /// `restoreAllWindows`' synchronous setFrames while paused, anything).
+    ///
+    /// Deliberately NOT pause-gated: the paused runs are exactly where this needs
+    /// to report.
+    private var stallWatchdogTimer: Timer?
+    private var stallWatchdogLastFire: Double = 0
+    private static let stallWatchdogInterval: Double = 0.02
+    private static let stallWatchdogThresholdMs = 50
+
+    private func startStallWatchdog() {
+        #if DEBUG
+        stallWatchdogLastFire = TimeUtil.now()
+        let t = Timer.scheduledTimer(
+            withTimeInterval: Self.stallWatchdogInterval, repeats: true
+        ) { [weak self] _ in
+            guard let self else { return }
+            let now = TimeUtil.now()
+            let gapMs = Int(((now - self.stallWatchdogLastFire) * 1000).rounded())
+            self.stallWatchdogLastFire = now
+            if gapMs >= Self.stallWatchdogThresholdMs {
+                print("[WM] main-thread stall \(gapMs)ms")
+                fflush(stdout)
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        stallWatchdogTimer = t
+        print("[WM] stall watchdog armed (>= \(Self.stallWatchdogThresholdMs)ms)")
+        fflush(stdout)
+        #endif
+    }
+
     /// Which tiles are parked outside the working area, and on which edge, at the
     /// moment of a Space switch. Slivered windows sit far beyond the display bounds
     /// (observed: x=-1205 and x=1799 on an ~1800px display) and macOS reveals them
@@ -1292,7 +1338,8 @@ public final class WindowManager: @unchecked Sendable {
             emptySpaceConfirmWork?.cancel()
             emptySpaceConfirmWork = nil
             print("[WM] spaceChanged: same fingerprint as current Space — ignored"
-                + " (sincePrevMs=\(lastSpaceChangeTime > 0 ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"))")
+                + " (sincePrevMs=\(lastSpaceChangeTime > 0 ? "\(Self.ms(since: lastSpaceChangeTime))" : "-")"
+                + " offScreen=\(offScreenSummary(sc: stripController)))")
             fflush(stdout)
             lastSpaceChangeTime = TimeUtil.now()
             return
@@ -1304,7 +1351,7 @@ public final class WindowManager: @unchecked Sendable {
                 ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"
             lastSpaceChangeTime = TimeUtil.now()
             print("[WM] spaceChanged: empty on-screen read — deferring \(Int(Self.emptySpaceConfirmDelay * 1000))ms"
-                + " to confirm (sincePrevMs=\(sincePrev))")
+                + " to confirm (sincePrevMs=\(sincePrev) offScreen=\(offScreenSummary(sc: stripController)))")
             fflush(stdout)
 
             emptySpaceConfirmWork?.cancel()
@@ -1317,7 +1364,7 @@ public final class WindowManager: @unchecked Sendable {
                     fflush(stdout)
                     return
                 }
-                print("[WM] spaceChanged: empty read confirmed (\(ids.count) on screen) — committing")
+                print("[WM] spaceChanged: deferred read settled to \(ids.count) on screen — committing")
                 fflush(stdout)
                 self.commitSpaceChange(onScreenWindows: infos, onScreenIDs: ids, sincePrevMs: "confirmed")
             }
