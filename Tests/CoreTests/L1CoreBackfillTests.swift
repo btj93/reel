@@ -156,4 +156,45 @@ func runL1CoreBackfillTests() {
         let pairs = matchSlotsToWindows(slots: slots, candidates: [])
         check(pairs.isEmpty, "no candidates → no pairs")
     }
+    // CGWindowListCopyWindowInfo read at activeSpaceDidChange time is not reliable:
+    // observed returning nothing mid-transition, and twice a 14-window union
+    // spanning four Spaces. A window lives on exactly one Space, so a read that
+    // straddles two mutually disjoint known fingerprints cannot describe one.
+    section("spansMultipleSpaces — rejects a cross-Space union, accepts real reads")
+    do {
+        let spaceA: Set<UInt32> = [64, 228, 9343, 128844]
+        let spaceB: Set<UInt32> = [86, 90, 95]
+        let spaceC: Set<UInt32> = [14808, 105792]
+
+        check(!spansMultipleSpaces(onScreenIDs: spaceA, knownFingerprints: [spaceA, spaceB, spaceC]),
+              "a real Space's own fingerprint is not suspect")
+        check(!spansMultipleSpaces(onScreenIDs: [64, 228], knownFingerprints: [spaceA, spaceB]),
+              "a subset of one Space (windows closed while away) is not suspect")
+        check(!spansMultipleSpaces(onScreenIDs: [64, 228, 777], knownFingerprints: [spaceA, spaceB]),
+              "one Space plus a brand-new window is not suspect")
+
+        // The observed failure: windows from three Spaces at once.
+        let union = spaceA.union(spaceB).union(spaceC)
+        check(spansMultipleSpaces(onScreenIDs: union, knownFingerprints: [spaceA, spaceB, spaceC]),
+              "a union across disjoint Spaces is rejected")
+        check(spansMultipleSpaces(onScreenIDs: [64, 86], knownFingerprints: [spaceA, spaceB]),
+              "even one window from each of two disjoint Spaces is enough")
+
+        // Overlapping fingerprints are normal (fuzzy re-keying, windows moved
+        // between Spaces) and must not be treated as evidence.
+        let overlapping: Set<UInt32> = [228, 9343, 55555]
+        check(!spansMultipleSpaces(onScreenIDs: spaceA, knownFingerprints: [spaceA, overlapping]),
+              "overlapping fingerprints are not disjoint, so they prove nothing")
+
+        // Degenerate inputs.
+        check(!spansMultipleSpaces(onScreenIDs: [], knownFingerprints: [spaceA, spaceB]),
+              "empty read is handled by the empty-read path, not this one")
+        check(!spansMultipleSpaces(onScreenIDs: [64], knownFingerprints: [spaceA, spaceB]),
+              "a single window can never span Spaces")
+        check(!spansMultipleSpaces(onScreenIDs: union, knownFingerprints: [[], []]),
+              "empty fingerprints carry no information")
+        check(!spansMultipleSpaces(onScreenIDs: union, knownFingerprints: []),
+              "no known Spaces yet (first switch after launch) — nothing to compare")
+    }
+
 }

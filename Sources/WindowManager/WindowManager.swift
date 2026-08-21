@@ -1345,12 +1345,24 @@ public final class WindowManager: @unchecked Sendable {
             return
         }
 
-        if onScreenIDs.isEmpty {
+        // A read that straddles two Spaces that cannot be on screen together is as
+        // untrustworthy as an empty one, and gets the same treatment. Observed
+        // twice: a 14-window list spanning four Spaces, committed as a Space
+        // identity, which wiped a live 5-column strip.
+        let spansSpaces = spansMultipleSpaces(
+            onScreenIDs: onScreenIDs,
+            knownFingerprints: stripController.savedSpaceFingerprints
+                + [stripController.currentSpaceFingerprint])
+
+        if onScreenIDs.isEmpty || spansSpaces {
+            let reason = onScreenIDs.isEmpty
+                ? "empty on-screen read"
+                : "read spans multiple Spaces (\(onScreenIDs.count) windows)"
             let fingerprintAtSchedule = stripController.currentSpaceFingerprint
             let sincePrev = lastSpaceChangeTime > 0
                 ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"
             lastSpaceChangeTime = TimeUtil.now()
-            print("[WM] spaceChanged: empty on-screen read — deferring \(Int(Self.emptySpaceConfirmDelay * 1000))ms"
+            print("[WM] spaceChanged: \(reason) — deferring \(Int(Self.emptySpaceConfirmDelay * 1000))ms"
                 + " to confirm (sincePrevMs=\(sincePrev) offScreen=\(offScreenSummary(sc: stripController)))")
             fflush(stdout)
 
@@ -1361,6 +1373,18 @@ public final class WindowManager: @unchecked Sendable {
                 let (infos, ids) = self.currentOnScreenIDs()
                 if ids == fingerprintAtSchedule {
                     print("[WM] spaceChanged: transient empty read — same Space after settle, dropped")
+                    fflush(stdout)
+                    return
+                }
+                if spansMultipleSpaces(
+                    onScreenIDs: ids,
+                    knownFingerprints: self.stripController.savedSpaceFingerprints
+                        + [self.stripController.currentSpaceFingerprint])
+                {
+                    // Still impossible after the settle. Committing it would be
+                    // strictly worse than leaving the strip as it is; the 500ms
+                    // health check adopts anything genuinely new.
+                    print("[WM] spaceChanged: read still spans multiple Spaces after settle — dropped")
                     fflush(stdout)
                     return
                 }
