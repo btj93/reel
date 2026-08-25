@@ -39,19 +39,45 @@ public final class StripController: @unchecked Sendable {
     /// that arrive after the settle re-anchors activeColumnIndex.
     private var gestureSettleTime: Double = 0
 
-    /// Saved strip states per Space, keyed by a fingerprint of on-screen window IDs.
-    private var savedSpaces: [Set<UInt32>: SavedStripState] = [:]
+    /// Saved strip states per Space.
+    private var savedSpaces: [SpaceKey: SavedStripState] = [:]
 
-    /// Debug-introspection: fingerprints of spaces whose state this controller
-    /// currently has stashed (does NOT include the live current space).
-    public var savedSpaceFingerprints: [Set<UInt32>] {
+    /// Debug-introspection: identities of spaces whose state this controller
+    /// currently has stashed.
+    public var savedSpaceKeys: [SpaceKey] {
         Array(savedSpaces.keys)
+    }
+
+    /// The on-screen fingerprint stored in a given stash, or nil if not stashed.
+    ///
+    /// `get-layouts` must report this rather than `key.fingerprintValue`, which is
+    /// nil for every authoritative key — the diagnostic exists to find windows
+    /// stuck off-screen after a Space switch, and empty fingerprints make it
+    /// useless exactly when it is needed.
+    public func savedSpaceFingerprint(for key: SpaceKey) -> Set<UInt32>? {
+        savedSpaces[key]?.fingerprint
+    }
+
+    /// On-screen fingerprints of every stashed Space, whatever its key type.
+    ///
+    /// MUST read the fingerprint stored INSIDE each `SavedStripState`, never one
+    /// derived from the dictionary key. Deriving it (`keys.compactMap(\.fingerprintValue)`)
+    /// returns an empty array once keys are authoritative, which silently disables
+    /// `spansMultipleSpaces` — it bails on `touched.count > 1` — and that guard is
+    /// the only defence against the observed 14-window cross-Space read, on the
+    /// very fallback path that still needs it.
+    public var savedSpaceFingerprints: [Set<UInt32>] {
+        savedSpaces.values.map(\.fingerprint)
     }
 
     /// Debug-introspection: the column list + window titles for a stashed space.
     /// Returns nil if the fingerprint isn't stashed.
     public func savedSpaceSnapshot(for fingerprint: Set<UInt32>) -> [(tileID: TileID, windowID: UInt32, bundleID: String?, title: String?)]? {
-        guard let state = savedSpaces[fingerprint] else { return nil }
+        savedSpaceSnapshot(for: .fingerprint(fingerprint))
+    }
+
+    public func savedSpaceSnapshot(for key: SpaceKey) -> [(tileID: TileID, windowID: UInt32, bundleID: String?, title: String?)]? {
+        guard let state = savedSpaces[key] else { return nil }
         var out: [(TileID, UInt32, String?, String?)] = []
         for col in state.columns {
             for tile in col.tiles {
@@ -67,7 +93,11 @@ public final class StripController: @unchecked Sendable {
     /// AXWindow references and per-column metadata so callers can query live AX
     /// frames for windows that belong to another Space.
     public func savedSpaceDetail(for fingerprint: Set<UInt32>) -> [(tileID: TileID, window: AXWindow, bundleID: String?, columnWidth: ColumnWidth, isFullWidth: Bool)]? {
-        guard let state = savedSpaces[fingerprint] else { return nil }
+        savedSpaceDetail(for: .fingerprint(fingerprint))
+    }
+
+    public func savedSpaceDetail(for key: SpaceKey) -> [(tileID: TileID, window: AXWindow, bundleID: String?, columnWidth: ColumnWidth, isFullWidth: Bool)]? {
+        guard let state = savedSpaces[key] else { return nil }
         var out: [(TileID, AXWindow, String?, ColumnWidth, Bool)] = []
         for col in state.columns {
             for tile in col.tiles {
@@ -79,8 +109,22 @@ public final class StripController: @unchecked Sendable {
         return out
     }
 
-    /// The fingerprint of the current Space.
+    /// Identity of the current Space, used to key `savedSpaces`.
+    public internal(set) var currentSpaceKey: SpaceKey = .fingerprint([])
+
+    /// On-screen CGWindowIDs of the current Space. Still a stored property and
+    /// still meaningful under an authoritative key: it is the disk `SnapshotKey`
+    /// discriminator and the input to the census guards. Letting it go empty would
+    /// collapse every Space's disk snapshot into one bucket.
     public internal(set) var currentSpaceFingerprint: Set<UInt32> = []
+
+    /// Persistent UUID of the current Space, captured at switch time.
+    ///
+    /// Read by `snapshotStoreKey`; must never be re-queried live there, because
+    /// snapshots are saved for the LEAVING Space after the window server has
+    /// already switched — a live read would return the destination's UUID and file
+    /// the departing layout under it.
+    public internal(set) var currentSpaceUUID: String?
 
     /// The user's intended active tile. Updated by hotkeys, addWindow, space restore,
     /// and external window focus (clicks). Used by saveCurrentSpace to persist focus.
@@ -1616,7 +1660,7 @@ public final class StripController: @unchecked Sendable {
 
     /// Save the current strip state for the current Space.
     public func saveCurrentSpace() {
-        guard !currentSpaceFingerprint.isEmpty else { return }
+        guard !currentSpaceKey.isEmpty else { return }
         // Clear in-flight width animations — stale springs with old startTimes
         // would evaluate incorrectly when restored later.
         for i in 0..<strip.columnData.count {
@@ -1645,7 +1689,8 @@ public final class StripController: @unchecked Sendable {
         fflush(stdout)
         #endif
 
-        savedSpaces[currentSpaceFingerprint] = SavedStripState(
+        savedSpaces[currentSpaceKey] = SavedStripState(
+            fingerprint: currentSpaceFingerprint,
             columns: strip.columns,
             columnData: strip.columnData,
             snapIndices: strip.snapIndices,
@@ -1724,7 +1769,16 @@ public final class StripController: @unchecked Sendable {
     /// it's considered the same space (handles windows created/destroyed while away).
     /// - Parameter onScreenWindowIDs: CGWindowIDs currently on screen
     /// - Returns: true if restored from saved state, false if needs fresh discovery
+    /// Compatibility wrapper: identity and fingerprint are the same value.
+    @discardableResult
     public func switchSpace(onScreenWindowIDs: Set<UInt32>) -> Bool {
+        switchSpace(to: .fingerprint(onScreenWindowIDs), onScreenWindowIDs: onScreenWindowIDs)
+    }
+
+    @discardableResult
+    public func switchSpace(
+        to key: SpaceKey, onScreenWindowIDs: Set<UInt32>, spaceUUID: String? = nil
+    ) -> Bool {
         // Save current space
         saveCurrentSpace()
 
@@ -1733,13 +1787,19 @@ public final class StripController: @unchecked Sendable {
         // successor write and its queued closure would reposition it afterwards.
         for tileID in windowMap.keys { invalidatePendingWrite(tileID: tileID) }
 
-        // Update fingerprint
+        currentSpaceKey = key
         currentSpaceFingerprint = onScreenWindowIDs
+        // Must be assigned here, not left to lag: snapshotStoreKey reads it, so a
+        // stale value files this Space's layout under the PREVIOUS Space's UUID —
+        // and with exact-match disk lookups that deletes the real owner's entry
+        // instead of self-correcting the way a fuzzy fingerprint would.
+        currentSpaceUUID = spaceUUID
 
-        // Find best matching saved space (fuzzy: Jaccard similarity > 0.5)
-        if let (matchedKey, saved) = findBestSavedSpace(for: onScreenWindowIDs) {
-            // Update the saved key to the current fingerprint
-            if matchedKey != onScreenWindowIDs {
+        if let (matchedKey, saved) = findBestSavedSpace(for: key, fingerprint: onScreenWindowIDs) {
+            // Re-key the stash onto the incoming identity. Critical for the
+            // degraded case: a stash saved under .skylight and recovered by
+            // fingerprint must not stay under the old key, or it is orphaned.
+            if matchedKey != key {
                 savedSpaces.removeValue(forKey: matchedKey)
             }
 
@@ -1791,37 +1851,72 @@ public final class StripController: @unchecked Sendable {
         return false
     }
 
-    /// Find the saved space with the best fingerprint overlap.
-    /// Returns nil if no saved space has >50% Jaccard similarity.
-    private func findBestSavedSpace(for fingerprint: Set<UInt32>) -> (Set<UInt32>, SavedStripState)? {
-        var bestKey: Set<UInt32>?
-        var bestScore: Double = 0
+    /// Find the stash for an incoming Space identity.
+    ///
+    /// Matching depends on provenance. `.skylight` is the window server's own id,
+    /// so lookup is EXACT — fuzzy-matching a real Space id would be actively wrong,
+    /// since two Spaces can hold identical window sets.
+    ///
+    /// `.fingerprint` is inferred, so it keeps the Jaccard > 0.5 tolerance that
+    /// absorbs windows opened or closed while away. It scans the fingerprint STORED
+    /// IN each stash, not the key, so it can still recover a stash that was saved
+    /// under a `.skylight` key. That matters: without it, one episode of SkyLight
+    /// being unavailable would wipe the strip into fresh discovery (losing widths
+    /// and grouping) and re-key the Space so an authoritative return could never
+    /// find it again.
+    private func findBestSavedSpace(
+        for key: SpaceKey, fingerprint: Set<UInt32>
+    ) -> (SpaceKey, SavedStripState)? {
+        if key.isAuthoritative {
+            guard let state = savedSpaces[key] else { return nil }
+            return (key, state)
+        }
+        guard !fingerprint.isEmpty else { return nil }
 
-        for key in savedSpaces.keys {
-            let intersection = key.intersection(fingerprint).count
-            let union = key.union(fingerprint).count
+        var bestKey: SpaceKey?
+        var bestScore: Double = 0
+        for (candidateKey, state) in savedSpaces {
+            let intersection = state.fingerprint.intersection(fingerprint).count
+            let union = state.fingerprint.union(fingerprint).count
             guard union > 0 else { continue }
             let jaccard = Double(intersection) / Double(union)
             if jaccard > bestScore {
                 bestScore = jaccard
-                bestKey = key
+                bestKey = candidateKey
             }
         }
 
-        guard let key = bestKey, bestScore > 0.5, let state = savedSpaces[key] else {
+        guard let bestKey, bestScore > 0.5, let state = savedSpaces[bestKey] else {
             return nil
         }
-        return (key, state)
+        return (bestKey, state)
+    }
+
+    /// Set the current Space identity (used on initial startup and on hot-plug).
+    ///
+    /// Takes `spaceUUID` so no caller has to remember a second assignment — the
+    /// hot-plug seed did exactly that in an earlier design and left the new group
+    /// without a UUID for the life of the process.
+    public func setSpaceKey(
+        _ key: SpaceKey, onScreenWindowIDs: Set<UInt32>, spaceUUID: String? = nil
+    ) {
+        currentSpaceKey = key
+        currentSpaceFingerprint = onScreenWindowIDs
+        currentSpaceUUID = spaceUUID
     }
 
     /// Set the current Space fingerprint (used on initial startup).
     public func setSpaceFingerprint(_ fingerprint: Set<UInt32>) {
-        currentSpaceFingerprint = fingerprint
+        setSpaceKey(.fingerprint(fingerprint), onScreenWindowIDs: fingerprint)
     }
 }
 
 /// Saved state for a Space's strip layout.
 struct SavedStripState {
+    /// On-screen fingerprint at save time. Stored rather than derived from the
+    /// dictionary key so it survives authoritative keying — see
+    /// `savedSpaceFingerprints`.
+    var fingerprint: Set<UInt32>
     var columns: [Column]
     var columnData: [ColumnData]
     var snapIndices: [Int]

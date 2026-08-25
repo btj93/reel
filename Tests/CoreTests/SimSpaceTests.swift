@@ -243,6 +243,120 @@ func runSimSpace() {
     }
     check(TimeUtil.nowProvider == nil, "clock leaked out of section")
 
+    // With an authoritative id, a Space is looked up EXACTLY. Two Spaces whose
+    // window sets overlap heavily — which Jaccard would happily merge — must stay
+    // separate stashes.
+    section("switchSpace — .skylight keys match exactly, never fuzzily")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        sc.setSpaceKey(.skylight(4), onScreenWindowIDs: fp(1, 2))
+        let (_, ws) = addFakeWindows(sc, count: 2, width: 500)
+        assertEq(sc.strip.columns.count, 2, "space sid=4 has 2 columns")
+
+        check(!sc.switchSpace(to: .skylight(5), onScreenWindowIDs: fp(1, 2)),
+              "a different sid is a different Space, even with identical windows")
+        assertEq(sc.strip.columns.count, 0, "fresh Space starts empty")
+
+        check(sc.switchSpace(to: .skylight(4), onScreenWindowIDs: fp(1, 2)),
+              "returning to sid=4 restores exactly")
+        assertEq(sc.strip.columns.count, 2, "columns restored")
+        check(sc.windowMap[ws[0].tileID] != nil, "windows restored")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    // The measured 414ms bounce, expressed in the new model.
+    section("switchSpace — an A->B->A bounce restores the original stash")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        sc.setSpaceKey(.skylight(4), onScreenWindowIDs: fp(1, 2, 3))
+        addFakeWindows(sc, count: 3, width: 400)
+        sc.strip.activeColumnIndex = 1
+        sc.confirmUserActive(tileID: sc.strip.columns[1].tiles[0])
+
+        clock.advance(0.1)
+        check(!sc.switchSpace(to: .skylight(5), onScreenWindowIDs: fp()), "left to sid=5")
+        clock.advance(0.414)
+        check(sc.switchSpace(to: .skylight(4), onScreenWindowIDs: fp(1, 2, 3)), "bounced back to sid=4")
+        assertEq(sc.strip.columns.count, 3, "all columns back")
+        assertEq(sc.strip.activeColumnIndex, 1, "focused column preserved across the bounce")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    // The fingerprint keeps tracking the on-screen set even under an authoritative
+    // key. It is the disk SnapshotKey discriminator and the input to the census
+    // guards; letting it go empty would collapse every Space into one bucket.
+    section("switchSpace — currentSpaceFingerprint still tracks on-screen IDs under a .skylight key")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        sc.setSpaceKey(.skylight(4), onScreenWindowIDs: fp(1, 2))
+        assertEq(sc.currentSpaceFingerprint, fp(1, 2), "seeded fingerprint retained")
+        _ = sc.switchSpace(to: .skylight(5), onScreenWindowIDs: fp(7, 8, 9))
+        assertEq(sc.currentSpaceFingerprint, fp(7, 8, 9), "fingerprint follows the new Space")
+        check(!sc.currentSpaceFingerprint.isEmpty, "never collapses to empty under an authoritative key")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    // switchSpace must carry the persistent UUID, or every layout gets filed under
+    // the PREVIOUS Space's UUID — and with exact-match disk lookups that silently
+    // deletes the real owner's entry instead of self-correcting.
+    section("switchSpace — carries the persistent Space UUID")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        sc.setSpaceKey(.skylight(4), onScreenWindowIDs: fp(1), spaceUUID: "UUID-A")
+        assertEq(sc.currentSpaceUUID ?? "", "UUID-A", "seeded UUID retained")
+        _ = sc.switchSpace(to: .skylight(5), onScreenWindowIDs: fp(2), spaceUUID: "UUID-B")
+        assertEq(sc.currentSpaceUUID ?? "", "UUID-B", "UUID follows the Space, never lags")
+        _ = sc.switchSpace(to: .fingerprint(fp(3)), onScreenWindowIDs: fp(3), spaceUUID: nil)
+        check(sc.currentSpaceUUID == nil, "a Space with no UUID clears it rather than keeping the old one")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    // savedSpaceFingerprints must report the fingerprint STORED IN each stash, not
+    // one derived from the dictionary key. Deriving it returns [] under
+    // authoritative keying, which silently disables spansMultipleSpaces — the only
+    // defence against the observed 14-window cross-Space read — on the fallback
+    // path that still needs it.
+    section("savedSpaceFingerprints — reported from the stash, not the key")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        sc.setSpaceKey(.skylight(4), onScreenWindowIDs: fp(11, 12))
+        addFakeWindows(sc, count: 1, width: 500)
+        _ = sc.switchSpace(to: .skylight(5), onScreenWindowIDs: fp(21, 22))
+        check(sc.savedSpaceFingerprints.contains(fp(11, 12)),
+              "an authoritatively-keyed stash still reports its on-screen fingerprint")
+        check(!sc.savedSpaceFingerprints.isEmpty, "never empty just because keys are authoritative")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
+    // A degraded episode (SkyLight briefly unavailable) must not orphan a stash.
+    // Without this, a .fingerprint key can never match a .skylight stash: the strip
+    // is wiped into fresh discovery, and the Space is re-keyed so an authoritative
+    // return can never find it again.
+    section("switchSpace — a fingerprint key can recover a .skylight stash and re-key it")
+    do {
+        let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }
+        let sc = makeSC()
+        sc.setSpaceKey(.skylight(4), onScreenWindowIDs: fp(1, 2, 3, 4))
+        addFakeWindows(sc, count: 2, width: 500)
+        _ = sc.switchSpace(to: .skylight(9), onScreenWindowIDs: fp(90))
+
+        // SkyLight declines; we come back with only a fingerprint. 3 of 4 shared.
+        check(sc.switchSpace(onScreenWindowIDs: fp(1, 2, 3, 99)),
+              "degraded return still finds the stash by stored fingerprint")
+        assertEq(sc.strip.columns.count, 2, "layout recovered, not rediscovered from scratch")
+
+        // And the stash was re-keyed, so it is not orphaned under the old sid.
+        _ = sc.switchSpace(to: .skylight(9), onScreenWindowIDs: fp(90))
+        check(!sc.switchSpace(to: .skylight(4), onScreenWindowIDs: fp(1, 2, 3, 99)),
+              "the old sid no longer holds a duplicate stash")
+    }
+    check(TimeUtil.nowProvider == nil, "clock leaked out of section")
+
     section("confirmedUserActiveTileID boundary 0.299 vs 0.301")
     do {
         let clock = TestClock(100); clock.install(); defer { TimeUtil.nowProvider = nil }

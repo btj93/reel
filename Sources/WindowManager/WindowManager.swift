@@ -2308,10 +2308,11 @@ public final class WindowManager: @unchecked Sendable {
                 }
 
                 // Stashed space states (other desktops this strip has seen).
-                let savedSpaces: [[String: Any]] = sc.savedSpaceFingerprints.map { fp in
-                    let snap = sc.savedSpaceSnapshot(for: fp) ?? []
+                let savedSpaces: [[String: Any]] = sc.savedSpaceKeys.map { spaceKey in
+                    let snap = sc.savedSpaceSnapshot(for: spaceKey) ?? []
                     return [
-                        "fingerprint": fp.sorted(),
+                        "spaceKey": spaceKey.debugDescription,
+                        "fingerprint": (sc.savedSpaceFingerprint(for: spaceKey) ?? []).sorted(),
                         "windows": snap.map { entry in
                             [
                                 "tileID": entry.tileID.rawValue,
@@ -2458,8 +2459,9 @@ public final class WindowManager: @unchecked Sendable {
                 seen.insert(SnapshotKey(groupID: gid, spaceFingerprint: sc.currentSpaceFingerprint))
 
                 // --- stashed-in-session spaces: AXWindow refs are still alive ---
-                for fp in sc.savedSpaceFingerprints {
-                    guard let detail = sc.savedSpaceDetail(for: fp) else { continue }
+                for spaceKey in sc.savedSpaceKeys {
+                    guard let detail = sc.savedSpaceDetail(for: spaceKey) else { continue }
+                    let fp = sc.savedSpaceFingerprint(for: spaceKey) ?? []
                     var wins: [[String: Any]] = []
                     for (tile, axw, bundle, width, isFW) in detail {
                         wins.append(entry(
@@ -2473,6 +2475,7 @@ public final class WindowManager: @unchecked Sendable {
                         "isActiveGroup": false,
                         "isCurrentSpace": false,
                         "source": "session",
+                        "spaceKey": spaceKey.debugDescription,
                         "spaceFingerprint": fp.sorted(),
                         "windows": wins,
                     ])
@@ -3135,8 +3138,20 @@ public final class WindowManager: @unchecked Sendable {
             )
             applyConfigToStrip(sc)
             sc.strip.groupArea = ga
-            if let fp = stripControllers.values.first?.currentSpaceFingerprint {
-                sc.setSpaceFingerprint(fp)
+            // Seed the new group's Space identity from an existing strip. Carry the
+            // KEY and UUID, not just the fingerprint: seeding only the fingerprint
+            // would leave the new group with `.fingerprint([])` once identities are
+            // authoritative, and `saveCurrentSpace` refuses to stash an empty key —
+            // so that group would silently never save Space state again.
+            //
+            // NOTE: `values.first` is order-nondeterministic and, with "Displays
+            // have separate Spaces" ON, is on a DIFFERENT Space. Once
+            // `resolveSpaceIdentity` exists, this must resolve the new group's own
+            // identity instead of copying a donor's.
+            if let donor = stripControllers.values.first {
+                sc.setSpaceKey(donor.currentSpaceKey,
+                               onScreenWindowIDs: donor.currentSpaceFingerprint,
+                               spaceUUID: donor.currentSpaceUUID)
             }
             stripControllers[gid] = sc
 
