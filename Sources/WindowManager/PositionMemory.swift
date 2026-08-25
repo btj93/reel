@@ -492,13 +492,16 @@ public class StripSnapshotStore {
 
             // Group by (displayID, spaceFingerprint) to preserve multi-space layouts.
             // Use sorted fingerprint array as a hashable key since Set<UInt32> can't be a dict key.
-            struct SpaceKey: Hashable {
+            // Named to avoid shadowing `Core.SpaceKey`. A local declaration wins,
+            // so shadowing would compile while silently giving a future reader the
+            // wrong type in this function.
+            struct LegacySpaceGroupKey: Hashable {
                 let displayID: UInt32
                 let fingerprint: [UInt32]  // sorted for stable hashing
             }
-            var bySpace: [SpaceKey: [(key: LegacyPositionKey, position: LegacyPosition)]] = [:]
+            var bySpace: [LegacySpaceGroupKey: [(key: LegacyPositionKey, position: LegacyPosition)]] = [:]
             for entry in file.entries {
-                let spaceKey = SpaceKey(
+                let spaceKey = LegacySpaceGroupKey(
                     displayID: entry.key.displayID,
                     fingerprint: entry.key.spaceFingerprint.sorted())
                 bySpace[spaceKey, default: []].append((entry.key, entry.position))

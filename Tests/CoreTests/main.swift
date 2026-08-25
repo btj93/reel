@@ -2923,6 +2923,7 @@ runL1CoreBackfillTests()
 runL1AuditGapTests()
 runL1GroupAreaTests()
 runL1FocusGateTests()
+runL1SpaceKeyTests()
 
 // ============================================================
 // MARK: - W4 Layer-2 StripController simulation (fakes + virtual clock)
