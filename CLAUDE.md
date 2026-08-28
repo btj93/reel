@@ -44,6 +44,7 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 **Platform** — macOS API wrappers.
 - `AXApp`: **one Thread + CFRunLoop per app** for AX observers. Prevents hung apps from blocking main thread.
 - `AXWindow`: setFrame uses `size→position→size` workaround. 100ms messaging timeout via `AXUIElementSetMessagingTimeout`. Uses private `_AXUIElementGetWindow` to get CGWindowID (no SIP required).
+- `SpaceIdentity`: dlsym'd SkyLight Space *queries* — the real Space id and its persistent UUID. Feature-detected; returns nil when unavailable so callers fall back to the legacy fingerprint. Read-only by design; see **Private API** below.
 - `FrameLoop`: CADisplayLink, pauses when idle, resumes on animation start.
 - `DisplayManager`: converts NSScreen (AppKit bottom-left coords) to CG (top-left coords) via `primaryScreenHeight - visibleFrame.maxY`.
 - `HotkeyManager`: CGEventTap + key string parser (`"hyper-h"` → modifiers + keyCode).
@@ -72,13 +73,26 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 
 **Dock click across Spaces**: `.appActivated` stores the pid in `recentAppActivation` (500ms TTL). `handleSpaceChange` reads it to override `savedFocusTile` with the activated app's AX-focused window on the destination strip. The field is one-shot — consumed on same-space resolution, on space-change consumption, and at the end of the new-space discovery path.
 
+The TTL alone is NOT sufficient evidence of a dock click: an app that merely activates on its own shortly before a Space change looks identical. The override is therefore rejected unless the activated app had **no window on the departing Space** — crossing Spaces to reach an app is only meaningful if it had nothing where you already were. Skipping this made the view jump to whichever app happened to activate (in practice ChatGPT, whose helper windows churn app focus). `restoreFocus source=…` logs which input won on every restore; four theories about this bug were wrong before that line was added.
+
 **Off-screen windows**: 1px sliver at screen edge — the only technique production actually applies. A corner-hide at (-10000,-10000) is *recognized* by the `get-layouts` diagnostics but nothing ever writes that position; an app whose sliver write fails just stays in the `dirtyTileIDs` retry loop (known gap, pinned by the `TODO(prod-finding)` test in `SimFocusTests`). If a real fallback is implemented, put it behind the sliver-failure path in `StripController` and flip that test.
 
-**Space switching**: saves strip state keyed by on-screen window ID fingerprint. Restores on return, discovers new windows, removes closed ones.
+**Space switching**: strip state is keyed by `Core.SpaceKey` — `.skylight(sid)` when `SpaceIdentity` can read the window server's real Space id, `.fingerprint(Set<CGWindowID>)` otherwise. Authoritative keys match EXACTLY; fingerprints keep Jaccard > 0.5 tolerance. A fingerprint can still recover a `.skylight` stash (matching is done against the fingerprint stored *inside* each `SavedStripState`, not the dictionary key) and re-keys the winner, so one degraded episode cannot orphan a Space's layout.
+
+Identity and census are separate problems, and conflating them is a trap. The sid fixes *which Space this is*. It says nothing about whether `onScreenIDs` is trustworthy — and that list drives `goneIDs → removeWindow`, which cascades through `pruneSavedSpaces` into every other Space's stash. So the empty-read deferral and `spansMultipleSpaces` are **permanent census guards**, and the same-sid check sits AHEAD of them, never instead of them.
+
+**Space-change storms**: macOS has been measured firing 678 notifications in 180s (~4/s) with the sid genuinely cycling. Notifications closer than 300ms are coalesced and acted on once, 250ms after the churn stops. Normal switching pays no latency. The settle delay is deliberately shorter than the storm threshold, so the re-entry backdates `lastSpaceChangeTime` past the threshold — without that it sees its own settle as more churn and defers forever.
 
 **Rubber-band bounce**: at strip edges, creates underdamped spring (ratio=0.6) with kick velocity that overshoots then bounces back.
 
-**Private API**: One private API is used (no SIP required): `_AXUIElementGetWindow` (AXUIElement→CGWindowID mapping). Validated stable across macOS 10.12–15 by AeroSpace/Amethyst.
+**Private API**: Two private surfaces, both read-only, neither requiring SIP disabled or a Dock scripting addition:
+
+1. `_AXUIElementGetWindow` (AXUIElement→CGWindowID). Validated stable across macOS 10.12–15 by AeroSpace/Amethyst.
+2. **SkyLight Space queries** (`Sources/Platform/SpaceIdentity.swift`) — `SLSMainConnectionID`, `SLSGetActiveSpace`, `SLSManagedDisplayGetCurrentSpace`, `SLSSpaceCopyName`, `SLSSpaceGetType`. Resolved by `dlsym`, never linked, so a macOS release that removes them degrades to `isAvailable == false` and the legacy fingerprint path resumes.
+
+Every SkyLight call is a QUERY. The SkyLight functions that require SIP disabled are all *mutations* (create/destroy/focus Space, move window to Space, set opacity/level/sticky) and none are used — that boundary is deliberate and must be preserved. Verified on macOS 26.6.1 (25G76) from an unsigned binary with SIP enabled and no Accessibility grant. Caveat: `SLSSetWindowAlpha`/`SLSSetWindowLevel` in this same framework became no-ops on macOS 26, which is why the fallback exists.
+
+Why it was worth it: Reel previously identified a Space by fingerprinting the on-screen CGWindowID set and matching by Jaccard similarity. That read is unreliable by construction — observed returning an empty set mid-transition, and a 14-window set spanning four Spaces. yabai and Amethyst both read Space identity from this same SkyLight/CGS family; AeroSpace instead refuses Spaces entirely rather than use a private API.
 
 **Visibility zones**: `computeTargetFrames` tags each tile with a `VisibilityZone` (.visible / .nearBuffer / .far). Visible tiles update every frame; near-buffer at low priority; far tiles only on settle. This keeps AX call volume proportional to what the user can see.
 

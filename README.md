@@ -12,7 +12,7 @@ Instead of cramming every window into the visible screen, Reel places them on an
 
 Keyboard, trackpad, and mouse are all first-class citizens. Hotkeys for fast navigation, trackpad swipes for fluid scrolling, mouse clicks and drag-to-reorder for direct manipulation — pick whichever feels natural, or mix all three. A CLI tool (`reel-msg`) exposes every action over a Unix socket for scripting and programmatic control.
 
-No SIP disable required. Pure Swift + Accessibility API.
+No SIP disable required. Pure Swift, Accessibility API, and two read-only private calls ([details](#private-apis)).
 
 ## Demo
 
@@ -75,7 +75,7 @@ No SIP disable required. Pure Swift + Accessibility API.
 
 macOS prompts for Accessibility access on first launch. Grant it once — the permission persists across rebuilds when running the debug binary (`.build/debug/Reel`). The `.app` bundle uses a stable code-signing identifier to avoid re-prompting.
 
-No SIP disable required.
+No SIP disable required, and nothing is injected into any other process. See [Private APIs](#private-apis) for the two undocumented calls Reel makes and why.
 
 ## Getting Started
 
@@ -404,8 +404,24 @@ Reel takes a different approach from other macOS tiling window managers:
 |---|---|---|---|---|
 | Layout model | Infinite horizontal strip | BSP / stacking / float | i3-like tree | Fixed layouts (tall, wide, etc.) |
 | SIP disable | No | Yes (for some features) | No | No |
+| Private APIs | 2, read-only | Many, incl. Dock injection | 1 | Several |
 | Scrolling | Spring physics, trackpad + keyboard | N/A | N/A | N/A |
 | Config | TOML | Shell + skhd | TOML | GUI + TOML |
+
+## Private APIs
+
+Reel uses two undocumented Apple calls. Both are **read-only**, both are resolved at runtime rather than linked, and neither requires disabling SIP or injecting code into another process.
+
+| Call | Purpose | Fallback if it disappears |
+|---|---|---|
+| `_AXUIElementGetWindow` | Maps an accessibility element to its `CGWindowID`. There is no public equivalent. | None — window tracking depends on it. Validated stable across macOS 10.12–15 by AeroSpace and Amethyst. |
+| SkyLight Space queries — `SLSMainConnectionID`, `SLSGetActiveSpace`, `SLSManagedDisplayGetCurrentSpace`, `SLSSpaceCopyName`, `SLSSpaceGetType` | Reads which Space is active and its persistent identity. | Degrades automatically to the previous behaviour: inferring Space identity from the set of on-screen windows. |
+
+**Why the second one exists.** macOS exposes no public API for Space identity, so Reel previously inferred it by fingerprinting the set of on-screen window IDs and matching Spaces by similarity. That inference is unreliable by construction — in practice it returns an empty set mid-transition, and has been observed returning a 14-window set spanning four different Spaces, which is impossible for a single Space. Acting on either corrupts window layout. The window server simply knows the answer.
+
+**The line Reel does not cross.** Every call above is a query. The SkyLight functions that create, destroy, or switch Spaces, move windows between them, or alter window opacity and level *do* require SIP to be disabled and a scripting addition loaded into the Dock — that is how yabai implements those features. Reel uses none of them, and adding one would change what the project is.
+
+**Risk.** These symbols are not covered by any compatibility guarantee. `SLSSetWindowAlpha` and `SLSSetWindowLevel`, in this same framework, became no-ops in macOS 26. Reel therefore resolves each symbol with `dlsym` at runtime and falls back to its previous behaviour when one is missing, rather than failing to launch. Verified working on macOS 26.6.1 (build 25G76) from an unsigned binary with SIP enabled.
 
 ## Contributing
 
