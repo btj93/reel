@@ -1729,6 +1729,10 @@ public final class WindowManager: @unchecked Sendable {
             }
         }
 
+        // Capture the DEPARTING Space's window set before switchSpace overwrites
+        // it. Used below to sanity-check a "dock click crossed Spaces" claim.
+        let departingFingerprint = stripController.currentSpaceFingerprint
+
         // Save snapshot for the leaving space before switching
         saveSnapshotImmediate(sc: stripController)
 
@@ -1829,12 +1833,34 @@ public final class WindowManager: @unchecked Sendable {
             // always clears the record (so a later unrelated space change can't
             // reuse it).
             var activationPID: pid_t?
+            var activationRejected = false
             if let pid = focusGate.consumeRecentActivation(at: now) {
                 activationPID = pid
-                dockActivationTile = resolveFocusedTileID(
-                    forPID: pid,
-                    on: stripController
-                )
+                // A recorded activation only means "this app came to the front
+                // shortly before a Space change" — the 500ms TTL cannot tell a
+                // dock click that CAUSED the switch from an app that merely
+                // activated on its own just beforehand. Overriding the restored
+                // focus on the latter is how the view kept getting yanked to
+                // ChatGPT, whose helper windows churn app focus:
+                //   restoreFocus source=dockActivation activationApp=com.openai.codex
+                //                 dockTile=123 savedTile=97 chose=123
+                //
+                // The discriminator: crossing Spaces to reach an app is only
+                // meaningful if that app had NOTHING on the Space we left. If it
+                // already had a window there, no crossing was needed, so this
+                // cannot have been a cross-Space dock click — and the Space's own
+                // saved focus is the better answer.
+                let hadWindowOnDepartingSpace = departingFingerprint.contains { wid in
+                    tracker.windows[wid]?.pid == pid
+                }
+                if hadWindowOnDepartingSpace {
+                    activationRejected = true
+                } else {
+                    dockActivationTile = resolveFocusedTileID(
+                        forPID: pid,
+                        on: stripController
+                    )
+                }
             }
 
             let focusTile = dockActivationTile ?? savedFocusTile
@@ -1842,6 +1868,7 @@ public final class WindowManager: @unchecked Sendable {
             // Which input actually decided the restored focus, and why. Guessing
             // at this from `mode=` alone got the diagnosis wrong twice.
             print("[WM] restoreFocus source=\(dockActivationTile != nil ? "dockActivation" : "savedFocus")"
+                + (activationRejected ? " activationRejected=notCrossSpace" : "")
                 + " activationPID=\(activationPID.map(String.init) ?? "-")"
                 + " activationApp=\(activationPID.flatMap { tracker.apps[$0]?.bundleIdentifier } ?? "-")"
                 + " dockTile=\(dockActivationTile?.rawValue.description ?? "-")"
