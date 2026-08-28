@@ -113,19 +113,6 @@ public final class WindowManager: @unchecked Sendable {
     /// diagnostic on the Space-change path.
     private var lastSpaceChangeTime: Double = 0
 
-    // MARK: - SkyLight shadow mode (diagnostic; no behaviour change)
-
-    /// SkyLight sid observed at the last COMMITTED Space change.
-    ///
-    /// Assigned in BOTH branches at the commit point — including the nil branch —
-    /// so a missed reading shows up as `committedSid=-` rather than silently
-    /// leaving this pointing two commits back and corrupting every subsequent
-    /// `sidAlreadyCurrent` verdict with no marker in the log.
-    private var lastCommittedShadowSid: UInt64?
-
-    /// Notifications where the shim returned nothing. A dead shim must be visible
-    /// in the soak, not look like a clean run with nothing to report.
-    private var shadowUnavailableCount = 0
 
     /// Focus-race guard for `.appActivated` → `handleSpaceChange`: remembers the
     /// most recent app activation (dock click / Cmd+Tab) so a space-change that
@@ -359,16 +346,10 @@ public final class WindowManager: @unchecked Sendable {
         #endif
         tracker.startObserving()
         print("[WM] tracked \(tracker.windows.count) windows, \(tracker.apps.count) apps")
-        // Capability line for the shadow soak: a run with no shadowEntry lines is
-        // only meaningful if this said the shim was available.
+        // Whether Space identity is authoritative this run, or degraded to the
+        // legacy fingerprint. Worth one line at startup: it changes how every
+        // later Space decision is made.
         print("[WM] \(SpaceIdentity.diagnostics)")
-        if let boot = SpaceIdentity.currentSpace(displayID: activeDisplayID) {
-            // Seed the baseline so the FIRST space change has something to compare
-            // against; otherwise the earliest samples all report sidAlreadyCurrent
-            // = false regardless of what actually happened.
-            lastCommittedShadowSid = boot.sid
-            print("[WM] shadowBoot sid=\(boot.sid) uuid=\(boot.uuid ?? "-") user=\(boot.isUserSpace)")
-        }
         fflush(stdout)
         for (_, sc) in stripControllers { sc.finishBatch() }
         startupOnScreenIDs = nil
@@ -1436,25 +1417,6 @@ public final class WindowManager: @unchecked Sendable {
 
         let (onScreenWindows, onScreenIDs) = currentOnScreenIDs()
 
-        // SHADOW MODE — records what an authoritative Space identity WOULD say.
-        // Nothing here changes behaviour; Reel still keys everything on the
-        // fingerprint.
-        //
-        // Probed at ENTRY, not only at commit, because a bounce never reaches
-        // commitSpaceChange: both legs are absorbed by the guards below
-        // ("deferring 500ms" then "same fingerprint — ignored"). A commit-only
-        // probe would collect zero samples from exactly the events a cutover
-        // changes.
-        if let entry = SpaceIdentity.currentSpace(displayID: activeDisplayID) {
-            print("[WM] shadowEntry sid=\(entry.sid) uuid=\(entry.uuid ?? "-") user=\(entry.isUserSpace)"
-                + " committedSid=\(lastCommittedShadowSid.map(String.init) ?? "-")"
-                + " sidAlreadyCurrent=\(lastCommittedShadowSid == entry.sid)"
-                + " onScreen=\(onScreenIDs.count)")
-        } else {
-            shadowUnavailableCount += 1
-            print("[WM] shadowEntry UNAVAILABLE (count=\(shadowUnavailableCount))")
-        }
-        fflush(stdout)
 
         // Storm coalescing. Normal navigation pays NO latency: a change that
         // arrives more than `stormThreshold` after the previous one commits
@@ -1489,8 +1451,6 @@ public final class WindowManager: @unchecked Sendable {
             stormCoalesceWork = work
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + Self.stormSettleDelay, execute: work)
-            print("[WM] shadowOutcome=coalesced")
-            fflush(stdout)
             return
         }
         stormCoalesceWork?.cancel()
@@ -1548,7 +1508,6 @@ public final class WindowManager: @unchecked Sendable {
             // back on the Space we started from.
             emptySpaceConfirmWork?.cancel()
             emptySpaceConfirmWork = nil
-            print("[WM] shadowOutcome=droppedSameFingerprint")
             print("[WM] spaceChanged: same fingerprint as current Space — ignored"
                 + " (sincePrevMs=\(lastSpaceChangeTime > 0 ? "\(Self.ms(since: lastSpaceChangeTime))" : "-")"
                 + " offScreen=\(offScreenSummary(sc: stripController)))")
@@ -1574,7 +1533,6 @@ public final class WindowManager: @unchecked Sendable {
             let sincePrev = lastSpaceChangeTime > 0
                 ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"
             lastSpaceChangeTime = TimeUtil.now()
-            print("[WM] shadowOutcome=deferred")
             print("[WM] spaceChanged: \(reason) — deferring \(Int(Self.emptySpaceConfirmDelay * 1000))ms"
                 + " to confirm (sincePrevMs=\(sincePrev) offScreen=\(offScreenSummary(sc: stripController)))")
             fflush(stdout)
@@ -1585,7 +1543,6 @@ public final class WindowManager: @unchecked Sendable {
                 self.emptySpaceConfirmWork = nil
                 let (infos, ids) = self.currentOnScreenIDs()
                 if ids == fingerprintAtSchedule {
-                    print("[WM] shadowOutcome=droppedTransient")
                     print("[WM] spaceChanged: transient empty read — same Space after settle, dropped")
                     fflush(stdout)
                     return
@@ -1598,7 +1555,6 @@ public final class WindowManager: @unchecked Sendable {
                     // Still impossible after the settle. Committing it would be
                     // strictly worse than leaving the strip as it is; the 500ms
                     // health check adopts anything genuinely new.
-                    print("[WM] shadowOutcome=droppedStillSpanning")
                     print("[WM] spaceChanged: read still spans multiple Spaces after settle — dropped")
                     fflush(stdout)
                     return
@@ -1638,7 +1594,6 @@ public final class WindowManager: @unchecked Sendable {
         let sincePrev = lastSpaceChangeTime > 0
             ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"
         lastSpaceChangeTime = TimeUtil.now()
-        print("[WM] shadowOutcome=committing")
         fflush(stdout)
         commitSpaceChange(
             onScreenWindows: onScreenWindows, onScreenIDs: onScreenIDs,
@@ -1660,36 +1615,6 @@ public final class WindowManager: @unchecked Sendable {
         sincePrevMs sincePrev: String
     ) {
         guard !isPaused else { return }
-
-        // SHADOW MODE, commit half. Sampled here so both sides of the comparison
-        // share a baseline: currentSpaceFingerprint only advances inside
-        // switchSpace, so a sid sampled at notification time would drift out of
-        // step with it on every dropped or deferred read.
-        //
-        // `fingerprintWouldRestore` deliberately includes currentSpaceFingerprint.
-        // switchSpace calls saveCurrentSpace() FIRST, stashing the leaving Space,
-        // so by the time findBestSavedSpace runs that fingerprint is a candidate.
-        // Omitting it reports a false negative on exactly the bounce this is
-        // meant to measure.
-        if let shadow = SpaceIdentity.currentSpace(displayID: activeDisplayID) {
-            let candidates = stripController.savedSpaceFingerprints + [stripController.currentSpaceFingerprint]
-            let fingerprintWouldRestore = candidates.contains { candidate in
-                let i = candidate.intersection(onScreenIDs).count
-                let u = candidate.union(onScreenIDs).count
-                return u > 0 && Double(i) / Double(u) > 0.5
-            }
-            print("[WM] shadowCommit sid=\(shadow.sid) uuid=\(shadow.uuid ?? "-") user=\(shadow.isUserSpace)"
-                + " spuriousCommit=\(lastCommittedShadowSid == shadow.sid)"
-                + " fingerprintWouldRestore=\(fingerprintWouldRestore)"
-                + " onScreen=\(onScreenIDs.count)")
-            lastCommittedShadowSid = shadow.sid
-        } else {
-            // Assign in this branch too: leaving the old value in place would make
-            // every later verdict silently wrong with nothing in the log to say so.
-            print("[WM] shadowCommit UNAVAILABLE")
-            lastCommittedShadowSid = nil
-        }
-        fflush(stdout)
 
         // Cancel any in-progress title bar drag/menu — space transition invalidates context.
         titleBarInteraction?.cancelIfActive()
