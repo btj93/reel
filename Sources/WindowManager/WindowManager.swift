@@ -1128,7 +1128,8 @@ public final class WindowManager: @unchecked Sendable {
                 break
             }
 
-            focusGate.recordAppActivation(pid: pid, at: TimeUtil.now())
+            focusGate.recordAppActivation(
+                pid: pid, at: TimeUtil.now(), spaceKey: stripController.currentSpaceKey)
 
             // Dock click / Cmd+Tab: resolve which window of this app to scroll to.
             let sc = stripController
@@ -1732,6 +1733,7 @@ public final class WindowManager: @unchecked Sendable {
         // Capture the DEPARTING Space's window set before switchSpace overwrites
         // it. Used below to sanity-check a "dock click crossed Spaces" claim.
         let departingFingerprint = stripController.currentSpaceFingerprint
+        let departingSpaceKey = stripController.currentSpaceKey
 
         // Save snapshot for the leaving space before switching
         saveSnapshotImmediate(sc: stripController)
@@ -1834,7 +1836,20 @@ public final class WindowManager: @unchecked Sendable {
             // reuse it).
             var activationPID: pid_t?
             var activationRejected = false
-            if let pid = focusGate.consumeRecentActivation(at: now) {
+            // Require the activation to have happened while we were still on the
+            // DEPARTING Space. A dock click does: the user clicks, then macOS
+            // crosses Spaces. macOS's own arrival-activation does not — it fires
+            // once the switch has already happened, so it carries the destination
+            // Space and is rejected here.
+            //
+            // This is what the timing-based guards could not do. Both events land
+            // within milliseconds of the Space change; only the Space they were
+            // recorded on separates them. Observed being wrongly accepted:
+            //   leaving kitty -> restoreFocus source=dockActivation
+            //   activationApp=com.openai.codex dockTile=123 savedTile=108 chose=123
+            if let pid = focusGate.consumeRecentActivation(
+                at: now, requiringSpace: departingSpaceKey)
+            {
                 activationPID = pid
                 // A recorded activation only means "this app came to the front
                 // shortly before a Space change" — the 500ms TTL cannot tell a
@@ -1863,11 +1878,32 @@ public final class WindowManager: @unchecked Sendable {
                 }
             }
 
-            let focusTile = dockActivationTile ?? savedFocusTile
+            // Third tier: what does macOS actually have focused right now?
+            //
+            // Only consulted when we have NOTHING else — an empty or stale stash,
+            // or an activation that resolved to no tile here. Without it the
+            // restore centres nothing at all, so the app the user is genuinely
+            // looking at (and which the menu bar names) sits off-screen until they
+            // focus something else and come back. Observed:
+            //   restoreFocus source=savedFocus dockTile=- savedTile=- chose=-
+            //
+            // It cannot cause the reverse problem, because a real saved focus
+            // always wins over it.
+            var axFocusTile: TileID?
+            if dockActivationTile == nil, savedFocusTile == nil,
+               let wid = getFocusedWindowID()
+            {
+                let tid = TileID(wid)
+                if stripController.windowMap[tid] != nil { axFocusTile = tid }
+            }
+
+            let focusTile = dockActivationTile ?? savedFocusTile ?? axFocusTile
 
             // Which input actually decided the restored focus, and why. Guessing
             // at this from `mode=` alone got the diagnosis wrong twice.
-            print("[WM] restoreFocus source=\(dockActivationTile != nil ? "dockActivation" : "savedFocus")"
+            let focusSource = dockActivationTile != nil ? "dockActivation"
+                : (savedFocusTile != nil ? "savedFocus" : (axFocusTile != nil ? "axFocused" : "none"))
+            print("[WM] restoreFocus source=\(focusSource)"
                 + (activationRejected ? " activationRejected=notCrossSpace" : "")
                 + " activationPID=\(activationPID.map(String.init) ?? "-")"
                 + " activationApp=\(activationPID.flatMap { tracker.apps[$0]?.bundleIdentifier } ?? "-")"
