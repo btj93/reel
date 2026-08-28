@@ -328,7 +328,16 @@ public final class WindowManager: @unchecked Sendable {
         let initialFingerprint = Set(
             initialWindows.filter { $0.layer == 0 && $0.isOnScreen }.map(\.windowID))
         for (_, sc) in stripControllers {
-            sc.setSpaceFingerprint(initialFingerprint)
+            // Seed with the SAME identity every later switch will use. Seeding a
+            // fingerprint here would stash the boot Space under a fingerprint key,
+            // and the first authoritative return would miss it — wiping the strip
+            // and orphaning that stash permanently.
+            switch resolveSpaceIdentity(displayID: activeDisplayID) {
+            case .authoritative(let key, let uuid):
+                sc.setSpaceKey(key, onScreenWindowIDs: initialFingerprint, spaceUUID: uuid)
+            case .systemSpace, .unavailable:
+                sc.setSpaceFingerprint(initialFingerprint)
+            }
         }
 
         // Initialize snapshot store before window discovery
@@ -1095,7 +1104,32 @@ public final class WindowManager: @unchecked Sendable {
             stripController.userActiveTileIDTime = TimeUtil.now()
 
         case .appActivated(let pid):
+            // Drop the activation ENTIRELY when it lands on the heels of a Space
+            // switch — do not scroll, and do not record it either.
+            //
+            // Recording is the part that actually bites. handleSpaceChange treats a
+            // recorded activation as "the user clicked this app's Dock icon and
+            // macOS crossed Spaces to reach it", and lets it OVERRIDE the restored
+            // focus (`dockActivationTile ?? savedFocusTile`, scrolled with
+            // .incrementalSnap). But macOS also activates an app on the destination
+            // Space all by itself, and Codex's "Pet" feature — a swarm of layer-3
+            // helper windows — churns app focus constantly. The result was every
+            // Space switch yanking the view to ChatGPT, as if it had been clicked.
+            //
+            // A genuine cross-Space Dock click is unaffected: there, the activation
+            // arrives BEFORE macOS switches Spaces, so no switch is recent and this
+            // guard is not armed. Only the reverse order — switch first, activation
+            // after — is an artifact, and that is exactly what this drops.
+            if stripController.isInSpaceSwitchSuppression {
+                #if DEBUG
+                    print("[WM] Dropped post-space-switch app activation pid=\(pid)")
+                    fflush(stdout)
+                #endif
+                break
+            }
+
             focusGate.recordAppActivation(pid: pid, at: TimeUtil.now())
+
             // Dock click / Cmd+Tab: resolve which window of this app to scroll to.
             let sc = stripController
             if let tileID = resolveFocusedTileID(forPID: pid, on: sc) {
@@ -1267,6 +1301,24 @@ public final class WindowManager: @unchecked Sendable {
     /// is nothing on screen to lay out — so it is invisible.
     private static let emptySpaceConfirmDelay: Double = 0.5
 
+    // MARK: - Space-change storm coalescing
+
+    /// Two Space changes closer together than this mean macOS is churning rather
+    /// than the user navigating. Measured: a burst of 678 notifications in 180s
+    /// (~4/s) cycling four Spaces, during which Reel ran 662 full
+    /// save+switch+restore cycles — each with AX writes, and each an opportunity
+    /// to land focus somewhere the user did not ask for.
+    private static let stormThreshold: Double = 0.30
+
+    /// How long the churn must be quiet before acting on the final state.
+    private static let stormSettleDelay: Double = 0.25
+
+    /// Pending coalesced commit while a storm is in progress.
+    private var stormCoalesceWork: DispatchWorkItem?
+
+    /// Notifications swallowed by coalescing, for the log.
+    private var stormCoalescedCount = 0
+
     /// Pending re-read of a suspect (empty) on-screen list.
     private var emptySpaceConfirmWork: DispatchWorkItem?
 
@@ -1351,6 +1403,33 @@ public final class WindowManager: @unchecked Sendable {
     ///     behaviour with its two-consecutive-miss rule; this is the same idea on
     ///     the Space path. Re-read after the transition settles and commit only if
     ///     it is still empty.
+    /// What the window server can tell us about the Space we just moved to.
+    private enum SpaceResolution {
+        /// A real user Space, identified by the window server.
+        case authoritative(key: SpaceKey, uuid: String?)
+        /// mission-control / dock / NotificationCenter — `SLSSpaceGetType == 3`.
+        /// These share the id range with user Spaces, so they must be recognised
+        /// and IGNORED, not treated as a destination. Committing to one would
+        /// stash the real Space and wipe the strip.
+        case systemSpace(sid: UInt64)
+        /// SkyLight declined. Fall back to the inferred fingerprint.
+        case unavailable
+    }
+
+    /// Resolve the current Space's identity.
+    ///
+    /// "Shim unavailable" and "this is a system Space" need OPPOSITE handling, so
+    /// they are separate cases rather than both collapsing to the fingerprint —
+    /// collapsing them makes Mission Control mint a junk pseudo-Space and commit
+    /// to it twice.
+    private func resolveSpaceIdentity(displayID: CGDirectDisplayID) -> SpaceResolution {
+        guard let snapshot = SpaceIdentity.currentSpace(displayID: displayID) else {
+            return .unavailable
+        }
+        guard snapshot.isUserSpace else { return .systemSpace(sid: snapshot.sid) }
+        return .authoritative(key: snapshot.key, uuid: snapshot.uuid)
+    }
+
     private func handleSpaceChange() {
         guard !isPaused else { return }
 
@@ -1376,7 +1455,94 @@ public final class WindowManager: @unchecked Sendable {
         }
         fflush(stdout)
 
-        if !onScreenIDs.isEmpty, onScreenIDs == stripController.currentSpaceFingerprint {
+        // Storm coalescing. Normal navigation pays NO latency: a change that
+        // arrives more than `stormThreshold` after the previous one commits
+        // immediately, as before. Only sustained churn is deferred, and then only
+        // until it goes quiet — at which point we act once on the FINAL state
+        // rather than replaying every intermediate Space.
+        //
+        // Without this, a macOS Space-change storm makes Reel restore focus
+        // hundreds of times a minute, which reads to the user as the view
+        // repeatedly jumping to whichever app those Spaces have stashed.
+        let sinceLastNotification = lastSpaceChangeTime > 0
+            ? TimeUtil.now() - lastSpaceChangeTime : .greatestFiniteMagnitude
+        if sinceLastNotification < Self.stormThreshold {
+            stormCoalescedCount += 1
+            lastSpaceChangeTime = TimeUtil.now()
+            stormCoalesceWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, !self.isPaused else { return }
+                self.stormCoalesceWork = nil
+                let swallowed = self.stormCoalescedCount
+                self.stormCoalescedCount = 0
+                print("[WM] spaceChanged: storm settled — coalesced \(swallowed) notification(s)")
+                fflush(stdout)
+                // Backdate the clock past the storm threshold before re-entering,
+                // or the re-entry sees its own 250ms settle as more churn and
+                // defers again — a self-sustaining loop that would never commit.
+                // (settleDelay < stormThreshold by design: settling fast keeps the
+                // latency low, so the backdate is what breaks the cycle.)
+                self.lastSpaceChangeTime = TimeUtil.now() - Self.stormThreshold - 0.01
+                self.handleSpaceChange()
+            }
+            stormCoalesceWork = work
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.stormSettleDelay, execute: work)
+            print("[WM] shadowOutcome=coalesced")
+            fflush(stdout)
+            return
+        }
+        stormCoalesceWork?.cancel()
+        stormCoalesceWork = nil
+
+        // Identity resolution drives the key we commit with. Bound to locals here
+        // because the tail commit below is the NORMAL path — it is not a
+        // fallback-only branch, and passing `.fingerprint` there would mean
+        // currentSpaceKey is never authoritative, silently making this whole
+        // migration inert.
+        var resolvedKey = SpaceKey.fingerprint(onScreenIDs)
+        var resolvedUUID: String?
+        var identityIsAuthoritative = false
+
+        switch resolveSpaceIdentity(displayID: activeDisplayID) {
+        case .systemSpace(let sid):
+            // Not a Space transition Reel should act on. Deliberately leaves
+            // `emptySpaceConfirmWork` alone — cancelling it here would strand a
+            // real deferral that is still waiting to settle.
+            print("[WM] spaceChanged: system Space (sid:\(sid)) — ignored")
+            fflush(stdout)
+            return
+
+        case .authoritative(let key, let uuid):
+            identityIsAuthoritative = true
+            resolvedKey = key
+            resolvedUUID = uuid
+            if key == stripController.currentSpaceKey {
+                // The bounce defence, and it needs no heuristic: the window server
+                // says we are where we already were.
+                emptySpaceConfirmWork?.cancel()
+                emptySpaceConfirmWork = nil
+                print("[WM] spaceChanged: same Space (\(key.debugDescription)) — ignored"
+                    + " (sincePrevMs=\(lastSpaceChangeTime > 0 ? "\(Self.ms(since: lastSpaceChangeTime))" : "-"))")
+                fflush(stdout)
+                lastSpaceChangeTime = TimeUtil.now()
+                return
+            }
+
+        case .unavailable:
+            break
+        }
+
+        // Legacy identity inference, for the fallback path ONLY.
+        //
+        // This is NOT a census guard: its own premise is "an identical on-screen ID
+        // set can only mean the same Space", which is an identity claim — and a
+        // false one for Spaces differing only by sticky/all-desktops windows, and
+        // for two empty Spaces. An authoritative sid replaces it outright, so it
+        // must not run when we have one, or a genuine switch between two such
+        // Spaces would be dropped.
+        if !identityIsAuthoritative,
+           !onScreenIDs.isEmpty, onScreenIDs == stripController.currentSpaceFingerprint {
             // Any in-flight empty-read confirmation is moot: we are demonstrably
             // back on the Space we started from.
             emptySpaceConfirmWork?.cancel()
@@ -1436,9 +1602,27 @@ public final class WindowManager: @unchecked Sendable {
                     fflush(stdout)
                     return
                 }
+                // Re-resolve rather than reuse the identity captured 500ms ago:
+                // the Space may have changed again, or become a system Space, in
+                // the interval this deferral exists to wait out.
+                var deferredKey = SpaceKey.fingerprint(ids)
+                var deferredUUID: String?
+                switch self.resolveSpaceIdentity(displayID: self.activeDisplayID) {
+                case .systemSpace(let sid):
+                    print("[WM] spaceChanged: settled onto a system Space (sid:\(sid)) — dropped")
+                    fflush(stdout)
+                    return
+                case .authoritative(let key, let uuid):
+                    deferredKey = key
+                    deferredUUID = uuid
+                case .unavailable:
+                    break
+                }
                 print("[WM] spaceChanged: deferred read settled to \(ids.count) on screen — committing")
                 fflush(stdout)
-                self.commitSpaceChange(onScreenWindows: infos, onScreenIDs: ids, sincePrevMs: "confirmed")
+                self.commitSpaceChange(
+                    onScreenWindows: infos, onScreenIDs: ids,
+                    spaceKey: deferredKey, spaceUUID: deferredUUID, sincePrevMs: "confirmed")
             }
             emptySpaceConfirmWork = work
             DispatchQueue.main.asyncAfter(
@@ -1455,12 +1639,23 @@ public final class WindowManager: @unchecked Sendable {
         lastSpaceChangeTime = TimeUtil.now()
         print("[WM] shadowOutcome=committing")
         fflush(stdout)
-        commitSpaceChange(onScreenWindows: onScreenWindows, onScreenIDs: onScreenIDs, sincePrevMs: sincePrev)
+        commitSpaceChange(
+            onScreenWindows: onScreenWindows, onScreenIDs: onScreenIDs,
+            spaceKey: resolvedKey, spaceUUID: resolvedUUID, sincePrevMs: sincePrev)
     }
 
+    /// - Parameters:
+    ///   - spaceKey: identity to key this Space's stash on. Deliberately has NO
+    ///     default: every call site must state it, so the compiler catches an
+    ///     omission rather than silently committing under `.fingerprint` and
+    ///     making authoritative keying unreachable.
+    ///   - spaceUUID: persistent Space UUID, nil when macOS has never named the
+    ///     Space (which includes the first Space — confirmed on this machine).
     private func commitSpaceChange(
         onScreenWindows: [CGWindowInfo],
         onScreenIDs: Set<UInt32>,
+        spaceKey: SpaceKey,
+        spaceUUID: String?,
         sincePrevMs sincePrev: String
     ) {
         guard !isPaused else { return }
@@ -1520,7 +1715,8 @@ public final class WindowManager: @unchecked Sendable {
         var stripsNeedingReplay: [(gid: GroupID, sc: StripController)] = []
         for (gid, sc) in stripControllers where sc !== stripController {
             saveSnapshotImmediate(sc: sc)
-            let restoredNonActive = sc.switchSpace(onScreenWindowIDs: onScreenIDs)
+            let restoredNonActive = sc.switchSpace(
+                to: spaceKey, onScreenWindowIDs: onScreenIDs, spaceUUID: spaceUUID)
             if restoredNonActive {
                 // Remove windows no longer on screen (closed/minimized while away).
                 let managedIDs = Set(sc.windowMap.keys.map(\.rawValue))
@@ -1537,7 +1733,8 @@ public final class WindowManager: @unchecked Sendable {
         saveSnapshotImmediate(sc: stripController)
 
         // Try to restore saved state for this Space
-        let restored = stripController.switchSpace(onScreenWindowIDs: onScreenIDs)
+        let restored = stripController.switchSpace(
+            to: spaceKey, onScreenWindowIDs: onScreenIDs, spaceUUID: spaceUUID)
 
         if !restored {
             // Active strip wasn't in in-memory savedSpaces — include it in replay.
@@ -1631,7 +1828,9 @@ public final class WindowManager: @unchecked Sendable {
             // One-shot consume — returns the pid iff within the 0.5s TTL, and
             // always clears the record (so a later unrelated space change can't
             // reuse it).
+            var activationPID: pid_t?
             if let pid = focusGate.consumeRecentActivation(at: now) {
+                activationPID = pid
                 dockActivationTile = resolveFocusedTileID(
                     forPID: pid,
                     on: stripController
@@ -1639,6 +1838,16 @@ public final class WindowManager: @unchecked Sendable {
             }
 
             let focusTile = dockActivationTile ?? savedFocusTile
+
+            // Which input actually decided the restored focus, and why. Guessing
+            // at this from `mode=` alone got the diagnosis wrong twice.
+            print("[WM] restoreFocus source=\(dockActivationTile != nil ? "dockActivation" : "savedFocus")"
+                + " activationPID=\(activationPID.map(String.init) ?? "-")"
+                + " activationApp=\(activationPID.flatMap { tracker.apps[$0]?.bundleIdentifier } ?? "-")"
+                + " dockTile=\(dockActivationTile?.rawValue.description ?? "-")"
+                + " savedTile=\(savedFocusTile?.rawValue.description ?? "-")"
+                + " chose=\(focusTile?.rawValue.description ?? "-")")
+            fflush(stdout)
 
             if let focusTile, stripController.windowMap[focusTile] != nil {
                 // Dock-driven activation animates nicer visually; saved-focus restore
