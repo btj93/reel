@@ -80,7 +80,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         } else {
             let isPaused = windowManager?.isPaused ?? false
-            menu.addItem(NSMenuItem(title: "Reel v0.5.0", action: nil, keyEquivalent: "")) // x-release-please-version
+            menu.addItem(NSMenuItem(title: "Reel v0.6.0", action: nil, keyEquivalent: "")) // x-release-please-version
             menu.addItem(NSMenuItem.separator())
 
             // Shared-strip mode requires "Displays have separate Spaces" to be OFF.
