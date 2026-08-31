@@ -1415,6 +1415,25 @@ public final class WindowManager: @unchecked Sendable {
     private func handleSpaceChange() {
         guard !isPaused else { return }
 
+        // Cancel any in-progress title bar drag/menu, and any pending external
+        // focus scroll, on EVERY notification — before the gate below decides
+        // whether this is a real transition.
+        //
+        // These must live here, not in commitSpaceChange. A Space notification
+        // invalidates a debounced focus scroll whether or not we end up
+        // committing: the scroll was scheduled 150ms ago against a strip that may
+        // be about to change, and firing it afterwards drags the view somewhere
+        // the user never asked for. Splitting handleSpaceChange into a gate plus
+        // commitSpaceChange moved these inside the commit path, so every early
+        // return — deferred, same-Space, system-Space, coalesced — silently
+        // stopped cancelling, and a stale scroll would land ~150ms later:
+        //   spaceChanged: empty on-screen read — deferring 500ms to confirm
+        //   scrollTo wid=52335 col=1 mode=incrementalSnap app=com.openai.codex
+        titleBarInteraction?.cancelIfActive()
+        pendingFocusScroll?.cancel()
+        pendingFocusScroll = nil
+        pendingFocusScrollTile = nil
+
         let (onScreenWindows, onScreenIDs) = currentOnScreenIDs()
 
 
@@ -1616,13 +1635,8 @@ public final class WindowManager: @unchecked Sendable {
     ) {
         guard !isPaused else { return }
 
-        // Cancel any in-progress title bar drag/menu — space transition invalidates context.
-        titleBarInteraction?.cancelIfActive()
-
-        // Cancel any pending external focus scroll — it was a space-transition artifact.
-        pendingFocusScroll?.cancel()
-        pendingFocusScroll = nil
-        pendingFocusScrollTile = nil
+        // (titleBarInteraction / pendingFocusScroll are cancelled at the top of
+        // handleSpaceChange, so every gate path clears them, not just this one.)
 
         let spaceChangeStart = TimeUtil.now()
         let leavingTile = stripController.userActiveTileID ?? stripController.strip.activeColumn?.activeTile
