@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.0](https://github.com/btj93/reel/compare/v0.5.0...v0.6.0) (2026-08-31)
+
+
+### Features
+
+* read real Space identity from SkyLight, behind a feature-detected shim ([db33e00](https://github.com/btj93/reel/commit/db33e003c5bcd887e2124d193e3a1e03aa78cad6))
+* **wm:** key Spaces on the SkyLight id, and coalesce Space-change storms ([3f9d03b](https://github.com/btj93/reel/commit/3f9d03bc3e6fed099b9d3ab677de677fa8e6de5e))
+
+
+### Bug Fixes
+
+* apply corrective restores inline rather than queue-ordered ([253df06](https://github.com/btj93/reel/commit/253df06207b6cc17f2225c00a61ecbebe4a2184e))
+* bounds-check CLI socket path, fix quit response race, exit nonzero on failure ([fbe3506](https://github.com/btj93/reel/commit/fbe3506a8226e018dda2e07ec35909e83922997d))
+* fail-closed window rules, cancel debounces on clear, strict snapshot capture ([73ef68d](https://github.com/btj93/reel/commit/73ef68dbd1557a40c496974ae24f4b1690846ba6))
+* guard width-preset actions on empty strips; clamp blended fixed widths ([992a17e](https://github.com/btj93/reel/commit/992a17e121adf8eab6ef8327ead23ea1f9753173))
+* keep display routing after monitor merge/split, clamp struts, relayout all strips ([5753fc0](https://github.com/btj93/reel/commit/5753fc098d26a98350672775555f4d9d3f92f2ff))
+* numerically stable overdamped spring; wire [animation] config to scroll and bounce ([58232a4](https://github.com/btj93/reel/commit/58232a4633ba2f988cc16f732ca3d10f34984cae))
+* region-aware snapping on shared strips; deterministic gesture latch and rejection reset ([abf1b87](https://github.com/btj93/reel/commit/abf1b87067bd6222d006e2f510d9a14496dbe9e2))
+* reject a Space read that straddles two Spaces ([2d4bb1d](https://github.com/btj93/reel/commit/2d4bb1d4c83d8928e401a11759f5323f638487ce))
+* restore strip column order across a restart ([554b4ed](https://github.com/btj93/reel/commit/554b4edadb0156a4d26b3c014de7a463566f5ab3))
+* restore the focused window across a Space switch; ignore transient Space reads ([c9d3e80](https://github.com/btj93/reel/commit/c9d3e802b21070a38b034f78bc91549b421be4dc))
+* revoke queued AX writes on ownership loss; queue-order corrective restores ([fc92b12](https://github.com/btj93/reel/commit/fc92b12c13b8841c85e9827a7f5ebce246de7e11))
+* seal reel-msg inside the signed app bundle ([c9c20e4](https://github.com/btj93/reel/commit/c9c20e4fd68897fb74711f15dafed528cd471f68))
+* target pill-menu actions by tile, harden reorder commits, stop finished flashes reviving ([eebb564](https://github.com/btj93/reel/commit/eebb5648b08b8bbf20043a539ff4329dc50f17a6))
+* **wm:** accept a dock activation only if it predates the Space change ([e3e6267](https://github.com/btj93/reel/commit/e3e6267ae43aa9851ec8c336c26e981c9b161402))
+* **wm:** cancel a pending focus scroll on every Space notification, not just commits ([1aa4ede](https://github.com/btj93/reel/commit/1aa4edec3c7aa5c74f0e90b6fc3942823caff041))
+* **wm:** only let a dock activation override restored focus when it crossed Spaces ([0ea87ee](https://github.com/btj93/reel/commit/0ea87ee2ca9e7466d9e191c32923784a2acf9a47))
+
 ## [0.5.0](https://github.com/btj93/reel/compare/v0.4.0...v0.5.0) (2026-07-21)
 
 
