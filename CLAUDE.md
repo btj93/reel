@@ -11,6 +11,7 @@ Reel — a macOS scrollable tiling window manager inspired by niri. Windows live
 ```bash
 swift build                              # Build all targets
 swift run RunTests                       # Run tests (custom runner, not XCTest — no Xcode needed)
+swift run RunEngineTests                 # Engine replays + 10k-event fuzz (ENGINE_ONLY, ENGINE_FUZZ_SEEDS, ENGINE_BENCH=1)
 swift build && .build/debug/Reel &       # Build and run (grant AX permission once to this path)
 .build/debug/reel-msg list-windows       # CLI: send IPC command to running instance
 bash scripts/bundle.sh                   # Create .app bundle (for distribution only, not dev)
@@ -24,13 +25,14 @@ make run                                 # Kill existing, bundle, open .app
 
 ## Architecture
 
-Five library modules with strict layering:
+Six library modules with strict layering:
 
 ```
 Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
                               │                         ↑
                               ├──→ Config (TOMLKit) ────┘
                               └──→ IPC ─────────────────┘
+Engine ──→ Core   (not imported by the shipped app yet)
 ```
 
 **Core** — Pure layout logic. Foundation + CoreGraphics only. No AppKit, no AX calls. Fully testable.
@@ -40,6 +42,8 @@ Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
 - `SpringAnimation`: analytical damped harmonic oscillator (3 regimes). `retargeted(to:at:)` preserves velocity for rapid keypress compounding.
 - `SwipeTracker`: weighted-sample velocity tracker (macOS-style). Used for trackpad gesture momentum.
 - `SnapPoint`: `.left` / `.middle` / `.right` — configurable per-column snap alignment targets. `snapIndices` (parallel to columns) tracks the current snap milestone per column for incremental scroll.
+
+**Engine** — The rewrite's pure reducer: `reduce(&world, event, now:) -> [Effect]` is the only `World` mutator. Depends on Core only; time, windows and Space identity arrive as event data, and every side effect (frames, focus, timers, persistence, census re-reads) leaves as an `Effect` value.
 
 **Platform** — macOS API wrappers.
 - `AXApp`: **one Thread + CFRunLoop per app** for AX observers. Prevents hung apps from blocking main thread.
@@ -116,6 +120,8 @@ Why it was worth it: Reel previously identified a Space by fingerprinting the on
 ## Testing
 
 `Tests/CoreTests/main.swift` — standalone executable. Uses `check()`, `assertEq()`, `assertClose()`. Add tests as `section("name") do { ... }` blocks. Run: `swift run RunTests`.
+
+`Tests/EngineTests/main.swift` — the same style for Engine: one replay per historical bug class, `World.check()` after every event of a seeded fuzz stream, and a release-mode `reduce` budget. Run: `swift run RunEngineTests`.
 
 **Smoke suite (Layer 3, opt-in)**: `Tests/Smoke/smoke.sh` (+ `lib.sh`) drives a REAL `.build/debug/Reel` against `TestWindowHost` NSWindows over `reel-msg`/`jq`. It STOPS your live Reel and opens real windows, so it is gated behind `REEL_E2E_CONFIRM=1` and never runs in `swift run RunTests`.
 - `make smoke` — build + run the suite (requires `REEL_E2E_CONFIRM=1` in the env; the developer command is `REEL_E2E_CONFIRM=1 make smoke`).

@@ -92,8 +92,6 @@ extension World {
         pointer = .idle
     }
 
-    // MARK: Focus
-
     fileprivate mutating func onFocusObserved(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
         let group = groups[id]!
         guard !group.phase.isChanging || intent.source == .appActivation else { return }
@@ -146,8 +144,6 @@ extension World {
         pass.persist = true
     }
 
-    // MARK: Membership
-
     fileprivate mutating func onWindowAdded(_ window: ObservedWindow, group id: UInt32, _ pass: inout Pass) {
         let known = groups.values.contains { $0.windows[window.id] != nil }
         add(window, to: id, &pass)
@@ -183,8 +179,6 @@ extension World {
         }
         pass.layout.insert(id)
     }
-
-    // MARK: Commands
 
     fileprivate mutating func run(_ command: Command, source: FocusSource, group id: UInt32, _ pass: inout Pass) -> CommandOutcome {
         guard var group = groups[id], !group.phase.isChanging else { return .refused("space change in progress") }
@@ -250,8 +244,6 @@ extension World {
         pass.persist = true
         return .accepted
     }
-
-    // MARK: Pointer
 
     fileprivate mutating func onPointer(_ input: PointerInput, token: PointerToken?, group id: UInt32, _ pass: inout Pass) {
         switch input {
@@ -355,8 +347,6 @@ extension World {
             : .static(target)
     }
 
-    // MARK: Spaces
-
     fileprivate mutating func beginSpaceChange(group id: UInt32, _ pass: inout Pass) {
         if pointer.scope?.group == id { cancelPointer(&pass) }
         cancelTimers(group: id, &pass)
@@ -437,8 +427,6 @@ extension World {
         for window in visualOrder(windows) where groups[id]!.windows[window.id] == nil { add(window, to: id, &pass) }
     }
 
-    // MARK: Frames, timers, ticks
-
     fileprivate mutating func onFrameCompleted(_ tile: TileID, revision: UInt64, result: FrameResult, _ pass: inout Pass) {
         guard let request = frames[tile], request.revision == revision, request.scope == pass.scope else { return }
         switch result {
@@ -474,8 +462,6 @@ extension World {
         groups[id] = group
         pass.layout.insert(id)
     }
-
-    // MARK: Topology and config
 
     fileprivate mutating func onTopology(_ next: Topology, _ pass: inout Pass) {
         guard next.revision > topology.revision, next.isValid else { return }
@@ -528,8 +514,6 @@ extension World {
         }
         pass.persist = true
     }
-
-    // MARK: Output
 
     fileprivate mutating func flush(_ pass: inout Pass) {
         for id in pass.layout.sorted() {
