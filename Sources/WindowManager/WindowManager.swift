@@ -27,7 +27,6 @@ public final class WindowManager {
     public let hotkeyManager: HotkeyManager
     public let displayManager: DisplayManager
 
-
     /// A canonical identifier for a group of aligned displays. Sorted ascending
     /// so equal member sets produce equal IDs (stable across hot-plug cycles).
     public typealias GroupID = [CGDirectDisplayID]

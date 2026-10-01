@@ -18,7 +18,7 @@ make run-debug                           # Kill existing, bundle, run with stder
 make run                                 # Kill existing, bundle, open .app
 ```
 
-**macOS 14+ (Sonoma)** minimum — required for `CADisplayLink` on macOS.
+**macOS 15+ (Sequoia)** minimum — required by Swift 6 and ScreenCaptureKit.
 
 **Accessibility permission** persists at `.build/debug/Reel` across rebuilds. Don't use the .app bundle during development — it re-prompts every time.
 

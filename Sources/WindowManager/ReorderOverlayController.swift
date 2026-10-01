@@ -5,10 +5,18 @@ import ScreenCaptureKit
 
 // MARK: - ReorderOverlayController
 
+// SCWindow is immutable metadata; concurrent capture tasks only read it.
+private struct ThumbnailCaptureRequest: @unchecked Sendable {
+    let index: Int
+    let window: SCWindow
+    let aspectRatio: Double
+    let thumbnailHeight: Double
+}
+
 /// Brain of the drag-to-reorder overlay. Manages screenshot capture, cursor tracking,
 /// insertion index computation, the isReady buffer, and animation orchestration.
 ///
-/// Threading model: all methods are main-actor isolated; capture suspends for ScreenCaptureKit.
+/// Threading model: UI and session state are main-actor isolated; captures run in child tasks.
 @MainActor
 final class ReorderOverlayController {
 
@@ -20,6 +28,8 @@ final class ReorderOverlayController {
     // MARK: - Internal state
 
     private var overlayWindow: ReorderOverlayWindow?
+    private var captureTask: Task<Void, Never>?
+    private var captureTimeoutTask: Task<Void, Never>?
     private var columns: [ColumnInfo] = []
     private var draggedIndex: Int = 0
     private var insertionIndex: Int = 0
@@ -44,9 +54,7 @@ final class ReorderOverlayController {
 
     // MARK: - show()
 
-    /// Shows the drag-to-reorder overlay band. Screenshots are captured on a background queue;
-    /// cursor events arriving before capture finishes are buffered and replayed.
-    ///
+    /// Shows the drag-to-reorder overlay band; cursor events are buffered during capture.
     /// - Parameters:
     ///   - columns: All columns in current strip order.
     ///   - draggedIndex: Index of the column being dragged.
@@ -70,6 +78,11 @@ final class ReorderOverlayController {
         //    condition for its own tile lookup but still passes the raw index, and
         //    `columns[draggedIndex]` below would trap.
         guard draggedIndex >= 0, draggedIndex < columns.count else { return }
+
+        captureTask?.cancel()
+        captureTimeoutTask?.cancel()
+        captureTask = nil
+        captureTimeoutTask = nil
 
         // 1. Tear down any existing overlay immediately (handles drag-during-fade-out).
         if let existing = overlayWindow {
@@ -108,53 +121,45 @@ final class ReorderOverlayController {
         let capturedStyle = thumbnailStyle
         let capturedThumbnailHeight = thumbnailHeight
 
-        Task { @MainActor [weak self, weak window] in
-            guard let self, let window else { return }
+        guard capturedStyle == "screenshot" else {
+            installThumbnails([:], columns: capturedColumns, style: capturedStyle,
+                              height: capturedThumbnailHeight, generation: myGeneration)
+            return
+        }
+
+        captureTask = Task { @MainActor [weak self] in
+            let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard !Task.isCancelled else { return }
+            let windows = Dictionary(uniqueKeysWithValues: (content?.windows ?? []).map { ($0.windowID, $0) })
+            let requests = capturedColumns.enumerated().compactMap { index, column -> ThumbnailCaptureRequest? in
+                guard let window = windows[column.windowID] else { return nil }
+                let aspectRatio = column.frameWidth > 0 && column.frameHeight > 0
+                    ? column.frameWidth / column.frameHeight
+                    : 1.0
+                return ThumbnailCaptureRequest(index: index, window: window,
+                                               aspectRatio: aspectRatio,
+                                               thumbnailHeight: capturedThumbnailHeight)
+            }
             let screenshots = await withTaskGroup(of: (Int, CGImage?).self) { group in
-                if capturedStyle == "screenshot" {
-                    for (index, column) in capturedColumns.enumerated() {
-                        let windowID = column.windowID
-                        group.addTask { (index, await Self.captureWindow(windowID: windowID)) }
-                    }
+                for request in requests {
+                    group.addTask { await Self.captureWindow(request) }
                 }
-                var images = Array<CGImage?>(repeating: nil, count: capturedColumns.count)
-                for await (index, image) in group { images[index] = image }
+                var images: [Int: CGImage] = [:]
+                for await (index, image) in group {
+                    if let image { images[index] = image }
+                }
                 return images
             }
-            let thumbnails = capturedColumns.enumerated().map { index, col in
-                let aspectRatio = col.frameWidth > 0 && col.frameHeight > 0
-                    ? col.frameWidth / col.frameHeight
-                    : 1.0
-                let image = screenshots[index].map {
-                    Self.scaleImage($0, toHeight: capturedThumbnailHeight)
-                } ?? col.appIcon
-                return (image: image, width: capturedThumbnailHeight * aspectRatio)
-            }
-
-            guard self.generation == myGeneration, self.overlayWindow === window else { return }
-            let draggedResult = thumbnails[0]
-            let nonDraggedResults = Array(thumbnails.dropFirst())
-
-            window.configureThumbnails(
-                thumbnails: nonDraggedResults,
-                draggedThumbnail: draggedResult.image,
-                draggedWidth: draggedResult.width
-            )
-
-            window.layoutThumbnails(spreadIndex: nil)
-            let initialGapIndex = self.mapToThumbnailGapIndex(self.draggedIndex)
-            window.showIndicator(atGapIndex: initialGapIndex)
-            window.orderFront(nil)
-            window.animateEntrance()
-
-            self.isReady = true
-            let buffered = self.bufferedCursorPositions
-            self.bufferedCursorPositions = []
-            for pos in buffered { self.processUpdateCursor(position: pos) }
-            if self.pendingCommit {
-                self.pendingCommit = false
-                self.commitDrop()
-            }
+            guard !Task.isCancelled else { return }
+            self?.installThumbnails(screenshots, columns: capturedColumns, style: capturedStyle,
+                                    height: capturedThumbnailHeight, generation: myGeneration)
+        }
+        captureTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            self?.captureTask?.cancel()
+            self?.installThumbnails([:], columns: capturedColumns, style: capturedStyle,
+                                    height: capturedThumbnailHeight, generation: myGeneration)
         }
     }
 
@@ -219,6 +224,10 @@ final class ReorderOverlayController {
         // CRITICAL: nil out onCommit before anything else so a late-firing completion
         // from an in-progress animateGhostSettle cannot call moveColumn.
         onCommit = nil
+        captureTask?.cancel()
+        captureTimeoutTask?.cancel()
+        captureTask = nil
+        captureTimeoutTask = nil
         // Retire the session so an in-flight capture landing before the fade
         // completes cannot orderFront a dead overlay, and drop any deferred commit
         // from an abandoned drag.
@@ -293,46 +302,73 @@ final class ReorderOverlayController {
         return count
     }
 
-    // MARK: - Private: captureWindow
+    private func installThumbnails(
+        _ screenshots: [Int: CGImage],
+        columns: [ColumnInfo],
+        style: String,
+        height: Double,
+        generation: Int
+    ) {
+        guard self.generation == generation, !isReady, let window = overlayWindow else { return }
+        captureTask = nil
+        captureTimeoutTask?.cancel()
+        captureTimeoutTask = nil
 
-    nonisolated private static func captureWindow(windowID: CGWindowID) async -> CGImage? {
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let window = content.windows.first(where: { $0.windowID == windowID }) else { return nil }
-            return try await SCScreenshotManager.captureImage(
-                contentFilter: SCContentFilter(desktopIndependentWindow: window),
-                configuration: SCStreamConfiguration()
-            )
-        } catch {
-            return nil
+        let thumbnails = columns.enumerated().map { index, column in
+            let aspectRatio = column.frameWidth > 0 && column.frameHeight > 0
+                ? column.frameWidth / column.frameHeight
+                : 1.0
+            let width = height * aspectRatio
+            let screenshot = screenshots[index]
+            let placeholder = style == "screenshot" && screenshot == nil
+            let image = screenshot.map {
+                NSImage(cgImage: $0, size: NSSize(width: width, height: height))
+            } ?? column.appIcon
+            return (image: image, width: width, isPlaceholder: placeholder)
+        }
+        let draggedResult = thumbnails[0]
+        window.configureThumbnails(
+            thumbnails: Array(thumbnails.dropFirst()),
+            draggedThumbnail: draggedResult.image,
+            draggedWidth: draggedResult.width,
+            draggedIsPlaceholder: draggedResult.isPlaceholder
+        )
+
+        window.layoutThumbnails(spreadIndex: nil)
+        let initialGapIndex = mapToThumbnailGapIndex(draggedIndex)
+        window.showIndicator(atGapIndex: initialGapIndex)
+        window.orderFront(nil)
+        window.animateEntrance()
+
+        isReady = true
+        let buffered = bufferedCursorPositions
+        bufferedCursorPositions = []
+        for position in buffered { processUpdateCursor(position: position) }
+        if pendingCommit {
+            pendingCommit = false
+            commitDrop()
         }
     }
 
-    // MARK: - Private: scaleImage
-
-    /// Scales a CGImage proportionally to the target height, returning an NSImage.
-    private static func scaleImage(_ cgImage: CGImage, toHeight targetHeight: Double) -> NSImage {
-        let srcWidth = Double(cgImage.width)
-        let srcHeight = Double(cgImage.height)
-        let aspectRatio = srcHeight > 0 ? srcWidth / srcHeight : 1.0
-        let w = Int(targetHeight * aspectRatio)
-        let h = Int(targetHeight)
-        guard w > 0, h > 0,
-              let ctx = CGContext(
-                  data: nil, width: w, height: h,
-                  bitsPerComponent: 8, bytesPerRow: 0,
-                  space: CGColorSpaceCreateDeviceRGB(),
-                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-              ) else {
-            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    nonisolated private static func captureWindow(
+        _ request: ThumbnailCaptureRequest
+    ) async -> (Int, CGImage?) {
+        guard !Task.isCancelled else { return (request.index, nil) }
+        let filter = SCContentFilter(desktopIndependentWindow: request.window)
+        let scale = Double(filter.pointPixelScale)
+        let configuration = SCStreamConfiguration()
+        configuration.width = max(1, Int((request.thumbnailHeight * request.aspectRatio * scale).rounded()))
+        configuration.height = max(1, Int((request.thumbnailHeight * scale).rounded()))
+        configuration.scalesToFit = true
+        configuration.ignoreShadowsSingleWindow = true
+        configuration.showsCursor = false
+        do {
+            return (request.index, try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: configuration
+            ))
+        } catch {
+            return (request.index, nil)
         }
-        // .medium is ample for a small downscaled thumbnail and noticeably cheaper than
-        // .high; the source is already near-1x after the nominal-resolution capture.
-        ctx.interpolationQuality = .medium
-        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
-        guard let scaled = ctx.makeImage() else {
-            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        }
-        return NSImage(cgImage: scaled, size: NSSize(width: w, height: h))
     }
 }

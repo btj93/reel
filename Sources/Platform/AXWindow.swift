@@ -10,7 +10,7 @@ import Core
 ///
 /// `open` for testing only — the test target subclasses this to inject fake AX
 /// behavior without touching real windows. Do NOT subclass in `Sources/`.
-// AX calls are confined to the owning app's dedicated thread.
+// All stored state is immutable; AX calls come from main and the app's write queue.
 open class AXWindow: @unchecked Sendable {
     /// The underlying AX element reference.
     public let element: AXUIElement

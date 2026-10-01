@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import ApplicationServices
 import Config
 import Core
 import Platform
@@ -46,7 +47,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func promptForAccessibility() {
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
 
         // Poll until granted

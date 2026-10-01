@@ -36,7 +36,6 @@ public struct ColumnInfo {
 
 /// HUD band window for drag-to-reorder. Purely visual — all input is handled by the CGEvent tap
 /// in TitleBarInteraction. This window ignores mouse events.
-@MainActor
 public final class ReorderOverlayWindow: NSWindow {
 
     // MARK: - Layout constants
@@ -195,13 +194,15 @@ public final class ReorderOverlayWindow: NSWindow {
     /// Call this once before showing the overlay.
     ///
     /// - Parameters:
-    ///   - thumbnails: Array of (image, width) pairs for the non-dragged columns.
+    ///   - thumbnails: Non-dragged images, widths, and placeholder flags.
     ///   - draggedThumbnail: The image for the column being dragged.
     ///   - draggedWidth: Logical width of the dragged column thumbnail.
+    ///   - draggedIsPlaceholder: Whether to preserve the icon's aspect ratio.
     public func configureThumbnails(
-        thumbnails: [(image: NSImage, width: Double)],
+        thumbnails: [(image: NSImage, width: Double, isPlaceholder: Bool)],
         draggedThumbnail: NSImage,
-        draggedWidth: Double
+        draggedWidth: Double,
+        draggedIsPlaceholder: Bool
     ) {
         // Remove old thumbnail views
         for view in thumbnailViews {
@@ -210,11 +211,13 @@ public final class ReorderOverlayWindow: NSWindow {
         thumbnailViews.removeAll()
         thumbnailWidths.removeAll()
 
-        for (image, width) in thumbnails {
+        for (image, width, isPlaceholder) in thumbnails {
             let imageView = NSImageView(frame: .zero)
             imageView.image = image
-            imageView.imageScaling = .scaleAxesIndependently
+            imageView.imageScaling = isPlaceholder ? .scaleProportionallyDown : .scaleAxesIndependently
+            if isPlaceholder { imageView.imageAlignment = .alignCenter }
             imageView.wantsLayer = true
+            if isPlaceholder { imageView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
 
             // 6px corner radius, 1px white border at 15% opacity
             imageView.layer?.cornerRadius = 6
@@ -230,6 +233,11 @@ public final class ReorderOverlayWindow: NSWindow {
         // Configure ghost
         ghostWidth = draggedWidth
         ghostView.image = draggedThumbnail
+        ghostView.imageScaling = draggedIsPlaceholder ? .scaleProportionallyDown : .scaleAxesIndependently
+        if draggedIsPlaceholder {
+            ghostView.imageAlignment = .alignCenter
+            ghostView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
         ghostView.layer?.cornerRadius = 6
         ghostView.layer?.masksToBounds = true
         ghostView.layer?.borderWidth = 1

@@ -407,6 +407,8 @@ private func titleBarCallback(
                 let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
                 if let tap = handler.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             }
+            // The incoming event is +0, so pass it through unretained. Retaining it would
+            // leak a reference the framework never balances (#21).
             return EventCallbackOutput(event: .passUnretained(input.event))
         }
         guard let userInfo = input.userInfo else {
@@ -416,6 +418,8 @@ private func titleBarCallback(
         guard let result = handler.handleMouseEvent(input.event, type: type) else {
             return EventCallbackOutput(event: nil)
         }
+        // The same input event is +0; a synthetic mouseDown is +1 and must be retained.
+        // Compare identity to return each with the ownership the event tap expects.
         let output = result === input.event ? Unmanaged.passUnretained(input.event) : .passRetained(result)
         return EventCallbackOutput(event: output)
     }.event

@@ -8,20 +8,18 @@ import WindowManager
 import Platform
 
 // Simple test runner — no Xcode or XCTest required
-@MainActor private enum TestRunnerState {
-    static var passed = 0
-    static var failed = 0
-    static var errors: [String] = []
-}
+var passed = 0
+var failed = 0
+var errors: [String] = []
 
 @MainActor
 func check(_ condition: Bool, _ message: String = "", file: String = #file, line: Int = #line) {
     if condition {
-        TestRunnerState.passed += 1
+        passed += 1
     } else {
-        TestRunnerState.failed += 1
+        failed += 1
         let loc = URL(fileURLWithPath: file).lastPathComponent
-        TestRunnerState.errors.append("  FAIL \(loc):\(line) — \(message)")
+        errors.append("  FAIL \(loc):\(line) — \(message)")
     }
 }
 
@@ -35,7 +33,6 @@ func assertClose(_ a: Double, _ b: Double, tolerance: Double = 1.0, _ message: S
     check(abs(a - b) < tolerance, "\(message) (got \(a), expected \(b) ± \(tolerance))", file: file, line: line)
 }
 
-@MainActor
 func section(_ name: String) {
     print("  ▸ \(name)")
 }
@@ -2934,12 +2931,12 @@ runSimSpace()
 // ============================================================
 print()
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-if TestRunnerState.failed == 0 {
-    print("✓ All \(TestRunnerState.passed) tests passed")
+if failed == 0 {
+    print("✓ All \(passed) tests passed")
 } else {
-    print("✗ \(TestRunnerState.failed) failed, \(TestRunnerState.passed) passed")
-    for err in TestRunnerState.errors { print(err) }
+    print("✗ \(failed) failed, \(passed) passed")
+    for err in errors { print(err) }
 }
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-exit(TestRunnerState.failed > 0 ? 1 : 0)
+exit(failed > 0 ? 1 : 0)
