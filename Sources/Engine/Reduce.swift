@@ -60,10 +60,10 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
 
     func focus(_ intent: FocusIntent, group id: UInt32) {
         guard var group = world.groups[id] else { return }
+        if let observed = intent.observedSpace, observed.isAuthoritative,
+           let current = group.space, current.isAuthoritative, observed != current { return }
         if intent.source == .appActivation, let appID = intent.appID,
            !group.windows.values.contains(where: { $0.appID == appID }) {
-            if let observed = intent.observedSpace, observed.isAuthoritative,
-               let current = group.space, current.isAuthoritative, observed != current { return }
             group.focus = .crossing(intent: intent, time: now, previous: group.focus.decision)
             world.groups[id] = group
             return

@@ -112,6 +112,9 @@ struct Harness {
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axNotification)))
         h.advance(0.3)
         check(h.active == TileID(3), "post-restore echo rejected on receipt, not after debounce")
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axNotification, observedSpace: .skylight(20))))
+        h.advance(0.3)
+        check(h.active == TileID(3), "AX focus from a different observed identity cannot beat delayed Space notification")
         check(h.world.check().isEmpty, "focus echo invariants")
     }
     section("e3e6267 0ea87ee: cross-Space app activation wins once; local or arriving activation does not") {
