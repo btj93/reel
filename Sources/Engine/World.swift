@@ -1,0 +1,159 @@
+import Core
+import Foundation
+
+public struct Rule: Equatable, Sendable {
+    public let bundleID: String
+    public let floating: Bool
+
+    public init(bundleID: String, floating: Bool) {
+        self.bundleID = bundleID
+        self.floating = floating
+    }
+}
+
+public struct EngineConfig: Sendable {
+    public let gap: Double
+    public let defaultWidth: Double
+    public let animate: Bool
+    public let gestureSnap: Bool
+    public let rules: [Rule]
+
+    public init(gap: Double = 8, defaultWidth: Double = 0.5, animate: Bool = true,
+                gestureSnap: Bool = true, rules: [Rule] = []) {
+        self.gap = gap.isFinite && gap >= 0 ? gap : 8
+        self.defaultWidth = defaultWidth.isFinite && defaultWidth > 0 ? defaultWidth : 0.5
+        self.animate = animate
+        self.gestureSnap = gestureSnap
+        self.rules = rules
+    }
+}
+
+public struct GroupState: Sendable {
+    public internal(set) var strip: Strip
+    public internal(set) var windows: [TileID: ObservedWindow] = [:]
+    public internal(set) var floating: Set<TileID> = []
+    public internal(set) var space: SpaceKey?
+    public internal(set) var epoch: UInt64 = 0
+    public internal(set) var focus: FocusState = .none
+    public internal(set) var changingSpace = false
+
+    init(display: DisplayGroup, config: EngineConfig) {
+        strip = Strip(gap: config.gap, workingArea: CGRect(origin: .zero, size: display.frame.size),
+                      defaultWidth: .proportion(config.defaultWidth))
+    }
+}
+
+public struct PointerSession: Sendable {
+    public let scope: EventScope
+    public let tile: TileID
+    public let startOffset: Double
+    public let snapWidth: Double
+    public let snapTargets: [Double]
+    public internal(set) var delta: Double = 0
+}
+
+public enum PointerState: Sendable {
+    case idle
+    case gesture(PointerSession)
+    case menu(PointerSession)
+    case reorder(PointerSession)
+
+    public var session: PointerSession? {
+        switch self {
+        case .idle: nil
+        case .gesture(let session), .menu(let session), .reorder(let session): session
+        }
+    }
+}
+
+public enum ScheduledAction: Sendable {
+    case retryFrames
+    case focus(FocusIntent)
+}
+
+public struct ScheduledWork: Sendable {
+    public let scope: EventScope
+    public let deadline: Double
+    public let action: ScheduledAction
+}
+
+public struct World: Sendable {
+    public internal(set) var topology: Topology
+    public internal(set) var groups: [UInt32: GroupState]
+    public internal(set) var spaces = SpaceBook()
+    public internal(set) var pointer: PointerState = .idle
+    public internal(set) var frames: [TileID: FrameRequest] = [:]
+    public internal(set) var appliedFrames: [TileID: FrameRequest] = [:]
+    public internal(set) var timers: [TimerToken: ScheduledWork] = [:]
+    public let config: EngineConfig
+    public internal(set) var time: Double = 0
+    var serial: UInt64 = 0
+
+    public init(topology: Topology = Topology(revision: 0, groups: [], primaryScreenHeight: 0), config: EngineConfig = EngineConfig()) {
+        precondition(topology.isValid)
+        self.topology = topology
+        self.config = config
+        groups = Dictionary(uniqueKeysWithValues: topology.groups.map { ($0.id, GroupState(display: $0, config: config)) })
+    }
+
+    public func scope(for group: UInt32) -> EventScope? {
+        groups[group].map { EventScope(topologyRevision: topology.revision, group: group, spaceEpoch: $0.epoch) }
+    }
+
+    public func check() -> [String] {
+        var errors: [String] = []
+        var allTiles = Set<TileID>()
+        for (id, group) in groups {
+            let strip = group.strip
+            if strip.columns.count != strip.columnData.count || strip.columns.count != strip.snapIndices.count {
+                errors.append("group \(id): parallel column arrays")
+            }
+            if !(strip.columns.isEmpty ? strip.activeColumnIndex == 0 : strip.columns.indices.contains(strip.activeColumnIndex)) {
+                errors.append("group \(id): active column")
+            }
+            for column in strip.columns {
+                if column.tiles.isEmpty || !column.tiles.indices.contains(column.activeTileIndex) {
+                    errors.append("group \(id): active tile")
+                }
+                for tile in column.tiles {
+                    if !allTiles.insert(tile).inserted { errors.append("duplicate tile \(tile.rawValue)") }
+                    if group.windows[tile] == nil || group.floating.contains(tile) { errors.append("unmanaged tiled window") }
+                }
+            }
+            for tile in group.floating {
+                if !allTiles.insert(tile).inserted || group.windows[tile] == nil { errors.append("invalid floating window") }
+            }
+            if Set(group.windows.keys) != Set(strip.columns.flatMap(\.tiles)).union(group.floating) { errors.append("window membership") }
+            if !strip.viewOffset.current(at: time).isFinite { errors.append("nonfinite offset") }
+            if strip.columnData.contains(where: { !$0.cachedWidth.isFinite || $0.cachedWidth <= 0 }) { errors.append("invalid width") }
+            if strip.snapIndices.contains(where: { !strip.snapPoints.indices.contains($0) }) { errors.append("invalid snap index") }
+            if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
+        }
+        if let session = pointer.session,
+           scope(for: session.scope.group) != session.scope || groups[session.scope.group]?.windows[session.tile] == nil {
+            errors.append("stale pointer")
+        }
+        for frame in frames.values {
+            guard let group = groups[frame.scope.group], scope(for: frame.scope.group) == frame.scope,
+                  group.windows[frame.tile] != nil, !group.floating.contains(frame.tile) else {
+                errors.append("stale frame"); continue
+            }
+            if !frame.frame.rect.isFinite { errors.append("nonfinite frame") }
+        }
+        for work in timers.values where scope(for: work.scope.group) != work.scope { errors.append("stale timer") }
+        if spaces.live.values.contains(where: { !$0.isValid }) || spaces.disk.contains(where: { !$0.isValid }) { errors.append("invalid snapshot") }
+        return errors
+    }
+}
+
+extension CGRect {
+    var isFinite: Bool { [minX, minY, width, height].allSatisfy(\.isFinite) && width > 0 && height > 0 }
+}
+
+extension Topology {
+    var isValid: Bool {
+        primaryScreenHeight.isFinite && primaryScreenHeight >= 0
+            && Set(groups.map(\.id)).count == groups.count && groups.allSatisfy { $0.frame.isFinite && !$0.displays.isEmpty }
+            && Set(groups.flatMap(\.displays)).count == groups.flatMap(\.displays).count
+    }
+}
