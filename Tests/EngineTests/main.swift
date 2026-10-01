@@ -465,6 +465,111 @@ struct Harness {
     }
 }
 
+@MainActor func probeTests() {
+    section("probe 1: an empty destination Space commits after its settle re-read") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.census(30, [])
+        h.advance(0.6)
+        h.census(30, [])
+        check(h.world.groups[1]!.space == .skylight(30), "confirmed empty census commits")
+        h.send(.windowAdded(window(5)))
+        check(h.tiles == [TileID(5)], "window opened on the empty Space joins its own strip")
+        h.census(10, [window(1), window(2)])
+        check(h.tiles == [TileID(1), TileID(2)], "departing Space keeps its own columns")
+        h.send(.spaceWillChange)
+        h.census(40, [])
+        h.advance(0.6)
+        h.census(40, [])
+        h.send(.windowAdded(window(6)))
+        check(h.tiles == [TileID(6)], "observed empty switch does not freeze the group")
+    }
+    section("probe 2: same-Space resolution adopts the census membership") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.send(.spaceWillChange)
+        h.send(.windowAdded(window(5)))
+        h.send(.windowRemoved(TileID(2)))
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(5)]))
+        check(Set(h.tiles) == [TileID(1), TileID(5)], "census membership wins after a same-Space transition")
+        check(h.world.frames[TileID(2)] == nil, "destroyed window loses its frame ownership")
+    }
+    section("probe 3: fingerprint recovery re-keys the authoritative stash") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.census(20, [window(4)])
+        h.send(.spaceChanged(key: .fingerprint([1, 2, 3]), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [window(1), window(2), window(3)]))
+        h.send(.command(.setWidth(TileID(1), 311), .ipc))
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.command(.moveRight, .ipc))
+        check(h.world.spaces.lookupExact(group: 1, space: .skylight(10)) == nil, "recovered sid entry moved to the fingerprint key")
+        h.census(20, [window(4)])
+        h.census(10, [window(1), window(2), window(3)])
+        check(h.tiles == [TileID(2), TileID(1), TileID(3)], "returning sid restores order edited while degraded")
+        check(h.world.groups[1]!.strip.columns[1].width == .fixed(311), "returning sid restores width edited while degraded")
+    }
+    section("probe 4: disk restore matches window identity, not recycled ids") {
+        var h = Harness()
+        let saved = Snapshot(group: 1, space: .skylight(90), columns: [
+            SnapshotColumn(windows: [window(7, bundle: "safari")], width: .fixed(300)),
+            SnapshotColumn(windows: [window(8, bundle: "term")], width: .proportion(0.5)),
+            SnapshotColumn(windows: [window(9, bundle: "mail")], width: .proportion(0.5)),
+        ])
+        h.send(.loadSnapshots([saved]))
+        h.census(91, [ObservedWindow(id: TileID(7), appID: 2, bundleID: "term", identity: "window-8"),
+                      ObservedWindow(id: TileID(8), appID: 1, bundleID: "safari", identity: "window-7"),
+                      ObservedWindow(id: TileID(9), appID: 3, bundleID: "mail", identity: "window-9")])
+        check(h.tiles == [TileID(8), TileID(7), TileID(9)], "order follows identity")
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles == [TileID(8)] }?.width == .fixed(300), "width follows identity")
+    }
+    section("probe 5: persist keeps unvisited disk Spaces") {
+        var h = Harness()
+        let unvisited = Snapshot(group: 1, space: .skylight(99), columns: [SnapshotColumn(windows: [window(50)], width: .fixed(400))])
+        h.send(.loadSnapshots([unvisited]))
+        h.census(10, [window(1)])
+        let payload: [Snapshot] = h.effects.compactMap { effect -> [Snapshot]? in if case .persist(let snapshots) = effect { return snapshots }; return nil }.last ?? []
+        check(payload.map { $0.space } == [.skylight(10), .skylight(99)], "persist payload carries unvisited disk entries")
+    }
+    section("probe 6: a negative preset index is rejected at the codec") {
+        let bad = Snapshot(group: 1, space: .skylight(1), columns: [SnapshotColumn(windows: [window(1)], width: .fixed(300), presetIndex: -5)])
+        let decoded = (try? Snapshot.decode(Snapshot.encode([bad]))) ?? []
+        check(decoded.isEmpty, "negative preset index rejected")
+    }
+    section("probe 7: gestures clamp and re-anchor the active column") {
+        var free = Harness(gestureSnap: false)
+        free.census(10, [window(1), window(2)])
+        free.send(.pointer(.beginGesture(TileID(1))))
+        free.send(.pointer(.delta(50_000)))
+        free.send(.pointer(.endGesture))
+        let bounds = free.world.groups[1]!.strip.viewOffsetBounds(at: free.time)
+        check(bounds.contains(free.offset), "free scroll stays inside view bounds")
+        var snapped = Harness()
+        snapped.census(10, [window(1), window(2), window(3), window(4)])
+        snapped.send(.command(.focus(TileID(1)), .ipc))
+        snapped.send(.pointer(.beginGesture(TileID(1))))
+        snapped.send(.pointer(.delta(1_500)))
+        snapped.send(.pointer(.endGesture))
+        check(snapped.world.groups[1]!.strip.activeColumnIndex == 3, "snapped swipe moves the active column")
+        snapped.send(.command(.focusLeft, .ipc))
+        check(snapped.active == TileID(3), "next focus continues from the landed column")
+    }
+    section("probe 8: external focus cannot kill a swipe") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.advance(0.3)
+        h.send(.pointer(.beginGesture(TileID(1))))
+        let start = h.offset
+        h.send(.pointer(.delta(40)))
+        h.send(.focus(FocusIntent(tile: TileID(3), appID: 3, source: .appActivation)))
+        h.send(.focus(FocusIntent(tile: TileID(3), source: .axNotification)))
+        h.advance(0.2)
+        check(h.world.pointer.session != nil, "swipe survives external focus")
+        h.send(.pointer(.delta(40)))
+        check(abs(h.offset - start - 80) < 0.001, "later deltas still apply")
+    }
+}
+
 struct Random {
     var state: UInt64
     mutating func next(_ upper: Int) -> Int {
@@ -558,7 +663,7 @@ struct FuzzStream {
 }
 
 MainActor.assumeIsolated {
-    do { try replayTests() }
+    do { try replayTests(); probeTests() }
     catch { check(false, "unexpected error: \(error)") }
     var seeds: [UInt64] = [0]
     for value in (environment["ENGINE_FUZZ_SEEDS"] ?? "").split(separator: ",") {
