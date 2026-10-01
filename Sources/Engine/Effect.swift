@@ -39,7 +39,7 @@ public enum Effect: Sendable {
     case reply(id: UInt64, payload: ReplyPayload)
     case close(TileID)
     case overlay(Overlay)
-    case persist([Snapshot])
+    case persist(SpaceBook)
     case requestCensus(group: UInt32, after: Double)
     case schedule(token: TimerToken, deadline: Double, event: Event)
     case cancel(TimerToken)

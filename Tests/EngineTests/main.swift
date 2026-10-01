@@ -7,9 +7,9 @@ let only = environment["ENGINE_ONLY"]?.lowercased() ?? ""
 var checks = 0
 var failures = 0
 
-@MainActor func check(_ condition: @autoclosure () -> Bool, _ message: String) {
+@MainActor func check(_ condition: @autoclosure () -> Bool, _ message: String, line: UInt = #line) {
     checks += 1
-    if !condition() { failures += 1; print("FAIL: \(message)") }
+    if !condition() { failures += 1; print("FAIL: \(message) (main.swift:\(line))") }
 }
 
 @MainActor func section(_ name: String, _ body: () throws -> Void) rethrows {
@@ -31,6 +31,7 @@ struct Harness {
     var world: World
     var time = 1.0
     var effects: [Effect] = []
+    var reduceTime: Duration = .zero
 
     init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [DisplayGroup] = [display()]) {
         world = World(topology: Topology(revision: 1, groups: displays, primaryScreenHeight: 900),
@@ -48,8 +49,14 @@ struct Harness {
             }
         default: stamped = kind
         }
-        effects = reduce(&world, Event(scope: scope ?? world.scope(for: group)!, kind: stamped), now: time)
+        apply(Event(scope: scope ?? world.scope(for: group)!, kind: stamped))
         return effects
+    }
+
+    mutating func apply(_ event: Event) {
+        let start = ContinuousClock.now
+        effects = reduce(&world, event, now: time)
+        reduceTime += start.duration(to: .now)
     }
 
     mutating func census(_ id: UInt64, _ windows: [ObservedWindow], group: UInt32 = 1) {
@@ -63,7 +70,7 @@ struct Harness {
             return $0.value.deadline < $1.value.deadline
         }) {
             time = max(time, entry.value.deadline)
-            effects = reduce(&world, Event(scope: entry.value.scope, kind: .timer(entry.key)), now: time)
+            apply(Event(scope: entry.value.scope, kind: .timer(entry.key)))
         }
         time = target
     }
@@ -88,8 +95,17 @@ struct Harness {
         h.census(30, [window(1), window(3)])
         check(h.world.groups[1]!.space == .skylight(20), "mixed census did not commit")
         check(h.world.spaces.live.count == before, "mixed census did not prune")
+        check(h.effects.contains { if case .requestCensus(1, EngineConfig.censusSettle) = $0 { return true }; return false },
+              "mixed census asks the observer for a settled re-read")
         h.census(30, [])
-        check(h.world.groups[1]!.space == .skylight(20), "empty census did not commit")
+        check(h.world.groups[1]!.space == .skylight(20), "unconfirmed empty census did not commit")
+        check(h.effects.contains { if case .requestCensus(1, let after) = $0 { return after < EngineConfig.censusSettle }; return false },
+              "repeat read keeps the original settle deadline")
+        h.advance(EngineConfig.censusSettle)
+        h.census(30, [])
+        check(h.world.groups[1]!.space == .skylight(30) && h.tiles.isEmpty, "settled empty re-read commits the empty Space")
+        check(h.world.spaces.lookupExact(group: 1, space: .skylight(20))?.windows.map(\.id) == [TileID(3), TileID(4)],
+              "departing stash saved before the empty Space")
         h.census(10, [window(1), window(2)])
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(377), "departing layout survives bad census")
         check(h.world.check().isEmpty, "census invariants")
@@ -380,6 +396,12 @@ struct Harness {
         h.send(.spaceChanged(key: .fingerprint([1, 2]), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2)]))
         check(h.world.groups[1]!.space == .fingerprint([1, 2]), "degraded key commits")
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(311), "degraded fingerprint deterministically recovers authoritative stash")
+        check(h.world.spaces.lookupExact(group: 1, space: .skylight(10)) == nil, "recovered stash re-keyed off the old sid")
+        h.send(.command(.setWidth(TileID(2), 222), .ipc))
+        h.census(20, [window(3)])
+        h.census(10, [window(1), window(2)])
+        check(h.world.groups[1]!.strip.columns.map(\.width) == [.fixed(311), .fixed(222)], "returning sid keeps edits made while degraded")
+        check(h.world.spaces.lookupExact(group: 1, space: .fingerprint([1, 2])) == nil, "sid return re-keys the fingerprint stash")
         check(h.world.check().isEmpty, "degraded-key invariants")
     }
     section("73ef68d: rules fail closed for missing bundle IDs; sole foreign disk entry is not adopted") {
@@ -445,6 +467,113 @@ struct Harness {
             if case .reply(8, .snapshots(let snapshots)) = $0 { return snapshots.first?.activeColumnIndex == 1 }
             return false
         }, "query reply contains current immutable snapshot")
+        func reply(_ id: UInt64, _ command: Command) -> CommandOutcome? {
+            h.send(.ipc(id: id, command: command))
+            for case .reply(id, .command(let outcome)) in h.effects { return outcome }
+            return nil
+        }
+        check(reply(9, .focus(TileID(99))) == .unknownWindow(TileID(99)), "unknown window is reported")
+        check(reply(10, .setWidth(TileID(1), -4)) == .refused("invalid width"), "invalid width is refused")
+        h.send(.command(.toggleFloating(TileID(2)), .ipc))
+        check(reply(11, .toggleFullWidth(TileID(2))) == .refused("floating window"), "floating target is refused")
+        h.send(.spaceWillChange)
+        check(reply(12, .focusLeft) == .refused("space change in progress"), "Space change refuses commands")
+        var empty = Harness()
+        empty.census(10, [])
+        empty.send(.ipc(id: 13, command: .cycleWidthPreset))
+        check(empty.effects.contains { if case .reply(13, .command(.refused("empty strip"))) = $0 { return true }; return false },
+              "empty strip is refused")
+    }
+    section("keyboard focus and move paths clamp at both edges") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.send(.command(.focusLeft, .keyboard))
+        check(h.active == TileID(1), "focusLeft clamps at the left edge")
+        h.send(.command(.focusRight, .keyboard))
+        check(h.active == TileID(2), "focusRight moves one column")
+        h.send(.command(.focusRight, .keyboard))
+        h.send(.command(.focusRight, .keyboard))
+        check(h.active == TileID(3), "focusRight clamps at the right edge")
+        check(h.effects.contains { if case .focus(TileID(3), .keyboard) = $0 { return true }; return false }, "edge focus re-asserts the window")
+        h.send(.command(.moveLeft, .keyboard))
+        check(h.tiles == [TileID(1), TileID(3), TileID(2)] && h.active == TileID(3), "moveLeft carries the active column")
+        h.send(.command(.moveLeft, .keyboard))
+        h.send(.command(.moveLeft, .keyboard))
+        check(h.tiles == [TileID(3), TileID(1), TileID(2)], "moveLeft clamps at the left edge")
+        h.send(.command(.moveRight, .keyboard))
+        check(h.tiles == [TileID(1), TileID(3), TileID(2)] && h.active == TileID(3), "moveRight carries the active column")
+        let persisted = h.effects.contains { if case .persist = $0 { return true }; return false }
+        check(persisted, "moves persist the new order")
+        h.send(.command(.close(TileID(2)), .keyboard))
+        check(h.effects.contains { if case .close(TileID(2)) = $0 { return true }; return false }, "close asks the app to close")
+        check(h.tiles.contains(TileID(2)), "close waits for the destroyed notification")
+        h.send(.windowRemoved(TileID(2)))
+        check(h.tiles == [TileID(1), TileID(3)], "destroyed window leaves the strip")
+    }
+    section("eebb564: menu focus, close and width act on the captured tile") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.send(.pointer(.openMenu(TileID(1))))
+        h.send(.pointer(.menu(.focus(TileID(2)))))
+        check(h.active == TileID(1), "menu focus targets the captured tile")
+        h.send(.pointer(.openMenu(TileID(2))))
+        h.send(.pointer(.menu(.close(TileID(1)))))
+        check(h.effects.contains { if case .close(TileID(2)) = $0 { return true }; return false }, "menu close targets the captured tile")
+        h.send(.pointer(.openMenu(TileID(2))))
+        h.send(.pointer(.menu(.cycleWidthPreset)))
+        check(h.world.pointer.token == nil && h.world.groups[1]!.strip.columns[1].presetIndex == nil, "strip-wide menu action is ignored")
+    }
+    section("configChanged and frame routing") {
+        var h = Harness()
+        h.census(10, [window(1, app: 41), window(2, app: 42)])
+        check(h.requests.allSatisfy { $0.pid == Int32($0.tile.rawValue) + 40 }, "frame requests carry the owning pid")
+        h.send(.configChanged(EngineConfig(gap: 20, defaultWidth: 0.4, animate: false)))
+        check(h.world.config.gap == 20 && h.world.groups[1]!.strip.gap == 20, "config reload reaches the strip")
+        check(h.world.groups[1]!.strip.columnData.allSatisfy { $0.cachedWidth == 500 }, "existing columns keep their logical width")
+        check(!h.requests.isEmpty, "config reload relayouts")
+        h.send(.windowAdded(window(3)))
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles == [TileID(3)] }?.width == .proportion(0.4), "new columns use the reloaded width")
+        let bad = World(topology: Topology(revision: 4, groups: [DisplayGroup(id: 1, displays: [1], frame: .zero)], primaryScreenHeight: 900))
+        check(bad.groups.isEmpty && bad.topology.revision == 4, "zero-size display at launch does not trap")
+    }
+    section("d227a21: external focus stays quiet through momentum and its settle echo") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.advance(0.3)
+        h.send(.pointer(.beginGesture(TileID(1))))
+        h.send(.pointer(.delta(300)))
+        h.send(.pointer(.endGesture))
+        let landed = h.active
+        check(landed != TileID(1), "swipe landed away from the focus target")
+        h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .appActivation)))
+        h.advance(0.2)
+        check(h.active == landed, "momentum ignores incremental focus")
+        h.send(.tick, advance: 3)
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
+        h.advance(0.2)
+        check(h.active == landed, "settle echo inside the quiet window is ignored")
+        h.advance(EngineConfig.gestureQuiet)
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
+        h.advance(0.2)
+        check(h.active == TileID(1), "focus resumes after the quiet window")
+    }
+    section("554b4ed: disk entries are consumed once and out-of-range presets are cleared") {
+        var h = Harness()
+        let saved = Snapshot(group: 1, space: .skylight(90), columns: [
+            SnapshotColumn(windows: [window(7)], width: .fixed(300), presetIndex: 9),
+            SnapshotColumn(windows: [window(8)], width: .fixed(310)),
+        ])
+        h.send(.loadSnapshots([saved]))
+        h.census(10, [window(7), window(8)])
+        check(h.world.groups[1]!.strip.columns[0].width == .fixed(300), "disk entry restores")
+        check(h.world.groups[1]!.strip.columns[0].presetIndex == nil, "preset index beyond the preset list is cleared")
+        check(h.world.spaces.disk.isEmpty, "adopted disk entry is consumed")
+        h.send(.command(.cycleWidthPreset, .ipc))
+        h.census(20, [window(7, app: 70), window(8, app: 80)].map {
+            ObservedWindow(id: TileID($0.id.rawValue + 100), pid: $0.pid, bundleID: $0.bundleID, title: $0.title)
+        })
+        check(h.world.groups[1]!.strip.columns.allSatisfy { $0.width == .proportion(0.5) }, "a consumed entry cannot be adopted twice")
     }
     section("5753fc0: independent display epochs and invalid input") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
@@ -472,6 +601,8 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2)])
         h.census(30, [])
+        check(h.effects.contains { if case .requestCensus(1, EngineConfig.censusSettle) = $0 { return true }; return false },
+              "deferred empty census requests a settled re-read")
         h.advance(0.6)
         h.census(30, [])
         check(h.world.groups[1]!.space == .skylight(30), "confirmed empty census commits")
@@ -530,7 +661,7 @@ struct Harness {
         let unvisited = Snapshot(group: 1, space: .skylight(99), columns: [SnapshotColumn(windows: [window(50)], width: .fixed(400))])
         h.send(.loadSnapshots([unvisited]))
         h.census(10, [window(1)])
-        let payload: [Snapshot] = h.effects.compactMap { effect -> [Snapshot]? in if case .persist(let snapshots) = effect { return snapshots }; return nil }.last ?? []
+        let payload: [Snapshot] = h.effects.compactMap { effect -> [Snapshot]? in if case .persist(let book) = effect { return book.persisted }; return nil }.last ?? []
         check(payload.map { $0.space } == [.skylight(10), .skylight(99)], "persist payload carries unvisited disk entries")
     }
     section("probe 6: a negative preset index is rejected at the codec") {
@@ -553,6 +684,8 @@ struct Harness {
         snapped.send(.pointer(.delta(1_500)))
         snapped.send(.pointer(.endGesture))
         check(snapped.world.groups[1]!.strip.activeColumnIndex == 3, "snapped swipe moves the active column")
+        check(abs(snapped.offset - snapped.world.groups[1]!.strip.snapTarget(forColumn: 3, at: snapped.time)) < 0.001,
+              "release rests on the landed column's snap point")
         snapped.send(.command(.focusLeft, .ipc))
         check(snapped.active == TileID(3), "next focus continues from the landed column")
     }
@@ -588,6 +721,7 @@ struct FuzzStream {
     var h: Harness
     var nextID: UInt32 = 200
     var priorScopes: [EventScope]
+    var reached: [String: Int] = [:]
 
     init(seed: UInt64) {
         rng = Random(state: seed)
@@ -597,12 +731,15 @@ struct FuzzStream {
         priorScopes = [h.world.scope(for: 1)!, h.world.scope(for: 2)!]
     }
 
+    mutating func pick<T>(_ values: [T]) -> T? { values.isEmpty ? nil : values[rng.next(values.count)] }
+
     mutating func step() {
-        let id: UInt32 = rng.next(2) == 0 ? 1 : 2
+        let id = pick(h.world.groups.keys.sorted())!
         let group = h.world.groups[id]!
-        let tiles = group.windows.keys.sorted { $0.rawValue < $1.rawValue }
-        let tile = tiles.isEmpty ? TileID(99999) : tiles[rng.next(tiles.count)]
-        switch rng.next(20) {
+        let tile = pick(group.windows.keys.sorted { $0.rawValue < $1.rawValue }) ?? TileID(99999)
+        let epoch = group.epoch + 1
+        let before = (space: group.space, groups: h.world.groups.count)
+        switch rng.next(32) {
         case 0: h.send(.command(.focus(tile), .ipc), group: id)
         case 1: h.send(.focus(FocusIntent(tile: tile, source: .axFocus)), group: id)
         case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keyboard), group: id)
@@ -610,7 +747,9 @@ struct FuzzStream {
         case 4: h.send(.pointer(.delta(Double(rng.next(400) - 200))), group: id)
         case 5: h.send(.pointer(.endGesture), group: id)
         case 6: h.send(.pointer(.openMenu(tile)), group: id)
-        case 7: h.send(.pointer(.menu(.toggleFloating(tile))), group: id)
+        case 7:
+            let actions: [Command] = [.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile)]
+            h.send(.pointer(.menu(pick(actions)!)), group: id)
         case 8: h.send(.windowRemoved(tile), group: id)
         case 9:
             nextID += 1
@@ -620,23 +759,48 @@ struct FuzzStream {
             if let request { h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: rng.next(2) == 0 ? .applied : .timedOut), group: id) }
             else { h.send(.tick, group: id) }
         case 11:
-            if let timer = h.world.timers.min(by: { $0.key.rawValue < $1.key.rawValue }) {
+            if let timer = h.world.timers.min(by: { $0.key < $1.key }) {
                 h.send(.timer(timer.key), scope: timer.value.scope, advance: 0.2)
             } else { h.send(.tick, group: id, advance: 0.2) }
         case 12:
             priorScopes.append(h.world.scope(for: id)!)
             nextID += 1
             h.census(UInt64(100 + rng.next(4)), [window(nextID)], group: id)
-        case 13: h.send(.windowRemoved(tile), group: id, scope: priorScopes[rng.next(priorScopes.count)])
+        case 13: h.send(.windowRemoved(tile), group: id, scope: pick(priorScopes)!)
         case 14: h.send(.command(.toggleFloating(tile), .ipc), group: id)
         case 15:
-            h.send(.topologyChanged(Topology(revision: h.world.topology.revision + 1,
-                                            groups: [display(), display(2, x: Double(1000 + rng.next(100)))], primaryScreenHeight: 900)), group: id)
+            let groups = rng.next(3) == 0 ? [display()] : [display(), display(2, x: Double(1000 + rng.next(100)))]
+            h.send(.topologyChanged(Topology(revision: h.world.topology.revision + 1, groups: groups, primaryScreenHeight: 900)), group: 1)
         case 16: h.send(.pointer(.beginReorder(tile)), group: id)
         case 17: h.send(.pointer(.dropReorder(rng.next(10) - 3)), group: id)
         case 18: h.send(.spaceWillChange, group: id)
+        case 19:
+            let all = h.world.groups.values.flatMap { $0.windows.values }.sorted { $0.id.rawValue < $1.id.rawValue }
+            let target = pick(all)
+            h.send(.focus(FocusIntent(tile: target?.id, pid: target?.pid, source: .appActivation)), group: id)
+        case 20: h.send(.command(rng.next(2) == 0 ? .focusLeft : .focusRight, .keyboard), group: id)
+        case 21: h.send(.command(rng.next(2) == 0 ? .moveLeft : .moveRight, .keyboard), group: id)
+        case 22: h.send(.command(.cycleWidthPreset, .keyboard), group: id)
+        case 23: h.send(.command(.toggleFullWidth(tile), .keyboard), group: id)
+        case 24: h.send(.ipc(id: UInt64(rng.next(1000)), command: rng.next(2) == 0 ? .focus(tile) : .close(tile)), group: id)
+        case 25: h.send(.query(id: UInt64(rng.next(1000))), group: id)
+        case 26: h.send(.loadSnapshots(h.world.spaces.persisted), group: id)
+        case 27: h.census(rng.next(2) == 0 ? UInt64(100 + rng.next(4)) : 10, [], group: id)
+        case 28, 29:
+            let saved = h.world.spaces.live.values.filter { $0.group == id }.sorted { $0.space.debugDescription < $1.space.debugDescription }
+            guard let visit = pick(saved) else { h.send(.tick, group: id); break }
+            let key: SpaceKey = rng.next(2) == 0 ? .fingerprint(visit.fingerprint) : visit.space
+            h.send(.spaceChanged(key: key.isEmpty ? .skylight(10) : key, epoch: epoch, windows: visit.windows), group: id)
+        case 30: h.send(.pointer(.cancel), group: id)
+        case 31: h.send(.configChanged(EngineConfig(gap: Double(rng.next(20)), animate: rng.next(2) == 0, gestureSnap: rng.next(2) == 0)), group: id)
         default: h.send(.tick, group: id)
         }
+        let after = h.world.groups[id]
+        if case .fingerprint = after?.space { reached["fingerprint key", default: 0] += 1 }
+        if case .crossing = after?.focus { reached["dock crossing", default: 0] += 1 }
+        if after?.space != before.space, (after?.strip.columns.count ?? 0) > 1 { reached["multi-column restore", default: 0] += 1 }
+        if h.world.groups.count != before.groups { reached["group added or removed", default: 0] += 1 }
+        if case .gesture = h.world.pointer, case .animation = after?.strip.viewOffset { reached["gesture during animation", default: 0] += 1 }
     }
 }
 
@@ -649,19 +813,28 @@ struct FuzzStream {
             stream.step()
             let violations = stream.h.world.check()
             check(violations.isEmpty, "seed=\(seed) step=\(step): \(violations)")
-            if !violations.isEmpty { return }
+            if !violations.isEmpty { break }
         }
+        let states = ["fingerprint key", "dock crossing", "multi-column restore", "group added or removed"]
+        print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
+        for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
     }
 }
 
 @MainActor func benchmark() {
     guard environment["ENGINE_BENCH"] == "1" else { return }
-    var stream = FuzzStream(seed: 0)
-    let start = ContinuousClock.now
-    for _ in 0..<10_000 { stream.step() }
-    let duration = start.duration(to: .now)
-    print("ENGINE_BENCH seed=0 events=10000 duration=\(duration)")
-    check(stream.h.world.check().isEmpty, "benchmark invariants")
+    var rounds: [Duration] = []
+    for _ in 0..<5 {
+        var stream = FuzzStream(seed: 0)
+        for _ in 0..<10_000 { stream.step() }
+        check(stream.h.world.check().isEmpty, "benchmark invariants")
+        rounds.append(stream.h.reduceTime)
+    }
+    let median = rounds.sorted()[2]
+    print("ENGINE_BENCH seed=0 events=10000 rounds=\(rounds.map { "\($0)" }) median=\(median)")
+    #if !DEBUG
+    check(median < .milliseconds(50), "reduce budget: median of 5 rounds of 10,000 events under 50 ms")
+    #endif
 }
 
 MainActor.assumeIsolated {

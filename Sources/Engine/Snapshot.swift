@@ -31,27 +31,55 @@ public struct SnapshotColumn: Codable, Sendable {
 
 public struct Snapshot: Codable, Sendable {
     public let group: UInt32
-    private let spaceIdentity: SnapshotSpace
-    public var space: SpaceKey { spaceIdentity.key }
+    public let space: SpaceKey
     public let columns: [SnapshotColumn]
     public let floating: [ObservedWindow]
     public let activeColumnIndex: Int
     public let offset: Double
     public let focusedTile: TileID?
+    public let windows: [ObservedWindow]
+    public let fingerprint: Set<UInt32>
+    let identities: Set<WindowIdentity>
 
     public init(group: UInt32, space: SpaceKey, columns: [SnapshotColumn], floating: [ObservedWindow] = [],
                 activeColumnIndex: Int = 0, offset: Double = 0, focusedTile: TileID? = nil) {
         self.group = group
-        self.spaceIdentity = SnapshotSpace(space)
+        self.space = space
         self.columns = columns
         self.floating = floating
         self.activeColumnIndex = activeColumnIndex
         self.offset = offset
         self.focusedTile = focusedTile
+        windows = columns.flatMap(\.windows) + floating
+        fingerprint = Set(windows.map { $0.id.rawValue })
+        identities = Set(windows.map(WindowIdentity.init))
     }
 
-    public var windows: [ObservedWindow] { columns.flatMap(\.windows) + floating }
-    public var fingerprint: Set<UInt32> { Set(windows.map { $0.id.rawValue }) }
+    private enum CodingKeys: String, CodingKey {
+        case group, space, columns, floating, activeColumnIndex, offset, focusedTile
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(group: try container.decode(UInt32.self, forKey: .group),
+                  space: try container.decode(SnapshotSpace.self, forKey: .space).key,
+                  columns: try container.decode([SnapshotColumn].self, forKey: .columns),
+                  floating: try container.decode([ObservedWindow].self, forKey: .floating),
+                  activeColumnIndex: try container.decode(Int.self, forKey: .activeColumnIndex),
+                  offset: try container.decode(Double.self, forKey: .offset),
+                  focusedTile: try container.decodeIfPresent(TileID.self, forKey: .focusedTile))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(group, forKey: .group)
+        try container.encode(SnapshotSpace(space), forKey: .space)
+        try container.encode(columns, forKey: .columns)
+        try container.encode(floating, forKey: .floating)
+        try container.encode(activeColumnIndex, forKey: .activeColumnIndex)
+        try container.encode(offset, forKey: .offset)
+        try container.encodeIfPresent(focusedTile, forKey: .focusedTile)
+    }
 
     public static func encode(_ snapshots: [Snapshot]) throws -> Data {
         let encoder = JSONEncoder()
@@ -64,7 +92,7 @@ public struct Snapshot: Codable, Sendable {
     }
 
     var isValid: Bool {
-        offset.isFinite && Set(windows.map(\.id)).count == windows.count
+        offset.isFinite && fingerprint.count == windows.count
             && windows.allSatisfy(\.isValid)
             && (focusedTile.map { tile in windows.contains { $0.id == tile } } ?? true)
             && (columns.isEmpty ? activeColumnIndex == 0 : columns.indices.contains(activeColumnIndex))

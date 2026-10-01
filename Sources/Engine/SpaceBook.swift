@@ -55,19 +55,37 @@ public struct SpaceBook: Sendable {
         }
     }
 
-    var persisted: [Snapshot] {
-        (Array(live.values) + disk.filter { lookupExact(group: $0.group, space: $0.space) == nil }).sorted {
-            if $0.group != $1.group { return $0.group < $1.group }
-            return $0.space.debugDescription < $1.space.debugDescription
-        }
+    public var persisted: [Snapshot] {
+        let pending = disk.filter { lookupExact(group: $0.group, space: $0.space) == nil }
+        return (Array(live.values) + pending).map { ($0, SpaceOrder($0.group, $0.space)) }.sorted { $0.1 < $1.1 }.map(\.0)
     }
 
     private func tolerantMatch(group: UInt32, windows: [ObservedWindow]) -> SpaceMatch? {
         let identities = Set(windows.map(WindowIdentity.init))
         let indexed = disk.indices.filter { disk[$0].group == group }
-        guard let winner = bestMatch(indexed.map { disk[$0] }, score: { similarity(Set($0.windows.map(WindowIdentity.init)), identities) })
+        guard let winner = bestMatch(indexed.map { disk[$0] }, score: { similarity($0.identities, identities) })
         else { return nil }
         return SpaceMatch(snapshot: disk[indexed[winner]], source: .disk(indexed[winner]))
+    }
+}
+
+struct SpaceOrder: Comparable {
+    let group: UInt32
+    let sid: UInt64
+    let fingerprint: [UInt32]
+
+    init(_ group: UInt32, _ space: SpaceKey) {
+        self.group = group
+        switch space {
+        case .skylight(let id): sid = id; fingerprint = []
+        case .fingerprint(let ids): sid = .max; fingerprint = ids.sorted()
+        }
+    }
+
+    static func < (lhs: SpaceOrder, rhs: SpaceOrder) -> Bool {
+        if lhs.group != rhs.group { return lhs.group < rhs.group }
+        if lhs.sid != rhs.sid { return lhs.sid < rhs.sid }
+        return lhs.fingerprint.lexicographicallyPrecedes(rhs.fingerprint)
     }
 }
 
@@ -82,20 +100,18 @@ struct WindowIdentity: Hashable {
 }
 
 private func similarity<T: Hashable>(_ lhs: Set<T>, _ rhs: Set<T>) -> Double {
-    let union = lhs.union(rhs).count
-    return union == 0 ? 0 : Double(lhs.intersection(rhs).count) / Double(union)
+    let (small, large) = lhs.count <= rhs.count ? (lhs, rhs) : (rhs, lhs)
+    let shared = small.reduce(0) { large.contains($1) ? $0 + 1 : $0 }
+    let union = lhs.count + rhs.count - shared
+    return union == 0 ? 0 : Double(shared) / Double(union)
 }
 
 private func bestMatch(_ candidates: [Snapshot], score: (Snapshot) -> Double) -> Int? {
-    var best: Int?
-    var bestScore = SpaceBook.matchThreshold
-    for index in candidates.indices.sorted(by: {
-        let lhs = candidates[$0], rhs = candidates[$1]
+    let scored = candidates.indices.map { (index: $0, score: score(candidates[$0])) }.filter { $0.score > SpaceBook.matchThreshold }
+    return scored.min {
+        if $0.score != $1.score { return $0.score > $1.score }
+        let lhs = candidates[$0.index], rhs = candidates[$1.index]
         if lhs.fingerprint != rhs.fingerprint { return lhs.fingerprint.sorted().lexicographicallyPrecedes(rhs.fingerprint.sorted()) }
-        return lhs.space.debugDescription < rhs.space.debugDescription
-    }) {
-        let value = score(candidates[index])
-        if value > bestScore { best = index; bestScore = value }
-    }
-    return best
+        return SpaceOrder(lhs.group, lhs.space) < SpaceOrder(rhs.group, rhs.space)
+    }?.index
 }

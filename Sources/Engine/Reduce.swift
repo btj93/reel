@@ -178,7 +178,8 @@ extension World {
         groups[id] = group
         invalidate(tile, &pass)
         for (key, saved) in spaces.live where saved.windows.contains(where: { $0.id == tile }) {
-            spaces.live[key] = removing(tile, from: saved)
+            let pruned = removing(tile, from: saved)
+            spaces.live[key] = pruned.windows.isEmpty ? nil : pruned
         }
         pass.layout.insert(id)
     }
@@ -552,7 +553,7 @@ extension World {
                 spaces.live[GroupSpace(group: id, space: saved.space)] = saved
             }
         }
-        pass.effects.append(.persist(spaces.persisted))
+        pass.effects.append(.persist(spaces))
     }
 }
 
