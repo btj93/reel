@@ -13,6 +13,8 @@ let package = Package(
         .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0"),
     ],
     targets: [
+        .target(name: "Engine", dependencies: ["Core"]),
+        .executableTarget(name: "RunEngineTests", dependencies: ["Engine", "Core"], path: "Tests/EngineTests"),
         // Main app
         .executableTarget(
             name: "Reel",
