@@ -29,11 +29,17 @@ final class ReorderOverlayController {
 
     private var overlayWindow: ReorderOverlayWindow?
     private var captureTask: Task<Void, Never>?
-    private var captureTimeoutTask: Task<Void, Never>?
+    private var readyDeadlineTask: Task<Void, Never>?
     private var columns: [ColumnInfo] = []
     private var draggedIndex: Int = 0
     private var insertionIndex: Int = 0
     private var isReady: Bool = false
+
+    private static let thumbnailReadyDeadline: Duration = .milliseconds(300) // keep drop latency within the R1 perf gate (trunk p95 + 100 ms)
+
+    /// Screenshots keyed by position in `[dragged] + nonDragged`. Filled as each capture
+    /// finishes; tiles without an entry show a placeholder until a late capture lands.
+    private var thumbnailImages: [Int: CGImage] = [:]
 
     /// Set when the user released before the async thumbnail capture finished.
     /// The drop is completed from the capture completion instead of being computed
@@ -80,9 +86,9 @@ final class ReorderOverlayController {
         guard draggedIndex >= 0, draggedIndex < columns.count else { return }
 
         captureTask?.cancel()
-        captureTimeoutTask?.cancel()
+        readyDeadlineTask?.cancel()
         captureTask = nil
-        captureTimeoutTask = nil
+        readyDeadlineTask = nil
 
         // 1. Tear down any existing overlay immediately (handles drag-during-fade-out).
         if let existing = overlayWindow {
@@ -103,6 +109,7 @@ final class ReorderOverlayController {
         self.thumbnailStyle = thumbnailStyle
         self.thumbnailHeight = thumbnailHeight
         self.isReady = false
+        self.thumbnailImages = [:]
         self.bufferedCursorPositions = []
         // A superseded drag must not auto-commit into this new session.
         self.pendingCommit = false
@@ -117,49 +124,38 @@ final class ReorderOverlayController {
         window.thumbnailGap = gap
         self.overlayWindow = window
 
-        let capturedColumns = [columns[draggedIndex]] + self.nonDraggedColumns
-        let capturedStyle = thumbnailStyle
-        let capturedThumbnailHeight = thumbnailHeight
-
-        guard capturedStyle == "screenshot" else {
-            installThumbnails([:], columns: capturedColumns, style: capturedStyle,
-                              height: capturedThumbnailHeight, generation: myGeneration)
+        guard thumbnailStyle == "screenshot" else {
+            installThumbnails(generation: myGeneration)
             return
         }
 
+        let capturedColumns = orderedColumns
+        let capturedThumbnailHeight = thumbnailHeight
         captureTask = Task { @MainActor [weak self] in
             let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard !Task.isCancelled else { return }
-            let windows = Dictionary(uniqueKeysWithValues: (content?.windows ?? []).map { ($0.windowID, $0) })
+            let windows = Dictionary((content?.windows ?? []).map { ($0.windowID, $0) },
+                                     uniquingKeysWith: { first, _ in first })
             let requests = capturedColumns.enumerated().compactMap { index, column -> ThumbnailCaptureRequest? in
                 guard let window = windows[column.windowID] else { return nil }
-                let aspectRatio = column.frameWidth > 0 && column.frameHeight > 0
-                    ? column.frameWidth / column.frameHeight
-                    : 1.0
                 return ThumbnailCaptureRequest(index: index, window: window,
-                                               aspectRatio: aspectRatio,
+                                               aspectRatio: column.aspectRatio,
                                                thumbnailHeight: capturedThumbnailHeight)
             }
-            let screenshots = await withTaskGroup(of: (Int, CGImage?).self) { group in
+            await withTaskGroup(of: (Int, CGImage?).self) { group in
                 for request in requests {
                     group.addTask { await Self.captureWindow(request) }
                 }
-                var images: [Int: CGImage] = [:]
                 for await (index, image) in group {
-                    if let image { images[index] = image }
+                    if let image { self?.receiveThumbnail(image, at: index, generation: myGeneration) }
                 }
-                return images
             }
-            guard !Task.isCancelled else { return }
-            self?.installThumbnails(screenshots, columns: capturedColumns, style: capturedStyle,
-                                    height: capturedThumbnailHeight, generation: myGeneration)
+            self?.installThumbnails(generation: myGeneration)
         }
-        captureTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(300))
+        readyDeadlineTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.thumbnailReadyDeadline)
             guard !Task.isCancelled else { return }
-            self?.captureTask?.cancel()
-            self?.installThumbnails([:], columns: capturedColumns, style: capturedStyle,
-                                    height: capturedThumbnailHeight, generation: myGeneration)
+            self?.installThumbnails(generation: myGeneration)
         }
     }
 
@@ -225,9 +221,10 @@ final class ReorderOverlayController {
         // from an in-progress animateGhostSettle cannot call moveColumn.
         onCommit = nil
         captureTask?.cancel()
-        captureTimeoutTask?.cancel()
+        readyDeadlineTask?.cancel()
         captureTask = nil
-        captureTimeoutTask = nil
+        readyDeadlineTask = nil
+        thumbnailImages = [:]
         // Retire the session so an in-flight capture landing before the fade
         // completes cannot orderFront a dead overlay, and drop any deferred commit
         // from an abandoned drag.
@@ -302,29 +299,29 @@ final class ReorderOverlayController {
         return count
     }
 
-    private func installThumbnails(
-        _ screenshots: [Int: CGImage],
-        columns: [ColumnInfo],
-        style: String,
-        height: Double,
-        generation: Int
-    ) {
-        guard self.generation == generation, !isReady, let window = overlayWindow else { return }
-        captureTask = nil
-        captureTimeoutTask?.cancel()
-        captureTimeoutTask = nil
+    private var orderedColumns: [ColumnInfo] { [columns[draggedIndex]] + nonDraggedColumns }
 
-        let thumbnails = columns.enumerated().map { index, column in
-            let aspectRatio = column.frameWidth > 0 && column.frameHeight > 0
-                ? column.frameWidth / column.frameHeight
-                : 1.0
-            let width = height * aspectRatio
-            let screenshot = screenshots[index]
-            let placeholder = style == "screenshot" && screenshot == nil
-            let image = screenshot.map {
-                NSImage(cgImage: $0, size: NSSize(width: width, height: height))
-            } ?? column.appIcon
-            return (image: image, width: width, isPlaceholder: placeholder)
+    private func tileImage(_ image: CGImage, for column: ColumnInfo) -> NSImage {
+        NSImage(cgImage: image, size: NSSize(width: thumbnailHeight * column.aspectRatio, height: thumbnailHeight))
+    }
+
+    private func receiveThumbnail(_ image: CGImage, at index: Int, generation: Int) {
+        guard self.generation == generation else { return }
+        thumbnailImages[index] = image
+        guard isReady else { return }
+        overlayWindow?.replaceThumbnail(at: index, with: tileImage(image, for: orderedColumns[index]))
+    }
+
+    private func installThumbnails(generation: Int) {
+        guard self.generation == generation, !isReady, let window = overlayWindow else { return }
+        readyDeadlineTask?.cancel()
+        readyDeadlineTask = nil
+
+        let thumbnails = orderedColumns.enumerated().map { index, column in
+            let screenshot = thumbnailImages[index]
+            let placeholder = thumbnailStyle == "screenshot" && screenshot == nil
+            let image = screenshot.map { tileImage($0, for: column) } ?? column.appIcon
+            return (image: image, width: thumbnailHeight * column.aspectRatio, isPlaceholder: placeholder)
         }
         let draggedResult = thumbnails[0]
         window.configureThumbnails(
@@ -360,6 +357,7 @@ final class ReorderOverlayController {
         configuration.width = max(1, Int((request.thumbnailHeight * request.aspectRatio * scale).rounded()))
         configuration.height = max(1, Int((request.thumbnailHeight * scale).rounded()))
         configuration.scalesToFit = true
+        configuration.preservesAspectRatio = false
         configuration.ignoreShadowsSingleWindow = true
         configuration.showsCursor = false
         do {

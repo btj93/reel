@@ -30,6 +30,10 @@ public struct ColumnInfo {
         self.frameWidth = frameWidth
         self.frameHeight = frameHeight
     }
+
+    public var aspectRatio: Double {
+        frameWidth > 0 && frameHeight > 0 ? frameWidth / frameHeight : 1.0
+    }
 }
 
 // MARK: - ReorderOverlayWindow
@@ -246,6 +250,15 @@ public final class ReorderOverlayWindow: NSWindow {
         let ghostHeight = thumbnailHeight
         ghostView.frame = CGRect(x: 0, y: 0, width: draggedWidth, height: ghostHeight)
         ghostView.isHidden = true
+    }
+
+    /// Swaps a placeholder for its screenshot without touching layout.
+    /// `index` 0 is the dragged column, `n` the n-th non-dragged column.
+    public func replaceThumbnail(at index: Int, with image: NSImage) {
+        let view = index == 0 ? ghostView : thumbnailViews[index - 1]
+        view.image = image
+        view.imageScaling = .scaleAxesIndependently
+        view.layer?.backgroundColor = nil
     }
 
     // MARK: - Layout
