@@ -187,6 +187,7 @@ func cgToAppKit(_ frame: CGRect, primaryScreenHeight: CGFloat) -> CGRect {
 
 /// Owns the NSWindows this process created and answers commands about them. Every method here
 /// must be called on the main thread (NSWindow is not thread-safe).
+@MainActor
 final class WindowHost {
     private var windows: [Int: NSWindow] = [:]
     private var frameChangeCounts: [Int: Int] = [:]
@@ -265,12 +266,12 @@ final class WindowHost {
         let move = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: window, queue: nil
         ) { [weak self] _ in
-            self?.frameChangeCounts[id, default: 0] += 1
+            MainActor.assumeIsolated { self?.frameChangeCounts[id, default: 0] += 1 }
         }
         let resize = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification, object: window, queue: nil
         ) { [weak self] _ in
-            self?.frameChangeCounts[id, default: 0] += 1
+            MainActor.assumeIsolated { self?.frameChangeCounts[id, default: 0] += 1 }
         }
         observers[id] = [move, resize]
         return id
@@ -349,6 +350,7 @@ func writeResponse(_ resp: HostResponse) {
 /// off-screen and observing that a paused Reel leaves it there — with the default
 /// constraining, the window never left the screen and the assertion failed on its
 /// own terms, blaming Reel for a move AppKit had made.
+@MainActor
 final class UnconstrainedWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
@@ -360,6 +362,7 @@ private func logDiagnostic(_ message: String) {
 }
 
 /// Process one input line on the main thread: parse, act, respond, and exit on `quit`.
+@MainActor
 func processLine(_ line: String, host: WindowHost) {
     let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return } // ignore blank lines

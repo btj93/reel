@@ -36,6 +36,7 @@ public struct ColumnInfo {
 
 /// HUD band window for drag-to-reorder. Purely visual — all input is handled by the CGEvent tap
 /// in TitleBarInteraction. This window ignores mouse events.
+@MainActor
 public final class ReorderOverlayWindow: NSWindow {
 
     // MARK: - Layout constants
@@ -468,7 +469,7 @@ public final class ReorderOverlayWindow: NSWindow {
 
     /// Spring animates the ghost to the target origin, scaling back to 1.0,
     /// then calls completion after the spring settles.
-    public func animateGhostSettle(to targetOrigin: CGPoint, completion: @escaping () -> Void) {
+    public func animateGhostSettle(to targetOrigin: CGPoint, completion: @escaping @MainActor @Sendable () -> Void) {
         guard let ghostLayer = ghostView.layer else {
             ghostView.frame.origin = targetOrigin
             completion()
@@ -521,14 +522,16 @@ public final class ReorderOverlayWindow: NSWindow {
     }
 
     /// Fades out the band (150ms ease-in), orders the window out, then calls completion.
-    public func animateFadeOut(completion: @escaping () -> Void) {
+    public func animateFadeOut(completion: @escaping @MainActor @Sendable () -> Void) {
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.15
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            self?.orderOut(nil)
-            completion()
+            MainActor.assumeIsolated {
+                self?.orderOut(nil)
+                completion()
+            }
         })
     }
 

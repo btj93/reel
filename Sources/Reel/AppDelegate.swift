@@ -5,6 +5,7 @@ import Platform
 import ServiceManagement
 import WindowManager
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var permissionTimer: Timer?
@@ -45,16 +46,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func promptForAccessibility() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
 
         // Poll until granted
         permissionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            if AXIsProcessTrusted() {
-                self?.permissionTimer?.invalidate()
-                self?.permissionTimer = nil
-                self?.setupMenuBar()
-                self?.startWindowManager()
+            MainActor.assumeIsolated {
+                if AXIsProcessTrusted() {
+                    self?.permissionTimer?.invalidate()
+                    self?.permissionTimer = nil
+                    self?.setupMenuBar()
+                    self?.startWindowManager()
+                }
             }
         }
 
@@ -258,7 +261,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.setupMenuBar()
+            MainActor.assumeIsolated { self?.setupMenuBar() }
         }
     }
 

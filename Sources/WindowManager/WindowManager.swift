@@ -21,12 +21,12 @@ func logTitle(_ title: String?) -> String {
 /// Central coordinator for Reel.
 /// Connects WindowTracker (discovery) → StripController (layout) → Platform APIs.
 /// All state mutations happen on the main thread via the serial event queue.
-public final class WindowManager: @unchecked Sendable {
+@MainActor
+public final class WindowManager {
     public let tracker: WindowTracker
     public let hotkeyManager: HotkeyManager
     public let displayManager: DisplayManager
 
-    private static let isoFormatter = ISO8601DateFormatter()
 
     /// A canonical identifier for a group of aligned displays. Sorted ascending
     /// so equal member sets produce equal IDs (stable across hot-plug cycles).
@@ -652,8 +652,10 @@ public final class WindowManager: @unchecked Sendable {
         // Start periodic state persistence (every 5 seconds)
         stateWriteTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) {
             [weak self] _ in
-            self?.persistState()
-            self?.snapshotStore?.persistToDisk()
+            MainActor.assumeIsolated {
+                self?.persistState()
+                self?.snapshotStore?.persistToDisk()
+            }
         }
         // Let the OS coalesce these periodic wakes with other timers instead of
         // firing on the exact deadline — cheaper on battery for a backstop timer
@@ -709,7 +711,7 @@ public final class WindowManager: @unchecked Sendable {
         // Periodic window health check — detect closed windows that AX observer missed.
         // kAXUIElementDestroyedNotification is unreliable for some apps.
         healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.checkWindowHealth()
+            MainActor.assumeIsolated { self?.checkWindowHealth() }
         }
         healthCheckTimer?.tolerance = 0.1
 
@@ -1332,13 +1334,15 @@ public final class WindowManager: @unchecked Sendable {
         let t = Timer.scheduledTimer(
             withTimeInterval: Self.stallWatchdogInterval, repeats: true
         ) { [weak self] _ in
-            guard let self else { return }
-            let now = TimeUtil.now()
-            let gapMs = Int(((now - self.stallWatchdogLastFire) * 1000).rounded())
-            self.stallWatchdogLastFire = now
-            if gapMs >= Self.stallWatchdogThresholdMs {
-                print("[WM] main-thread stall \(gapMs)ms")
-                fflush(stdout)
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let now = TimeUtil.now()
+                let gapMs = Int(((now - self.stallWatchdogLastFire) * 1000).rounded())
+                self.stallWatchdogLastFire = now
+                if gapMs >= Self.stallWatchdogThresholdMs {
+                    print("[WM] main-thread stall \(gapMs)ms")
+                    fflush(stdout)
+                }
             }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -2392,7 +2396,7 @@ public final class WindowManager: @unchecked Sendable {
     private func recoverFromCrash() {
         guard FileManager.default.fileExists(atPath: stateFilePath),
             let data = try? Data(contentsOf: URL(fileURLWithPath: stateFilePath)),
-            let state = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+            (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) != nil
         else {
             return
         }

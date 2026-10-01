@@ -10,6 +10,7 @@ import Foundation
 ///
 /// Core never reads `ReelConfig`; these are plain stored properties on `Strip`,
 /// injected the same way `gap` / `snapPoints` / `widthPresets` are.
+@MainActor
 package func applyAnimationConfig(_ config: ReelConfig, to sc: StripController) {
     sc.strip.scrollSpringParams = config.widthSpringParams
     sc.strip.bounceDistance = config.bounceDistance

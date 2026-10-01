@@ -1,17 +1,15 @@
 import AppKit
 import Core
 import CoreGraphics
+import ScreenCaptureKit
 
 // MARK: - ReorderOverlayController
 
 /// Brain of the drag-to-reorder overlay. Manages screenshot capture, cursor tracking,
 /// insertion index computation, the isReady buffer, and animation orchestration.
 ///
-/// Threading model:
-/// - `show()` is called on the main thread; screenshot capture runs on a background queue.
-/// - All other public methods (`updateCursor`, `commitDrop`, `cancel`) are main thread.
-/// - The `isReady` flag + `bufferedCursorPositions` handle the race between background
-///   capture completing and cursor-move events arriving during capture.
+/// Threading model: all methods are main-actor isolated; capture suspends for ScreenCaptureKit.
+@MainActor
 final class ReorderOverlayController {
 
     // MARK: - Public interface
@@ -106,99 +104,56 @@ final class ReorderOverlayController {
         window.thumbnailGap = gap
         self.overlayWindow = window
 
-        // 5. Snapshot every input the background capture needs into immutable locals.
-        //    The capture block MUST NOT read self's stored properties: a re-entrant
-        //    show() on the main thread reassigns columns / draggedIndex /
-        //    nonDraggedColumns / thumbnailStyle, and an unsynchronized Array read racing
-        //    a copy-on-write mutation is undefined behavior (torn buffer pointer, or an
-        //    out-of-range index when the new strip has fewer columns).
-        let capturedDraggedCol = columns[draggedIndex]
-        let capturedNonDragged = self.nonDraggedColumns
+        let capturedColumns = [columns[draggedIndex]] + self.nonDraggedColumns
         let capturedStyle = thumbnailStyle
         let capturedThumbnailHeight = thumbnailHeight
 
-        // Keep a weak reference for the background block. Only the pure, stateless
-        // helpers (captureWindow / scaleImage) are reached through self off the main
-        // thread — never any stored property.
-        weak var weakSelf = self
-        weak var weakWindow = window
-
-        // 6. Capture screenshots on background queue.
-        DispatchQueue.global(qos: .userInitiated).async {
-            guard let self = weakSelf else { return }
-
-            /// Returns an NSImage for one column at the target thumbnail height.
-            func makeThumbnail(for col: ColumnInfo) -> (image: NSImage, width: Double) {
+        Task { @MainActor [weak self, weak window] in
+            guard let self, let window else { return }
+            let screenshots = await withTaskGroup(of: (Int, CGImage?).self) { group in
+                if capturedStyle == "screenshot" {
+                    for (index, column) in capturedColumns.enumerated() {
+                        let windowID = column.windowID
+                        group.addTask { (index, await Self.captureWindow(windowID: windowID)) }
+                    }
+                }
+                var images = Array<CGImage?>(repeating: nil, count: capturedColumns.count)
+                for await (index, image) in group { images[index] = image }
+                return images
+            }
+            let thumbnails = capturedColumns.enumerated().map { index, col in
                 let aspectRatio = col.frameWidth > 0 && col.frameHeight > 0
                     ? col.frameWidth / col.frameHeight
                     : 1.0
-                let scaledWidth = capturedThumbnailHeight * aspectRatio
-
-                if capturedStyle == "screenshot",
-                   let cgImage = self.captureWindow(windowID: col.windowID) {
-                    // Scale immediately and release the raw CGImage.
-                    let nsImage = self.scaleImage(cgImage, toHeight: capturedThumbnailHeight)
-                    return (nsImage, scaledWidth)
-                } else {
-                    // Fall back to app icon.
-                    let icon = col.appIcon
-                    return (icon, scaledWidth)
-                }
+                let image = screenshots[index].map {
+                    Self.scaleImage($0, toHeight: capturedThumbnailHeight)
+                } ?? col.appIcon
+                return (image: image, width: capturedThumbnailHeight * aspectRatio)
             }
 
-            // Capture the dragged column's thumbnail.
-            let draggedResult = makeThumbnail(for: capturedDraggedCol)
+            guard self.generation == myGeneration, self.overlayWindow === window else { return }
+            let draggedResult = thumbnails[0]
+            let nonDraggedResults = Array(thumbnails.dropFirst())
 
-            // Capture non-dragged column thumbnails.
-            let nonDraggedResults = capturedNonDragged.map { col in
-                makeThumbnail(for: col)
-            }
+            window.configureThumbnails(
+                thumbnails: nonDraggedResults,
+                draggedThumbnail: draggedResult.image,
+                draggedWidth: draggedResult.width
+            )
 
-            // 7. Back on main thread: configure and show the overlay.
-            DispatchQueue.main.async {
-                guard let self = weakSelf, let window = weakWindow else { return }
+            window.layoutThumbnails(spreadIndex: nil)
+            let initialGapIndex = self.mapToThumbnailGapIndex(self.draggedIndex)
+            window.showIndicator(atGapIndex: initialGapIndex)
+            window.orderFront(nil)
+            window.animateEntrance()
 
-                // Guard: reject a completion superseded by a newer show(). The generation
-                // check and the window-identity check are belt-and-suspenders — either
-                // alone rejects a stale capture, but together they make the intent
-                // explicit: only the current session installs thumbnails and, crucially,
-                // only it may flip isReady and drain bufferedCursorPositions (which now
-                // belong to the newer session). A stale capture returns here without
-                // touching either.
-                guard self.generation == myGeneration else { return }
-                guard self.overlayWindow === window else { return }
-
-                window.configureThumbnails(
-                    thumbnails: nonDraggedResults,
-                    draggedThumbnail: draggedResult.image,
-                    draggedWidth: draggedResult.width
-                )
-
-                // Lay out thumbnails without a spread gap initially.
-                window.layoutThumbnails(spreadIndex: nil)
-
-                // Position indicator at the initial insertion index (same as dragged position).
-                let initialGapIndex = self.mapToThumbnailGapIndex(self.draggedIndex)
-                window.showIndicator(atGapIndex: initialGapIndex)
-
-                window.orderFront(nil)
-                window.animateEntrance()
-
-                // Mark ready, then replay buffered cursor positions.
-                self.isReady = true
-                let buffered = self.bufferedCursorPositions
-                self.bufferedCursorPositions = []
-                for pos in buffered {
-                    self.processUpdateCursor(position: pos)
-                }
-
-                // The user released while this capture was still running. Now that
-                // thumbnail geometry exists and the buffered cursor samples have been
-                // replayed into insertionIndex, the drop can be resolved correctly.
-                if self.pendingCommit {
-                    self.pendingCommit = false
-                    self.commitDrop()
-                }
+            self.isReady = true
+            let buffered = self.bufferedCursorPositions
+            self.bufferedCursorPositions = []
+            for pos in buffered { self.processUpdateCursor(position: pos) }
+            if self.pendingCommit {
+                self.pendingCommit = false
+                self.commitDrop()
             }
         }
     }
@@ -340,22 +295,23 @@ final class ReorderOverlayController {
 
     // MARK: - Private: captureWindow
 
-    private func captureWindow(windowID: CGWindowID) -> CGImage? {
-        // Capture at nominal (1x) resolution: the result is downscaled to a ~160pt-tall
-        // thumbnail anyway, so Retina .bestResolution just burns capture time and memory
-        // (a 4K window at 2x is a ~130MB transient CGImage) that scaleImage throws away.
-        CGWindowListCreateImage(
-            .null,
-            .optionIncludingWindow,
-            windowID,
-            [.boundsIgnoreFraming, .nominalResolution]
-        )
+    nonisolated private static func captureWindow(windowID: CGWindowID) async -> CGImage? {
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else { return nil }
+            return try await SCScreenshotManager.captureImage(
+                contentFilter: SCContentFilter(desktopIndependentWindow: window),
+                configuration: SCStreamConfiguration()
+            )
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Private: scaleImage
 
     /// Scales a CGImage proportionally to the target height, returning an NSImage.
-    private func scaleImage(_ cgImage: CGImage, toHeight targetHeight: Double) -> NSImage {
+    private static func scaleImage(_ cgImage: CGImage, toHeight targetHeight: Double) -> NSImage {
         let srcWidth = Double(cgImage.width)
         let srcHeight = Double(cgImage.height)
         let aspectRatio = srcHeight > 0 ? srcWidth / srcHeight : 1.0

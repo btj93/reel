@@ -18,6 +18,7 @@ public struct PillItem: Sendable {
     }
 }
 
+@MainActor
 public class OverlayWindow {
     private var panel: NSPanel?
     private var overlayView: OverlayView?

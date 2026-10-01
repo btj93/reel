@@ -3,6 +3,7 @@ import Foundation
 import Core
 import Platform
 
+@MainActor
 func runL1SpaceKeyTests() {
     print()
     print("SpaceKey — Space identity (L1)")

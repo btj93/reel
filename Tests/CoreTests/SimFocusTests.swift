@@ -13,6 +13,7 @@ import WindowManager
 // model and the applied-to-window side are checked.
 // ============================================================
 
+@MainActor
 func runSimFocus() {
     print()
     print("StripController Simulation — focus / mutation (W4a)")
@@ -271,6 +272,7 @@ func runSimFocus() {
 // MARK: - HotkeyManager table tests (parseKeyString + matchBinding)
 // ============================================================
 
+@MainActor
 func runHotkeyTableTests() {
     print()
     print("HotkeyManager — parseKeyString / matchBinding table")

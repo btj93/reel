@@ -2,7 +2,8 @@ import AppKit
 import CoreGraphics
 import Core
 
-public final class TitleBarInteraction: @unchecked Sendable {
+@MainActor
+public final class TitleBarInteraction {
     static let reelSentinel: Int64 = 0x5245454C
 
     enum State {
@@ -382,36 +383,42 @@ public final class TitleBarInteraction: @unchecked Sendable {
 
 // MARK: - C Callbacks
 
+// CGEvent taps run synchronously on the main run loop; the callback verifies that executor.
+private struct EventCallbackInput: @unchecked Sendable {
+    let event: CGEvent
+    let userInfo: UnsafeMutableRawPointer?
+}
+
+// Unmanaged preserves the C callback's pass-through ownership across assumeIsolated.
+private struct EventCallbackOutput: @unchecked Sendable {
+    let event: Unmanaged<CGEvent>?
+}
+
 private func titleBarCallback(
     _ proxy: CGEventTapProxy,
     _ type: CGEventType,
     _ event: CGEvent,
     _ userInfo: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    // Handle tap disabled notification
-    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-        if let userInfo = userInfo {
-            let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
-            if let tap = handler.eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
+    let input = EventCallbackInput(event: event, userInfo: userInfo)
+    return MainActor.assumeIsolated {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let userInfo = input.userInfo {
+                let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
+                if let tap = handler.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             }
+            return EventCallbackOutput(event: .passUnretained(input.event))
         }
-        // Passing through the SAME incoming event: it arrives +0, so hand it
-        // back unretained. passRetained would leak a reference the framework
-        // never balances (#21).
-        return Unmanaged.passUnretained(event)
-    }
-
-    guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
-    let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
-
-    if let result = handler.handleMouseEvent(event, type: type) {
-        // The handler either returns the same incoming event (pass unretained)
-        // or a freshly-created synthetic mouseDown (+1, must be passed retained
-        // so it survives past this call). Distinguish by identity.
-        return result === event ? .passUnretained(event) : .passRetained(result)
-    }
-    return nil
+        guard let userInfo = input.userInfo else {
+            return EventCallbackOutput(event: .passUnretained(input.event))
+        }
+        let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
+        guard let result = handler.handleMouseEvent(input.event, type: type) else {
+            return EventCallbackOutput(event: nil)
+        }
+        let output = result === input.event ? Unmanaged.passUnretained(input.event) : .passRetained(result)
+        return EventCallbackOutput(event: output)
+    }.event
 }
 
 private func escapeCallback(
@@ -420,24 +427,23 @@ private func escapeCallback(
     _ event: CGEvent,
     _ userInfo: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-        if let userInfo = userInfo {
-            let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
-            if let tap = handler.escapeEventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
+    let input = EventCallbackInput(event: event, userInfo: userInfo)
+    return MainActor.assumeIsolated {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let userInfo = input.userInfo {
+                let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
+                if let tap = handler.escapeEventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             }
+            return EventCallbackOutput(event: .passUnretained(input.event))
         }
-        // Same incoming event passed through: unretained (see titleBarCallback).
-        return Unmanaged.passUnretained(event)
-    }
-
-    guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
-    let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
-
-    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-    if keyCode == 0x35 {
-        handler.handleEscapeKey()
-        return nil
-    }
-    return Unmanaged.passUnretained(event)
+        guard let userInfo = input.userInfo else {
+            return EventCallbackOutput(event: .passUnretained(input.event))
+        }
+        let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
+        if input.event.getIntegerValueField(.keyboardEventKeycode) == 0x35 {
+            handler.handleEscapeKey()
+            return EventCallbackOutput(event: nil)
+        }
+        return EventCallbackOutput(event: .passUnretained(input.event))
+    }.event
 }

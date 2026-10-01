@@ -127,11 +127,12 @@ final class Capture: @unchecked Sendable {
 private let stdWorkingArea = CGRect(x: 0, y: 25, width: 1440, height: 875)
 
 /// Monotonic pid source — high values avoid colliding with any real process.
-private var nextFakePid: pid_t = 90000
-private func freshPid() -> pid_t { nextFakePid += 1; return nextFakePid }
+@MainActor private var nextFakePid: pid_t = 90000
+@MainActor private func freshPid() -> pid_t { nextFakePid += 1; return nextFakePid }
 
 /// Build a StripController wired for single-threaded virtual-clock testing:
 /// overlay suppressed, inline frame-dispatch + main-hop, animation toggle as asked.
+@MainActor
 func makeSC(
     animationEnabled: Bool = false,
     workingArea: CGRect = stdWorkingArea,
@@ -147,6 +148,7 @@ func makeSC(
 
 /// Add `count` fake windows (all under one fake app) to `sc`, sized to sit inside
 /// the working area. Returns the windows in insertion order.
+@MainActor
 @discardableResult
 func addFakeWindows(
     _ sc: StripController,
@@ -174,6 +176,7 @@ func addFakeWindows(
 /// Advance the virtual clock frame-by-frame, ticking `sc`, until fully settled or
 /// the hard cap is hit. On non-convergence, fails loudly with a state dump — hangs
 /// become assertions (Determinism rule #4).
+@MainActor
 func settle(_ sc: StripController, _ clock: TestClock, maxSeconds: Double = 5, hz: Double = 60) {
     let step = 1.0 / hz
     var elapsed = 0.0

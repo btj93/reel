@@ -15,6 +15,7 @@ import Platform
 // All test frames below use `y == 0` at the primary height chosen per-case so
 // the CG conversion stays easy to reason about.
 
+@MainActor
 func runL1GroupAreaTests() {
     print()
     print("DisplayManager.groupWorkingArea Tests")

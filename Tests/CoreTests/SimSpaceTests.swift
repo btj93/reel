@@ -12,6 +12,7 @@ import WindowManager
 
 private func fp(_ ids: UInt32...) -> Set<UInt32> { Set(ids) }
 
+@MainActor
 func runSimSpace() {
     print()
     print("StripController Simulation — space / scroll-mode / echo (W4c)")

@@ -117,18 +117,6 @@ public final class GestureCapture: @unchecked Sendable {
         let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
         let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
 
-        #if DEBUG
-        let dbgAxis1 = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
-        let dbgAxis2 = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
-        let dbgIntAxis1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
-        let dbgIntAxis2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
-        let dbgPhase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
-        let hasFn = flags.contains(.maskSecondaryFn)
-        let hasShift = flags.contains(.maskShift)
-        // print("[ScrollEvt] cont=\(isContinuous) mom=\(momentumPhase) phase=\(dbgPhase) fn=\(hasFn) shift=\(hasShift) ptY=\(dbgAxis1) ptX=\(dbgAxis2) intY=\(dbgIntAxis1) intX=\(dbgIntAxis2)")
-        fflush(stdout)
-        #endif
-
         // Momentum tail of a gesture we captured: keep consuming it until the
         // momentum-ended phase, regardless of `isGesturing` (already cleared)
         // or whether the modifier is still held (the user may have released fn

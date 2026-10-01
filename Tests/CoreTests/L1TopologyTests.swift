@@ -13,6 +13,7 @@ import WindowManager
 // px), the empty-input edge, minimal (1px) Y-overlap merge, and multiple
 // multi-member groups with group ordering. Reuses `makeDisplayInfo` from main.swift.
 
+@MainActor
 func runL1TopologyTests() {
     print()
     print("DisplayManager.alignmentGroups — boundary & multi-group Tests")

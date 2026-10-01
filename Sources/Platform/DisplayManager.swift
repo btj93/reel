@@ -74,7 +74,8 @@ public struct Struts: Sendable {
 }
 
 /// Manages display enumeration and hot-plug detection.
-public final class DisplayManager: @unchecked Sendable {
+@MainActor
+public final class DisplayManager {
     /// Current displays, keyed by displayID.
     public private(set) var displays: [CGDirectDisplayID: DisplayInfo] = [:]
 
@@ -84,14 +85,17 @@ public final class DisplayManager: @unchecked Sendable {
     /// Callback when display configuration changes (including Dock show/hide).
     public var onDisplayChange: (([CGDirectDisplayID: DisplayInfo]) -> Void)?
 
-    private var notificationObserver: NSObjectProtocol?
-    private var dockObserver: NSObjectProtocol?
-    private var dockPollTimer: Timer?
+    // Main-actor-owned; unsafe access is limited to synchronous cleanup in deinit.
+    nonisolated(unsafe) private var notificationObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var dockObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var dockPollTimer: Timer?
 
     public init() {}
 
     deinit {
-        stopObserving()
+        if let notificationObserver { NotificationCenter.default.removeObserver(notificationObserver) }
+        if let dockObserver { NotificationCenter.default.removeObserver(dockObserver) }
+        dockPollTimer?.invalidate()
     }
 
     // MARK: - Enumeration
@@ -167,7 +171,7 @@ public final class DisplayManager: @unchecked Sendable {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.handleDisplayChange()
+            MainActor.assumeIsolated { self?.handleDisplayChange() }
         }
 
         // Poll for Dock show/hide changes every 1.5 seconds.
@@ -176,16 +180,18 @@ public final class DisplayManager: @unchecked Sendable {
         var lastVisibleFrame: CGRect = NSScreen.main?.visibleFrame ?? .zero
         var lastMainID: CGDirectDisplayID = CGMainDisplayID()
         dockPollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            let curMainID = CGMainDisplayID()
-            if curMainID != lastMainID {
-                lastMainID = curMainID
-                self?.handleDisplayChange()
-                return
-            }
-            guard let currentFrame = NSScreen.main?.visibleFrame else { return }
-            if currentFrame != lastVisibleFrame {
-                lastVisibleFrame = currentFrame
-                self?.handleDisplayChange()
+            MainActor.assumeIsolated {
+                let curMainID = CGMainDisplayID()
+                if curMainID != lastMainID {
+                    lastMainID = curMainID
+                    self?.handleDisplayChange()
+                    return
+                }
+                guard let currentFrame = NSScreen.main?.visibleFrame else { return }
+                if currentFrame != lastVisibleFrame {
+                    lastVisibleFrame = currentFrame
+                    self?.handleDisplayChange()
+                }
             }
         }
     }
@@ -221,7 +227,7 @@ public final class DisplayManager: @unchecked Sendable {
     // MARK: - Alignment Groups
 
     /// Static tolerance for X-edge adjacency (pixels).
-    public static let alignmentEpsilon: CGFloat = 0.5
+    nonisolated public static let alignmentEpsilon: CGFloat = 0.5
 
     /// Compute alignment groups from a set of displays.
     /// Two displays are in the same group iff:
@@ -231,7 +237,7 @@ public final class DisplayManager: @unchecked Sendable {
     ///
     /// Returns groups sorted by leftmost member's `frame.minX`. Each group's
     /// members are sorted by their own `frame.minX`. Deterministic output.
-    public static func alignmentGroups(
+    nonisolated public static func alignmentGroups(
         from displays: [CGDirectDisplayID: DisplayInfo]
     ) -> [[CGDirectDisplayID]] {
         let ids = displays.keys.sorted()
@@ -266,7 +272,7 @@ public final class DisplayManager: @unchecked Sendable {
     }
 
     /// Pair-wise alignment check: X-adjacency (ε=0.5) AND any Y-overlap.
-    private static func areAligned(_ a: CGRect, _ b: CGRect) -> Bool {
+    nonisolated private static func areAligned(_ a: CGRect, _ b: CGRect) -> Bool {
         let eps = alignmentEpsilon
         let xAdjacent =
             abs(a.maxX - b.minX) <= eps || abs(b.maxX - a.minX) <= eps
@@ -284,7 +290,7 @@ public final class DisplayManager: @unchecked Sendable {
     /// `referenceMidX` is the macOS main display's working-area midpoint when the
     /// main display is a member of `members`, otherwise the leftmost region's
     /// midpoint (`regions.first?.rect.midX`, falling back to 0 when empty).
-    public static func groupWorkingArea(
+    nonisolated public static func groupWorkingArea(
         members: [CGDirectDisplayID],
         displays: [CGDirectDisplayID: DisplayInfo],
         mainDisplayID: CGDirectDisplayID?,
