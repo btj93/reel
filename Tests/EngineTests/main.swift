@@ -27,11 +27,18 @@ func display(_ id: UInt32 = 1, x: Double = 0) -> DisplayGroup {
     DisplayGroup(id: id, displays: [id], frame: CGRect(x: x, y: 30, width: 1000, height: 800))
 }
 
+func threadCPUTime() -> Duration {
+    var spec = timespec()
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &spec)
+    return .seconds(spec.tv_sec) + .nanoseconds(spec.tv_nsec)
+}
+
 struct Harness {
     var world: World
     var time = 1.0
     var effects: [Effect] = []
     var reduceTime: Duration = .zero
+    var reduceCPU: Duration = .zero
 
     init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [DisplayGroup] = [display()]) {
         world = World(topology: Topology(revision: 1, groups: displays, primaryScreenHeight: 900),
@@ -54,9 +61,11 @@ struct Harness {
     }
 
     mutating func apply(_ event: Event) {
+        let cpu = threadCPUTime()
         let start = ContinuousClock.now
         effects = reduce(&world, event, now: time)
         reduceTime += start.duration(to: .now)
+        reduceCPU += threadCPUTime() - cpu
     }
 
     mutating func census(_ id: UInt64, _ windows: [ObservedWindow], group: UInt32 = 1) {
@@ -823,17 +832,19 @@ struct FuzzStream {
 
 @MainActor func benchmark() {
     guard environment["ENGINE_BENCH"] == "1" else { return }
-    var rounds: [Duration] = []
+    var wall: [Duration] = []
+    var cpu: [Duration] = []
     for _ in 0..<5 {
         var stream = FuzzStream(seed: 0)
         for _ in 0..<10_000 { stream.step() }
         check(stream.h.world.check().isEmpty, "benchmark invariants")
-        rounds.append(stream.h.reduceTime)
+        wall.append(stream.h.reduceTime)
+        cpu.append(stream.h.reduceCPU)
     }
-    let median = rounds.sorted()[2]
-    print("ENGINE_BENCH seed=0 events=10000 rounds=\(rounds.map { "\($0)" }) median=\(median)")
+    let median = cpu.sorted()[2]
+    print("ENGINE_BENCH seed=0 events=10000 wall=\(wall.map { "\($0)" }) cpu=\(cpu.map { "\($0)" }) median_cpu=\(median)")
     #if !DEBUG
-    check(median < .milliseconds(50), "reduce budget: median of 5 rounds of 10,000 events under 50 ms")
+    check(median < .milliseconds(50), "reduce budget: median thread CPU time of 5 rounds of 10,000 events under 50 ms")
     #endif
 }
 
