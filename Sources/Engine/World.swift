@@ -43,7 +43,13 @@ public struct GroupState: Sendable {
     }
 }
 
+public struct PointerToken: Hashable, Sendable {
+    public let rawValue: UInt64
+    public init(_ rawValue: UInt64) { self.rawValue = rawValue }
+}
+
 public struct PointerSession: Sendable {
+    public let token: PointerToken
     public let scope: EventScope
     public let tile: TileID
     public let startOffset: Double

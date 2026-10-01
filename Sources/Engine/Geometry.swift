@@ -10,7 +10,7 @@ public struct ScreenPoint: Equatable, Sendable {
     public init(_ point: CGPoint) { self.point = point }
 }
 
-public struct AXRect: Equatable, Sendable {
+public struct AXRect: Equatable, Codable, Sendable {
     public let rect: CGRect
     public init(_ rect: CGRect) { self.rect = rect }
 }

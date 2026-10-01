@@ -18,14 +18,19 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
     public let bundleID: String?
     public let identity: String
     public let floating: Bool
+    public let initialFrame: AXRect?
 
-    public init(id: TileID, appID: Int32, bundleID: String?, identity: String = "", floating: Bool = false) {
+    public init(id: TileID, appID: Int32, bundleID: String?, identity: String = "", floating: Bool = false,
+                initialFrame: AXRect? = nil) {
         self.id = id
         self.appID = appID
         self.bundleID = bundleID
         self.identity = identity
         self.floating = floating
+        self.initialFrame = initialFrame
     }
+
+    var isValid: Bool { id.rawValue != 0 && appID > 0 && (initialFrame?.rect.isFinite ?? true) }
 }
 
 public enum Command: Sendable {
@@ -64,7 +69,7 @@ public struct Event: Sendable {
         case command(Command, FocusSource)
         case ipc(id: UInt64, command: Command)
         case query(id: UInt64)
-        case pointer(PointerInput)
+        case pointer(PointerInput, session: PointerToken? = nil)
         case spaceWillChange
         case spaceChanged(key: SpaceKey, epoch: UInt64, windows: [ObservedWindow])
         case topologyChanged(Topology)

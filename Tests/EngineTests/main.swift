@@ -18,8 +18,9 @@ var failures = 0
     try body()
 }
 
-func window(_ id: UInt32, app: Int32? = nil, bundle: String? = "test.app", floating: Bool = false) -> ObservedWindow {
-    ObservedWindow(id: TileID(id), appID: app ?? Int32(id), bundleID: bundle, identity: "window-\(id)", floating: floating)
+func window(_ id: UInt32, app: Int32? = nil, bundle: String? = "test.app", floating: Bool = false, x: Double? = nil) -> ObservedWindow {
+    ObservedWindow(id: TileID(id), appID: app ?? Int32(id), bundleID: bundle, identity: "window-\(id)", floating: floating,
+                   initialFrame: x.map { AXRect(CGRect(x: $0, y: 30, width: 350, height: 600)) })
 }
 
 func display(_ id: UInt32 = 1, x: Double = 0) -> DisplayGroup {
@@ -38,7 +39,16 @@ struct Harness {
 
     @discardableResult mutating func send(_ kind: Event.Kind, group: UInt32 = 1, scope: EventScope? = nil, advance: Double = 0.01) -> [Effect] {
         time += advance
-        effects = reduce(&world, Event(scope: scope ?? world.scope(for: group)!, kind: kind), now: time)
+        let stamped: Event.Kind
+        switch kind {
+        case .pointer(let input, nil):
+            switch input {
+            case .beginGesture, .openMenu, .beginReorder: stamped = kind
+            default: stamped = .pointer(input, session: world.pointer.session?.token)
+            }
+        default: stamped = kind
+        }
+        effects = reduce(&world, Event(scope: scope ?? world.scope(for: group)!, kind: stamped), now: time)
         return effects
     }
 
@@ -196,6 +206,25 @@ struct Harness {
         check(h.world.groups[1]!.strip.columns[1].width != .fixed(333), "later active tile unchanged")
         check(h.world.pointer.session == nil, "menu consumed")
     }
+    section("eebb564: late menu and reorder callbacks cannot act on a replacement session") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.send(.pointer(.openMenu(TileID(1))))
+        let oldMenu = h.world.pointer.session!.token
+        h.send(.pointer(.openMenu(TileID(2))))
+        let newMenu = h.world.pointer.session!.token
+        h.send(.pointer(.menu(.setWidth(TileID(1), 311)), session: oldMenu))
+        check(h.effects.isEmpty && h.world.pointer.session?.token == newMenu, "old menu callback cannot mutate or cancel new menu")
+        check(h.world.groups[1]!.strip.columns.allSatisfy { $0.width != .fixed(311) }, "stale callback touches neither tile")
+        h.send(.pointer(.menu(.setWidth(TileID(1), 322)), session: newMenu))
+        check(h.world.groups[1]!.strip.columns[1].width == .fixed(322), "current menu still acts on captured target")
+        h.send(.pointer(.beginReorder(TileID(1))))
+        let oldDrag = h.world.pointer.session!.token
+        h.send(.pointer(.beginReorder(TileID(2))))
+        let newDrag = h.world.pointer.session!.token
+        h.send(.pointer(.dropReorder(0), session: oldDrag))
+        check(h.tiles == [TileID(1), TileID(2)] && h.world.pointer.session?.token == newDrag, "late drop cannot commit new drag")
+    }
     section("5753fc0: topology revision invalidates gesture, overlay, queued frames and stale events") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(10, [window(1)])
@@ -324,6 +353,17 @@ struct Harness {
         do { _ = try Snapshot.decode(Snapshot.encode([bad])); check(false, "invalid snapshot accepted") }
         catch { check(true, "invalid snapshot rejected") }
     }
+    section("554b4ed: initial adoption follows visual order, not AX enumeration order") {
+        var h = Harness()
+        h.census(10, [window(3, x: 800), window(1, x: 100), window(2, x: 450)])
+        check(h.tiles == [TileID(1), TileID(2), TileID(3)], "census order comes from observed geometry")
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.windowAdded(window(4)))
+        check(h.tiles == [TileID(1), TileID(4), TileID(2), TileID(3)], "new window inserts after current focus through Core")
+        h.census(20, [window(5)])
+        h.census(10, [window(3, x: 0), window(2, x: 100), window(1, x: 200), window(4, x: 300)])
+        check(h.tiles == [TileID(1), TileID(4), TileID(2), TileID(3)], "saved strip order outranks current AX geometry")
+    }
     section("73ef68d: live identities are exact; disk capture cannot copy a foreign Space") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
@@ -348,6 +388,46 @@ struct Harness {
         check(h.world.groups[1]!.strip.columns[0].width != .fixed(999), "unrelated sole disk snapshot rejected")
         check(h.world.spaces.lookupExact(group: 1, space: .skylight(10))?.windows.contains(where: { $0.id == TileID(999) }) == false,
               "capture writes only this Space's membership")
+    }
+    section("snapshot focus survives missing leading columns and floating focus") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3), window(4, floating: true)])
+        h.send(.command(.focus(TileID(2)), .ipc))
+        h.census(20, [window(5)])
+        h.census(10, [window(2), window(3), window(4, floating: true)])
+        check(h.active == TileID(2), "focus tracks identity when an earlier saved column disappears")
+        h.send(.command(.focus(TileID(4)), .ipc))
+        h.census(20, [window(5)])
+        h.census(10, [window(2), window(3), window(4, floating: true)])
+        check(h.world.groups[1]!.focus.decision?.tile == TileID(4), "floating focus is saved independently of active column")
+        check(h.world.check().isEmpty, "restored focus invariants")
+    }
+    section("fc92b12: observation revokes frames before commit; same-Space cancellation resumes layout") {
+        var h = Harness()
+        h.census(10, [window(1)])
+        let old = h.world.frames[TileID(1)]!
+        h.send(.spaceWillChange)
+        check(h.world.frames.isEmpty, "observation revokes ownership without waiting for census")
+        h.send(.frameCompleted(tile: old.tile, revision: old.revision, result: .applied))
+        check(h.world.appliedFrames.isEmpty, "already-dequeued stale completion cannot change state")
+        h.census(10, [])
+        check(h.world.frames[TileID(1)]!.revision > old.revision, "same identity resumes with new write revision despite empty census")
+    }
+    section("logical width survives presets, full width and animation settle") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1)])
+        h.send(.command(.setWidth(TileID(1), 377), .ipc))
+        h.send(.tick, advance: 3)
+        check(h.world.groups[1]!.strip.columns[0].width == .fixed(377), "settle never writes animated width back to logical intent")
+        h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
+        check(h.world.groups[1]!.strip.columns[0].width == .fixed(377), "full width preserves prior logical intent")
+        check(h.world.groups[1]!.strip.columnData[0].cachedWidth == 1000, "full width derives screen-wide target")
+        h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
+        check(h.world.groups[1]!.strip.columnData[0].cachedWidth == 377, "leaving full width restores logical target")
+        h.send(.command(.cycleWidthPreset, .ipc))
+        check(h.world.groups[1]!.strip.columns[0].presetIndex != nil, "preset cycling uses Core width model")
+        h.send(.tick, advance: 3)
+        check(h.world.check().isEmpty, "width invariants")
     }
     section("IPC replies and focus effects remain data") {
         var h = Harness()

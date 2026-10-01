@@ -14,8 +14,8 @@ public struct FrameRequest: Equatable, Sendable {
 
 public enum Overlay: Sendable {
     case hidden
-    case menu(tile: TileID, scope: EventScope)
-    case reorder(tile: TileID, scope: EventScope)
+    case menu(tile: TileID, scope: EventScope, session: PointerToken)
+    case reorder(tile: TileID, scope: EventScope, session: PointerToken)
 }
 
 public enum ReplyPayload: Sendable {

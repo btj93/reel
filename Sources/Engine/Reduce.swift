@@ -96,12 +96,12 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     }
 
     func add(_ window: ObservedWindow, to id: UInt32) {
-        guard window.id.rawValue != 0, var group = world.groups[id], group.space != nil, !group.changingSpace,
+        guard window.isValid, var group = world.groups[id], group.space != nil, !group.changingSpace,
               !world.groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
         cancelFocusTimers(id)
         group.windows[window.id] = window
         if shouldFloat(window, config: world.config) { group.floating.insert(window.id) }
-        else { group.strip.insertColumn(Column(tiles: [window.id], width: .proportion(world.config.defaultWidth)), at: now, atIndex: group.strip.columns.count) }
+        else { group.strip.insertColumn(Column(tiles: [window.id], width: .proportion(world.config.defaultWidth)), at: now) }
         world.groups[id] = group
         layoutGroups.insert(id)
     }
@@ -190,7 +190,12 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
         persist()
     }
 
-    func pointer(_ input: PointerInput, group id: UInt32) {
+    func pointer(_ input: PointerInput, token: PointerToken?, group id: UInt32) {
+        switch input {
+        case .beginGesture, .openMenu, .beginReorder: break
+        default:
+            guard let session = world.pointer.session, session.token == token, session.scope == event.scope else { return }
+        }
         switch input {
         case .beginGesture(let tile), .openMenu(let tile), .beginReorder(let tile):
             cancelPointer()
@@ -202,7 +207,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
             let targets = settled.columns.indices.map {
                 settled.columnX(at: $0, time: now) - activeX + settled.snapTarget(forColumn: $0, at: now)
             }
-            let session = PointerSession(scope: scope, tile: tile, startOffset: group.strip.viewOffset.current(at: now),
+            let session = PointerSession(token: PointerToken(nextRevision()), scope: scope, tile: tile, startOffset: group.strip.viewOffset.current(at: now),
                                          snapWidth: group.strip.columnData[index].cachedWidth, snapTargets: targets)
             switch input {
             case .beginGesture:
@@ -210,10 +215,10 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
                 world.pointer = .gesture(session)
             case .openMenu:
                 world.pointer = .menu(session)
-                effects.append(.overlay(.menu(tile: tile, scope: scope)))
+                effects.append(.overlay(.menu(tile: tile, scope: scope, session: session.token)))
             default:
                 world.pointer = .reorder(session)
-                effects.append(.overlay(.reorder(tile: tile, scope: scope)))
+                effects.append(.overlay(.reorder(tile: tile, scope: scope, session: session.token)))
             }
             world.groups[id] = group
         case .delta(let delta):
@@ -334,7 +339,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
                 world.groups[groupID].flatMap { snapshot($0, id: groupID, time: now) }
             }
             effects.append(.reply(id: requestID, payload: .snapshots(snapshots)))
-        case .pointer(let input): pointer(input, group: id)
+        case .pointer(let input, let token): pointer(input, token: token, group: id)
         case .spaceWillChange:
             if world.pointer.session?.scope.group == id { cancelPointer() }
             cancelTimers(id)
@@ -351,7 +356,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
             }
             let otherTiles = Set(world.groups.filter { $0.key != id }.values.flatMap { $0.windows.keys })
             guard epoch > group.epoch, Set(windows.map(\.id)).count == windows.count,
-                  windows.allSatisfy({ $0.id.rawValue != 0 && !otherTiles.contains($0.id) }),
+                  windows.allSatisfy({ $0.isValid && !otherTiles.contains($0.id) }),
                   !(windows.isEmpty && !group.windows.isEmpty) else {
                 effects.append(.log("space census deferred")); break
             }
@@ -491,7 +496,13 @@ private func restoredGroup(display: DisplayGroup, config: EngineConfig, key: Spa
         }
         for window in saved.floating { if let match = match(window) { group.floating.insert(match.id) } }
     }
-    for window in windows where unused.contains(window.id) {
+    let ordered = windows.sorted {
+        let lhsX = $0.initialFrame?.rect.minX ?? 0
+        let rhsX = $1.initialFrame?.rect.minX ?? 0
+        if lhsX != rhsX { return lhsX < rhsX }
+        return $0.id.rawValue < $1.id.rawValue
+    }
+    for window in ordered where unused.contains(window.id) {
         if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertColumn(Column(tiles: [window.id], width: .proportion(config.defaultWidth)), at: time, atIndex: group.strip.columns.count) }
     }

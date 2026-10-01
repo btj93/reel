@@ -85,6 +85,7 @@ public struct Snapshot: Codable, Sendable {
 
     var isValid: Bool {
         offset.isFinite && Set(windows.map(\.id)).count == windows.count
+            && windows.allSatisfy(\.isValid)
             && (focusedTile.map { tile in windows.contains { $0.id == tile } } ?? true)
             && (columns.isEmpty ? activeColumnIndex == 0 : columns.indices.contains(activeColumnIndex))
             && columns.allSatisfy {
