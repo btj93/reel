@@ -143,7 +143,7 @@ struct Harness {
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         check(h.active == TileID(4), "arrival activation carrying destination identity cannot impersonate dock crossing")
     }
-    section("focus source policy: app activation uses incremental snap, keyboard recenters") {
+    section("c34080d: app activation uses incremental snap, keyboard recenters") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
         h.send(.command(.focus(TileID(1)), .ipc))
@@ -303,7 +303,7 @@ struct Harness {
         h.send(.pointer(.dropReorder(Int.max)))
         check(h.tiles == [TileID(2), TileID(3), TileID(1)], "past-end drop moves to end")
     }
-    section("typed timeouts: hung app does not block a healthy app; cancelled retries cannot fire") {
+    section("524cd8a 283afe2: hung app does not block a healthy app; cancelled retries cannot fire") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
         let hung = h.world.frames[TileID(1)]!
@@ -392,7 +392,7 @@ struct Harness {
         check(h.world.spaces.lookupExact(group: 1, space: .skylight(10))?.windows.contains(where: { $0.id == TileID(999) }) == false,
               "capture writes only this Space's membership")
     }
-    section("snapshot focus survives missing leading columns and floating focus") {
+    section("c9d3e80 554b4ed: snapshot focus survives missing leading columns and floating focus") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3), window(4, floating: true)])
         h.send(.command(.focus(TileID(2)), .ipc))
@@ -416,7 +416,7 @@ struct Harness {
         h.census(10, [])
         check(h.world.frames[TileID(1)]!.revision > old.revision, "same identity resumes with new write revision despite empty census")
     }
-    section("logical width survives presets, full width and animation settle") {
+    section("283afe2: logical width survives presets, full width and animation settle") {
         var h = Harness(animate: true)
         h.census(10, [window(1)])
         h.send(.command(.setWidth(TileID(1), 377), .ipc))
@@ -444,7 +444,7 @@ struct Harness {
             return false
         }, "query reply contains current immutable snapshot")
     }
-    section("independent display epochs and invalid input") {
+    section("5753fc0: independent display epochs and invalid input") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(10, [window(1)])
         h.census(20, [window(2)], group: 2)
