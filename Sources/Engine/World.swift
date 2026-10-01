@@ -146,8 +146,8 @@ public struct World: Sendable {
             if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
             if group.space == nil, !group.windows.isEmpty { errors.append("windows without a Space") }
         }
-        if let session = pointer.scope,
-           scope(for: session.group) != session || pointer.tile.map({ groups[session.group]?.windows[$0] == nil }) == true {
+        if let owner = pointer.scope,
+           scope(for: owner.group) != owner || pointer.tile.map({ groups[owner.group]?.windows[$0] == nil }) == true {
             errors.append("stale pointer")
         }
         for frame in frames.values {
