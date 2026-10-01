@@ -1,27 +1,27 @@
 import Core
 
 public enum FocusSource: String, Codable, Sendable {
-    case keybinding, ipc, axNotification, appActivation, spaceRestore, pointer, adoption
+    case keyboard, ipc, axFocus, appActivation, click, restore, adoption
 
-    public var protectsFocus: Bool { self != .axNotification }
+    public var protectsFocus: Bool { self != .axFocus }
 
     public var centers: Bool {
         switch self {
-        case .keybinding, .ipc, .spaceRestore, .adoption: true
-        case .axNotification, .appActivation, .pointer: false
+        case .keyboard, .ipc, .restore, .adoption: true
+        case .axFocus, .appActivation, .click: false
         }
     }
 }
 
 public struct FocusIntent: Sendable {
     public let tile: TileID?
-    public let appID: Int32?
+    public let pid: Int32?
     public let source: FocusSource
     public let observedSpace: SpaceKey?
 
-    public init(tile: TileID?, appID: Int32? = nil, source: FocusSource, observedSpace: SpaceKey? = nil) {
+    public init(tile: TileID?, pid: Int32? = nil, source: FocusSource, observedSpace: SpaceKey? = nil) {
         self.tile = tile
-        self.appID = appID
+        self.pid = pid
         self.source = source
         self.observedSpace = observedSpace
     }

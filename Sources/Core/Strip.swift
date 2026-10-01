@@ -761,7 +761,21 @@ public struct Strip: Sendable {
         columns[i].width = widthPresets[nextPresetIndex]
         columns[i].presetIndex = nextPresetIndex
         columns[i].isFullWidth = false
+        animateWidth(column: i, to: newWidth, at: time, params: params)
+    }
 
+    /// Set a column's logical width, resolved against the display region the
+    /// column sits on. Clears preset and full-width state.
+    public mutating func setWidth(_ width: ColumnWidth, column i: Int, at time: Double, params: SpringParams?) {
+        guard columns.indices.contains(i) else { return }
+        let region = regionForColumn(i, at: time)
+        columns[i].width = width
+        columns[i].presetIndex = nil
+        columns[i].isFullWidth = false
+        animateWidth(column: i, to: width.resolve(workingAreaWidth: Double(region.rect.width), gap: gap), at: time, params: params)
+    }
+
+    private mutating func animateWidth(column i: Int, to newWidth: Double, at time: Double, params: SpringParams?) {
         if let params = params {
             let oldWidth = columnData[i].currentWidth(at: time)
             if let existing = columnData[i].widthAnimation, !existing.isDone(at: time) {

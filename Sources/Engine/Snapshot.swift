@@ -1,25 +1,7 @@
 import Core
 import Foundation
 
-public enum SnapshotWidth: Codable, Equatable, Sendable {
-    case proportion(Double), fixed(Double), auto
-
-    public init(_ width: ColumnWidth) {
-        switch width {
-        case .proportion(let value): self = .proportion(value)
-        case .fixed(let value): self = .fixed(value)
-        case .auto: self = .auto
-        }
-    }
-
-    public var width: ColumnWidth {
-        switch self {
-        case .proportion(let value): .proportion(value)
-        case .fixed(let value): .fixed(value)
-        case .auto: .auto
-        }
-    }
-
+extension ColumnWidth {
     var isValid: Bool {
         switch self {
         case .auto: true
@@ -30,13 +12,13 @@ public enum SnapshotWidth: Codable, Equatable, Sendable {
 
 public struct SnapshotColumn: Codable, Sendable {
     public let windows: [ObservedWindow]
-    public let width: SnapshotWidth
+    public let width: ColumnWidth
     public let activeTileIndex: Int
     public let snapIndex: Int
     public let presetIndex: Int?
     public let isFullWidth: Bool
 
-    public init(windows: [ObservedWindow], width: SnapshotWidth, activeTileIndex: Int = 0,
+    public init(windows: [ObservedWindow], width: ColumnWidth, activeTileIndex: Int = 0,
                 snapIndex: Int = 0, presetIndex: Int? = nil, isFullWidth: Bool = false) {
         self.windows = windows
         self.width = width
@@ -78,9 +60,7 @@ public struct Snapshot: Codable, Sendable {
     }
 
     public static func decode(_ data: Data) throws -> [Snapshot] {
-        let snapshots = try JSONDecoder().decode([Snapshot].self, from: data)
-        guard snapshots.allSatisfy(\.isValid) else { throw SnapshotError.invalidState }
-        return snapshots
+        try JSONDecoder().decode([Snapshot].self, from: data).filter(\.isValid)
     }
 
     var isValid: Bool {
@@ -90,7 +70,7 @@ public struct Snapshot: Codable, Sendable {
             && (columns.isEmpty ? activeColumnIndex == 0 : columns.indices.contains(activeColumnIndex))
             && columns.allSatisfy {
                 !$0.windows.isEmpty && $0.width.isValid
-                    && $0.windows.indices.contains($0.activeTileIndex) && $0.snapIndex >= 0
+                    && $0.windows.indices.contains($0.activeTileIndex) && $0.snapIndex >= 0 && ($0.presetIndex ?? 0) >= 0
             }
     }
 }
@@ -113,17 +93,15 @@ private enum SnapshotSpace: Codable, Sendable {
     }
 }
 
-public enum SnapshotError: Error { case invalidState }
-
 func snapshot(_ group: GroupState, id: UInt32, time: Double) -> Snapshot? {
     guard let space = group.space else { return nil }
     return Snapshot(group: id, space: space,
         columns: group.strip.columns.enumerated().map { index, column in
             SnapshotColumn(windows: column.tiles.compactMap { group.windows[$0] },
-                width: SnapshotWidth(column.width), activeTileIndex: column.activeTileIndex,
+                width: column.width, activeTileIndex: column.activeTileIndex,
                 snapIndex: group.strip.snapIndices[index], presetIndex: column.presetIndex,
                 isFullWidth: column.isFullWidth)
-        }, floating: group.floating.sorted(by: { $0.rawValue < $1.rawValue }).compactMap { group.windows[$0] },
+        }, floating: group.floating.ordered().compactMap { group.windows[$0] },
         activeColumnIndex: group.strip.activeColumnIndex, offset: group.strip.viewOffset.current(at: time),
         focusedTile: group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile)
 }

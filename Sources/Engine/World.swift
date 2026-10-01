@@ -12,6 +12,13 @@ public struct Rule: Equatable, Sendable {
 }
 
 public struct EngineConfig: Sendable {
+    public static let focusDebounce = 0.15
+    public static let crossingTTL = 0.5
+    public static let frameRetryDelay = 0.1
+    public static let censusSettle = 0.5
+    public static let gestureQuiet = 0.3
+    public static let flickVelocity = 50.0
+
     public let gap: Double
     public let defaultWidth: Double
     public let animate: Bool
@@ -28,47 +35,50 @@ public struct EngineConfig: Sendable {
     }
 }
 
+public struct DeferredCensus: Equatable, Sendable {
+    public let key: SpaceKey
+    public let since: Double
+}
+
+public enum SpacePhase: Equatable, Sendable {
+    case unknown
+    case settled(SpaceKey)
+    case changing(from: SpaceKey, deferred: DeferredCensus?)
+
+    public var key: SpaceKey? {
+        switch self {
+        case .unknown: nil
+        case .settled(let key), .changing(let key, _): key
+        }
+    }
+
+    public var isChanging: Bool {
+        if case .changing = self { return true }
+        return false
+    }
+
+    var deferred: DeferredCensus? {
+        if case .changing(_, let deferred) = self { return deferred }
+        return nil
+    }
+}
+
 public struct GroupState: Sendable {
     public internal(set) var strip: Strip
     public internal(set) var windows: [TileID: ObservedWindow] = [:]
     public internal(set) var floating: Set<TileID> = []
-    public internal(set) var space: SpaceKey?
+    public internal(set) var phase: SpacePhase = .unknown
     public internal(set) var epoch: UInt64 = 0
     public internal(set) var focus: FocusState = .none
-    public internal(set) var changingSpace = false
+    public var space: SpaceKey? { phase.key }
 
     init(display: DisplayGroup, config: EngineConfig) {
-        strip = Strip(gap: config.gap, workingArea: CGRect(origin: .zero, size: display.frame.size),
-                      defaultWidth: .proportion(config.defaultWidth))
+        strip = Strip(gap: config.gap, groupArea: Self.area(for: display), defaultWidth: .proportion(config.defaultWidth))
     }
-}
 
-public struct PointerToken: Hashable, Sendable {
-    public let rawValue: UInt64
-    public init(_ rawValue: UInt64) { self.rawValue = rawValue }
-}
-
-public struct PointerSession: Sendable {
-    public let token: PointerToken
-    public let scope: EventScope
-    public let tile: TileID
-    public let startOffset: Double
-    public let snapWidth: Double
-    public let snapTargets: [Double]
-    public internal(set) var delta: Double = 0
-}
-
-public enum PointerState: Sendable {
-    case idle
-    case gesture(PointerSession)
-    case menu(PointerSession)
-    case reorder(PointerSession)
-
-    public var session: PointerSession? {
-        switch self {
-        case .idle: nil
-        case .gesture(let session), .menu(let session), .reorder(let session): session
-        }
+    static func area(for display: DisplayGroup) -> GroupWorkingArea {
+        let rect = CGRect(origin: .zero, size: display.frame.size)
+        return GroupWorkingArea(regions: [DisplayRegion(displayID: 0, rect: rect)], referenceMidX: rect.midX)
     }
 }
 
@@ -91,12 +101,12 @@ public struct World: Sendable {
     public internal(set) var frames: [TileID: FrameRequest] = [:]
     public internal(set) var appliedFrames: [TileID: FrameRequest] = [:]
     public internal(set) var timers: [TimerToken: ScheduledWork] = [:]
-    public let config: EngineConfig
+    public internal(set) var config: EngineConfig
     public internal(set) var time: Double = 0
     var serial: UInt64 = 0
 
     public init(topology: Topology = Topology(revision: 0, groups: [], primaryScreenHeight: 0), config: EngineConfig = EngineConfig()) {
-        precondition(topology.isValid)
+        let topology = topology.isValid ? topology : Topology(revision: topology.revision, groups: [], primaryScreenHeight: 0)
         self.topology = topology
         self.config = config
         groups = Dictionary(uniqueKeysWithValues: topology.groups.map { ($0.id, GroupState(display: $0, config: config)) })
@@ -134,9 +144,10 @@ public struct World: Sendable {
             if strip.columnData.contains(where: { !$0.cachedWidth.isFinite || $0.cachedWidth <= 0 }) { errors.append("invalid width") }
             if strip.snapIndices.contains(where: { !strip.snapPoints.indices.contains($0) }) { errors.append("invalid snap index") }
             if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
+            if group.space == nil, !group.windows.isEmpty { errors.append("windows without a Space") }
         }
-        if let session = pointer.session,
-           scope(for: session.scope.group) != session.scope || groups[session.scope.group]?.windows[session.tile] == nil {
+        if let session = pointer.scope,
+           scope(for: session.group) != session || pointer.tile.map({ groups[session.group]?.windows[$0] == nil }) == true {
             errors.append("stale pointer")
         }
         for frame in frames.values {

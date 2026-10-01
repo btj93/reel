@@ -19,7 +19,7 @@ var failures = 0
 }
 
 func window(_ id: UInt32, app: Int32? = nil, bundle: String? = "test.app", floating: Bool = false, x: Double? = nil) -> ObservedWindow {
-    ObservedWindow(id: TileID(id), appID: app ?? Int32(id), bundleID: bundle, identity: "window-\(id)", floating: floating,
+    ObservedWindow(id: TileID(id), pid: app ?? Int32(id), bundleID: bundle, title: "window-\(id)", floating: floating,
                    initialFrame: x.map { AXRect(CGRect(x: $0, y: 30, width: 350, height: 600)) })
 }
 
@@ -44,7 +44,7 @@ struct Harness {
         case .pointer(let input, nil):
             switch input {
             case .beginGesture, .openMenu, .beginReorder: stamped = kind
-            default: stamped = .pointer(input, session: world.pointer.session?.token)
+            default: stamped = .pointer(input, session: world.pointer.token)
             }
         default: stamped = kind
         }
@@ -69,6 +69,7 @@ struct Harness {
     }
 
     var active: TileID? { world.groups[1]?.strip.activeColumn?.activeTile }
+    var gesture: GestureSession? { if case .gesture(let session) = world.pointer { session } else { nil } }
     var tiles: [TileID] { world.groups[1]!.strip.columns.flatMap(\.tiles) }
     var offset: Double { world.groups[1]!.strip.viewOffset.current(at: time) }
 
@@ -96,23 +97,23 @@ struct Harness {
     section("c9d3e80 1aa4ede: Space-switch focus echoes cannot overwrite departing focus") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
-        h.send(.command(.focus(TileID(3)), .keybinding))
+        h.send(.command(.focus(TileID(3)), .keyboard))
         h.advance(0.2)
-        h.send(.focus(FocusIntent(tile: TileID(1), source: .axNotification)))
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         let deferred = h.world.timers.keys.first!
         let old = h.world.scope(for: 1)!
         h.send(.spaceWillChange)
         check(h.world.timers.isEmpty, "space observation cancels deferred focus")
         h.census(20, [window(4)])
         h.send(.timer(deferred), scope: old)
-        let staleEffects = h.send(.focus(FocusIntent(tile: TileID(1), source: .axNotification)), scope: old)
+        let staleEffects = h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)), scope: old)
         check(staleEffects.isEmpty, "old-epoch focus produces no effects")
         h.census(10, [window(1), window(2), window(3)])
         check(h.active == TileID(3), "echo did not change saved active column")
-        h.send(.focus(FocusIntent(tile: TileID(1), source: .axNotification)))
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         h.advance(0.3)
         check(h.active == TileID(3), "post-restore echo rejected on receipt, not after debounce")
-        h.send(.focus(FocusIntent(tile: TileID(1), source: .axNotification, observedSpace: .skylight(20))))
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus, observedSpace: .skylight(20))))
         h.advance(0.3)
         check(h.active == TileID(3), "AX focus from a different observed identity cannot beat delayed Space notification")
         check(h.world.check().isEmpty, "focus echo invariants")
@@ -122,24 +123,24 @@ struct Harness {
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         h.send(.command(.focus(TileID(4)), .ipc))
         h.census(10, [window(1, app: 10), window(2, app: 20)])
-        h.send(.focus(FocusIntent(tile: TileID(3), appID: 30, source: .appActivation)))
+        h.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation)))
         h.send(.spaceWillChange)
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         check(h.active == TileID(3), "dock crossing chooses activated app")
         check(h.world.groups[1]!.focus.decision?.source == .appActivation, "dock source retained")
         h.send(.command(.focus(TileID(4)), .ipc))
         h.census(10, [window(1, app: 10), window(2, app: 20)])
-        h.send(.focus(FocusIntent(tile: TileID(1), appID: 10, source: .appActivation)))
+        h.send(.focus(FocusIntent(tile: TileID(1), pid: 10, source: .appActivation)))
         h.census(20, [window(3, app: 10), window(4, app: 40)])
         check(h.active == TileID(4), "local activation cannot override saved focus")
         h.send(.command(.focus(TileID(4)), .ipc))
         h.census(10, [window(1, app: 10), window(2, app: 20)])
-        h.send(.focus(FocusIntent(tile: TileID(3), appID: 30, source: .appActivation)))
+        h.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation)))
         h.advance(0.6)
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         check(h.active == TileID(4), "expired crossing does not override saved focus")
         h.census(10, [window(1, app: 10), window(2, app: 20)])
-        h.send(.focus(FocusIntent(tile: TileID(3), appID: 30, source: .appActivation, observedSpace: .skylight(20))))
+        h.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation, observedSpace: .skylight(20))))
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         check(h.active == TileID(4), "arrival activation carrying destination identity cannot impersonate dock crossing")
     }
@@ -151,10 +152,10 @@ struct Harness {
         h.send(.pointer(.delta(50)))
         h.send(.pointer(.cancel))
         let prior = h.offset
-        h.send(.focus(FocusIntent(tile: TileID(1), appID: 1, source: .appActivation)))
+        h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .appActivation)))
         h.advance(0.2)
         check(h.offset == prior, "visible external target retains viewport")
-        h.send(.command(.focus(TileID(1)), .keybinding))
+        h.send(.command(.focus(TileID(1)), .keyboard))
         check(h.offset != prior, "keyboard target recenters")
     }
     section("fc92b12: removed and floating windows revoke queued AX writes") {
@@ -186,10 +187,10 @@ struct Harness {
         h.send(.pointer(.beginGesture(TileID(1))))
         h.send(.pointer(.delta(90)))
         h.send(.pointer(.beginGesture(TileID(999))))
-        check(h.world.pointer.session == nil, "rejected gesture resets idle")
+        check(h.world.pointer.token == nil, "rejected gesture resets idle")
         if case .gesture = h.world.groups[1]!.strip.viewOffset { check(false, "reject left gesture latch") }
         h.advance(0.2)
-        h.send(.focus(FocusIntent(tile: TileID(1), source: .axNotification)))
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         let timer = h.world.timers.keys.first!
         h.send(.windowAdded(window(3)))
         check(h.world.timers.isEmpty, "adoption cancels deferred old focus")
@@ -197,7 +198,7 @@ struct Harness {
         check(h.active == TileID(3), "late pre-adoption focus cannot win")
         h.send(.pointer(.beginGesture(TileID(3))))
         h.send(.spaceWillChange)
-        check(h.world.pointer.session == nil, "observed Space change cancels immediately")
+        check(h.world.pointer.token == nil, "observed Space change cancels immediately")
     }
     section("eebb564: menu commands retain open-time target after active column changes") {
         var h = Harness()
@@ -207,26 +208,26 @@ struct Harness {
         h.send(.pointer(.menu(.setWidth(TileID(2), 333))))
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(333), "menu acts on captured tile")
         check(h.world.groups[1]!.strip.columns[1].width != .fixed(333), "later active tile unchanged")
-        check(h.world.pointer.session == nil, "menu consumed")
+        check(h.world.pointer.token == nil, "menu consumed")
     }
     section("eebb564: late menu and reorder callbacks cannot act on a replacement session") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
         h.send(.pointer(.openMenu(TileID(1))))
-        let oldMenu = h.world.pointer.session!.token
+        let oldMenu = h.world.pointer.token!
         h.send(.pointer(.openMenu(TileID(2))))
-        let newMenu = h.world.pointer.session!.token
+        let newMenu = h.world.pointer.token!
         h.send(.pointer(.menu(.setWidth(TileID(1), 311)), session: oldMenu))
-        check(h.effects.isEmpty && h.world.pointer.session?.token == newMenu, "old menu callback cannot mutate or cancel new menu")
+        check(h.effects.isEmpty && h.world.pointer.token == newMenu, "old menu callback cannot mutate or cancel new menu")
         check(h.world.groups[1]!.strip.columns.allSatisfy { $0.width != .fixed(311) }, "stale callback touches neither tile")
         h.send(.pointer(.menu(.setWidth(TileID(1), 322)), session: newMenu))
         check(h.world.groups[1]!.strip.columns[1].width == .fixed(322), "current menu still acts on captured target")
         h.send(.pointer(.beginReorder(TileID(1))))
-        let oldDrag = h.world.pointer.session!.token
+        let oldDrag = h.world.pointer.token!
         h.send(.pointer(.beginReorder(TileID(2))))
-        let newDrag = h.world.pointer.session!.token
+        let newDrag = h.world.pointer.token!
         h.send(.pointer(.dropReorder(0), session: oldDrag))
-        check(h.tiles == [TileID(1), TileID(2)] && h.world.pointer.session?.token == newDrag, "late drop cannot commit new drag")
+        check(h.tiles == [TileID(1), TileID(2)] && h.world.pointer.token == newDrag, "late drop cannot commit new drag")
     }
     section("5753fc0: topology revision invalidates gesture, overlay, queued frames and stale events") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
@@ -236,7 +237,7 @@ struct Harness {
         let old = h.world.scope(for: 1)!
         let oldFrame = h.world.frames[TileID(1)]!
         h.send(.topologyChanged(Topology(revision: 2, groups: [display()], primaryScreenHeight: 900)))
-        check(h.world.pointer.session == nil, "topology cancels overlay")
+        check(h.world.pointer.token == nil, "topology cancels overlay")
         check(Set(h.tiles) == Set([TileID(1), TileID(2)]), "hot-unplug migrates windows")
         let staleEffects = h.send(.windowRemoved(TileID(1)), scope: old)
         check(staleEffects.isEmpty, "old-topology event produces no effects")
@@ -250,15 +251,15 @@ struct Harness {
         h.census(10, [window(1), window(2)])
         h.send(.command(.setWidth(TileID(1), 650), .ipc))
         h.send(.pointer(.beginGesture(TileID(1))))
-        let basis = h.world.pointer.session!.snapWidth
-        let start = h.world.pointer.session!.startOffset
-        let targets = h.world.pointer.session!.snapTargets
+        let targets = h.gesture!.snapTargets
         h.send(.command(.setWidth(TileID(1), 350), .ipc))
-        check(h.world.pointer.session?.snapWidth == basis, "gesture keeps original snap basis")
         h.send(.pointer(.delta(400)))
+        let strip = h.world.groups[1]!.strip
+        let shift = strip.columnX(at: 0, time: h.time + 0.01) - strip.columnX(at: 1, time: h.time + 0.01)
         h.send(.pointer(.endGesture))
+        check(h.world.groups[1]!.strip.activeColumnIndex == 1, "release lands on the next column")
         if case .animation(let release) = h.world.groups[1]!.strip.viewOffset {
-            check(release.to == targets.min(by: { abs($0 - start - 400) < abs($1 - start - 400) }), "release targets captured column boundary, not a new-width grid")
+            check(abs(release.to - shift - targets[1]) < 0.001, "release targets the captured column boundary, not a new-width grid")
         } else { check(false, "gesture release starts spring") }
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(350), "logical width is latest target")
         h.send(.tick, advance: 5)
@@ -270,15 +271,16 @@ struct Harness {
         h.census(10, [window(1), window(2)])
         h.send(.command(.focus(TileID(2)), .ipc))
         h.send(.pointer(.beginGesture(TileID(2))))
-        let start = h.world.pointer.session!.startOffset
-        h.send(.pointer(.delta(90)))
-        h.send(.pointer(.delta(30)))
+        let start = h.gesture!.startOffset
+        h.send(.pointer(.delta(-90)))
+        h.send(.pointer(.delta(-30)))
         guard case .gesture(let gesture) = h.world.groups[1]!.strip.viewOffset else { check(false, "gesture state"); return }
         let expected = start + gesture.tracker.projectedEndPosition(isTouchpad: true)
         check(start != 0, "nonzero starting offset exercises the coordinate bug")
+        check(h.world.groups[1]!.strip.viewOffsetBounds(at: h.time).contains(expected), "projection lands inside the strip")
         h.send(.pointer(.endGesture))
         check(abs(h.offset - expected) < 0.001, "free release uses start offset plus tracker projection")
-        check(h.world.pointer.session == nil, "release clears latch without a tick")
+        check(h.world.pointer.token == nil, "release clears latch without a tick")
         h.send(.pointer(.beginGesture(TileID(2))))
         h.send(.pointer(.delta(17)), advance: 0.1)
         let dropped = h.offset
@@ -345,16 +347,16 @@ struct Harness {
               && stackedRoundTrip.offset == -120, "codec retains width intent independently of full width")
         var fresh = Harness()
         fresh.send(.loadSnapshots(decoded))
-        fresh.census(99, [ObservedWindow(id: TileID(11), appID: 1, bundleID: "", identity: "window-1"),
-                          ObservedWindow(id: TileID(12), appID: 2, bundleID: "test.app", identity: "window-2"),
-                          ObservedWindow(id: TileID(13), appID: 3, bundleID: "test.app", identity: "window-3")])
+        fresh.census(99, [ObservedWindow(id: TileID(11), pid: 1, bundleID: "", title: "window-1"),
+                          ObservedWindow(id: TileID(12), pid: 2, bundleID: "test.app", title: "window-2"),
+                          ObservedWindow(id: TileID(13), pid: 3, bundleID: "test.app", title: "window-3")])
         check(fresh.world.groups[1]!.strip.columns[0].width == .fixed(317), "disk matching normalizes nil bundle to empty")
         check(fresh.active == TileID(12), "disk remaps saved active window")
         check(fresh.world.groups[1]!.floating.contains(TileID(13)), "disk restores floating window")
         check(fresh.world.check().isEmpty, "round-trip invariants")
         let bad = Snapshot(group: 1, space: .skylight(1), columns: [SnapshotColumn(windows: [window(1)], width: .fixed(-1))])
-        do { _ = try Snapshot.decode(Snapshot.encode([bad])); check(false, "invalid snapshot accepted") }
-        catch { check(true, "invalid snapshot rejected") }
+        let kept = try Snapshot.decode(Snapshot.encode([bad, stacked]))
+        check(kept.count == 1 && kept[0].space == stacked.space, "invalid entry dropped, valid sibling kept")
     }
     section("554b4ed: initial adoption follows visual order, not AX enumeration order") {
         var h = Harness()
@@ -436,7 +438,7 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2)])
         h.send(.ipc(id: 7, command: .focus(TileID(2))))
-        check(h.effects.contains { if case .reply(7, .accepted) = $0 { return true }; return false }, "command reply correlates request ID")
+        check(h.effects.contains { if case .reply(7, .command(.accepted)) = $0 { return true }; return false }, "command reply correlates request ID")
         check(h.effects.contains { if case .raise(TileID(2)) = $0 { return true }; return false }, "focus emits explicit raise")
         h.send(.query(id: 8))
         check(h.effects.contains {
@@ -517,9 +519,9 @@ struct Harness {
             SnapshotColumn(windows: [window(9, bundle: "mail")], width: .proportion(0.5)),
         ])
         h.send(.loadSnapshots([saved]))
-        h.census(91, [ObservedWindow(id: TileID(7), appID: 2, bundleID: "term", identity: "window-8"),
-                      ObservedWindow(id: TileID(8), appID: 1, bundleID: "safari", identity: "window-7"),
-                      ObservedWindow(id: TileID(9), appID: 3, bundleID: "mail", identity: "window-9")])
+        h.census(91, [ObservedWindow(id: TileID(7), pid: 2, bundleID: "term", title: "window-8"),
+                      ObservedWindow(id: TileID(8), pid: 1, bundleID: "safari", title: "window-7"),
+                      ObservedWindow(id: TileID(9), pid: 3, bundleID: "mail", title: "window-9")])
         check(h.tiles == [TileID(8), TileID(7), TileID(9)], "order follows identity")
         check(h.world.groups[1]!.strip.columns.first { $0.tiles == [TileID(8)] }?.width == .fixed(300), "width follows identity")
     }
@@ -561,10 +563,10 @@ struct Harness {
         h.send(.pointer(.beginGesture(TileID(1))))
         let start = h.offset
         h.send(.pointer(.delta(40)))
-        h.send(.focus(FocusIntent(tile: TileID(3), appID: 3, source: .appActivation)))
-        h.send(.focus(FocusIntent(tile: TileID(3), source: .axNotification)))
+        h.send(.focus(FocusIntent(tile: TileID(3), pid: 3, source: .appActivation)))
+        h.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus)))
         h.advance(0.2)
-        check(h.world.pointer.session != nil, "swipe survives external focus")
+        check(h.gesture != nil, "swipe survives external focus")
         h.send(.pointer(.delta(40)))
         check(abs(h.offset - start - 80) < 0.001, "later deltas still apply")
     }
@@ -602,8 +604,8 @@ struct FuzzStream {
         let tile = tiles.isEmpty ? TileID(99999) : tiles[rng.next(tiles.count)]
         switch rng.next(20) {
         case 0: h.send(.command(.focus(tile), .ipc), group: id)
-        case 1: h.send(.focus(FocusIntent(tile: tile, source: .axNotification)), group: id)
-        case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keybinding), group: id)
+        case 1: h.send(.focus(FocusIntent(tile: tile, source: .axFocus)), group: id)
+        case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keyboard), group: id)
         case 3: h.send(.pointer(.beginGesture(tile)), group: id)
         case 4: h.send(.pointer(.delta(Double(rng.next(400) - 200))), group: id)
         case 5: h.send(.pointer(.endGesture), group: id)

@@ -14,23 +14,23 @@ public struct EventScope: Equatable, Sendable {
 
 public struct ObservedWindow: Equatable, Codable, Sendable {
     public let id: TileID
-    public let appID: Int32
+    public let pid: Int32
     public let bundleID: String?
-    public let identity: String
+    public let title: String
     public let floating: Bool
     public let initialFrame: AXRect?
 
-    public init(id: TileID, appID: Int32, bundleID: String?, identity: String = "", floating: Bool = false,
+    public init(id: TileID, pid: Int32, bundleID: String?, title: String = "", floating: Bool = false,
                 initialFrame: AXRect? = nil) {
         self.id = id
-        self.appID = appID
+        self.pid = pid
         self.bundleID = bundleID
-        self.identity = identity
+        self.title = title
         self.floating = floating
         self.initialFrame = initialFrame
     }
 
-    var isValid: Bool { id.rawValue != 0 && appID > 0 && (initialFrame?.rect.isFinite ?? true) }
+    var isValid: Bool { id.rawValue != 0 && pid > 0 && (initialFrame?.rect.isFinite ?? true) }
 }
 
 public enum Command: Sendable {
@@ -73,10 +73,18 @@ public struct Event: Sendable {
         case spaceWillChange
         case spaceChanged(key: SpaceKey, epoch: UInt64, windows: [ObservedWindow])
         case topologyChanged(Topology)
+        case configChanged(EngineConfig)
         case frameCompleted(tile: TileID, revision: UInt64, result: FrameResult)
         case timer(TimerToken)
         case tick
         case loadSnapshots([Snapshot])
+
+        var isGlobal: Bool {
+            switch self {
+            case .topologyChanged, .configChanged, .loadSnapshots: true
+            default: false
+            }
+        }
     }
 
     public let scope: EventScope
