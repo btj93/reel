@@ -14,11 +14,6 @@ struct SpaceMatch {
     enum Source { case live(SpaceKey), disk(Int) }
     let snapshot: Snapshot
     let source: Source
-
-    var fromDisk: Bool {
-        if case .disk = source { return true }
-        return false
-    }
 }
 
 public struct SpaceBook: Sendable {

@@ -438,7 +438,7 @@ extension World {
         pass.persist = true
     }
 
-    fileprivate mutating func stash(_ group: GroupState?, id: UInt32, time: Double) {
+    private mutating func stash(_ group: GroupState?, id: UInt32, time: Double) {
         guard let group, let saved = snapshot(group, id: id, time: time), !saved.space.isEmpty else { return }
         spaces.live[GroupSpace(group: id, space: saved.space)] = saved
     }
