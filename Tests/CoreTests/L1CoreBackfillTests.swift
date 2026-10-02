@@ -11,6 +11,7 @@ import Core
 // no-close-button, minimized) were untested. SnapshotMatching adds the
 // no-match / empty-input edges the existing suite didn't assert.
 
+@MainActor
 func runL1CoreBackfillTests() {
     print()
     print("Window Classification Backfill Tests")

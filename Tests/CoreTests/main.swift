@@ -12,6 +12,7 @@ var passed = 0
 var failed = 0
 var errors: [String] = []
 
+@MainActor
 func check(_ condition: Bool, _ message: String = "", file: String = #file, line: Int = #line) {
     if condition {
         passed += 1
@@ -22,10 +23,12 @@ func check(_ condition: Bool, _ message: String = "", file: String = #file, line
     }
 }
 
+@MainActor
 func assertEq<T: Equatable>(_ a: T, _ b: T, _ message: String = "", file: String = #file, line: Int = #line) {
     check(a == b, "\(message) (got \(a), expected \(b))", file: file, line: line)
 }
 
+@MainActor
 func assertClose(_ a: Double, _ b: Double, tolerance: Double = 1.0, _ message: String = "", file: String = #file, line: Int = #line) {
     check(abs(a - b) < tolerance, "\(message) (got \(a), expected \(b) ± \(tolerance))", file: file, line: line)
 }
@@ -315,7 +318,7 @@ do {
 section("Spring animation retarget")
 do {
     let anim = SpringAnimation(from: 0, to: 500, initialVelocity: 0, startTime: 0, params: .horizontalScroll)
-    let (midVal, midVel) = anim.evaluate(at: 0.1)
+    let (midVal, _) = anim.evaluate(at: 0.1)
     check(midVal > 0 && midVal < 500, "mid-flight value: \(midVal)")
     let retargeted = anim.retargeted(to: 1000, at: 0.1)
     assertClose(retargeted.from, midVal, tolerance: 0.01)
@@ -1989,13 +1992,7 @@ do {
 
 section("off-right column → scrolls to first leftward milestone")
 do {
-    // 3 cols of 0.3 width (432 each), snapPoints = [.left, .middle, .right]
-    var strip = makeStrip(columnCount: 3, width: 0.3, snapPoints: [.left, .middle, .right])
-    // cols width = 432, screen 1440, slack = 1008.
-    // offsets per snap: .left = 0, .middle = -504, .right = -1008
-    // activeIndex=0, snap=.left → offset = 0. col0 at x=0..432; col1 at x=448..880; col2 at x=896..1328 (visible).
-    // Push col2 off: set viewOffset to .left for col0 AND swap activeIndex=0 to right-shift cols.
-    // Instead: use 4 columns so col3 is clearly off-right.
+    // Four columns place col3 clearly off-right for the leftward snap test.
     var strip4 = makeStrip(columnCount: 4, width: 0.3, snapPoints: [.left, .middle, .right])
     strip4.activeColumnIndex = 0
     strip4.snapIndices = [0, 0, 0, 0]  // all .left

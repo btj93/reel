@@ -30,6 +30,10 @@ public struct ColumnInfo {
         self.frameWidth = frameWidth
         self.frameHeight = frameHeight
     }
+
+    public var aspectRatio: Double {
+        frameWidth > 0 && frameHeight > 0 ? frameWidth / frameHeight : 1.0
+    }
 }
 
 // MARK: - ReorderOverlayWindow
@@ -194,13 +198,15 @@ public final class ReorderOverlayWindow: NSWindow {
     /// Call this once before showing the overlay.
     ///
     /// - Parameters:
-    ///   - thumbnails: Array of (image, width) pairs for the non-dragged columns.
+    ///   - thumbnails: Non-dragged images, widths, and placeholder flags.
     ///   - draggedThumbnail: The image for the column being dragged.
     ///   - draggedWidth: Logical width of the dragged column thumbnail.
+    ///   - draggedIsPlaceholder: Whether to preserve the icon's aspect ratio.
     public func configureThumbnails(
-        thumbnails: [(image: NSImage, width: Double)],
+        thumbnails: [(image: NSImage, width: Double, isPlaceholder: Bool)],
         draggedThumbnail: NSImage,
-        draggedWidth: Double
+        draggedWidth: Double,
+        draggedIsPlaceholder: Bool
     ) {
         // Remove old thumbnail views
         for view in thumbnailViews {
@@ -209,11 +215,13 @@ public final class ReorderOverlayWindow: NSWindow {
         thumbnailViews.removeAll()
         thumbnailWidths.removeAll()
 
-        for (image, width) in thumbnails {
+        for (image, width, isPlaceholder) in thumbnails {
             let imageView = NSImageView(frame: .zero)
             imageView.image = image
-            imageView.imageScaling = .scaleAxesIndependently
+            imageView.imageScaling = isPlaceholder ? .scaleProportionallyDown : .scaleAxesIndependently
+            if isPlaceholder { imageView.imageAlignment = .alignCenter }
             imageView.wantsLayer = true
+            if isPlaceholder { imageView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
 
             // 6px corner radius, 1px white border at 15% opacity
             imageView.layer?.cornerRadius = 6
@@ -229,6 +237,11 @@ public final class ReorderOverlayWindow: NSWindow {
         // Configure ghost
         ghostWidth = draggedWidth
         ghostView.image = draggedThumbnail
+        ghostView.imageScaling = draggedIsPlaceholder ? .scaleProportionallyDown : .scaleAxesIndependently
+        if draggedIsPlaceholder {
+            ghostView.imageAlignment = .alignCenter
+            ghostView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
         ghostView.layer?.cornerRadius = 6
         ghostView.layer?.masksToBounds = true
         ghostView.layer?.borderWidth = 1
@@ -237,6 +250,15 @@ public final class ReorderOverlayWindow: NSWindow {
         let ghostHeight = thumbnailHeight
         ghostView.frame = CGRect(x: 0, y: 0, width: draggedWidth, height: ghostHeight)
         ghostView.isHidden = true
+    }
+
+    /// Swaps a placeholder for its screenshot without touching layout.
+    /// `index` 0 is the dragged column, `n` the n-th non-dragged column.
+    public func replaceThumbnail(at index: Int, with image: NSImage) {
+        let view = index == 0 ? ghostView : thumbnailViews[index - 1]
+        view.image = image
+        view.imageScaling = .scaleAxesIndependently
+        view.layer?.backgroundColor = nil
     }
 
     // MARK: - Layout
@@ -468,7 +490,7 @@ public final class ReorderOverlayWindow: NSWindow {
 
     /// Spring animates the ghost to the target origin, scaling back to 1.0,
     /// then calls completion after the spring settles.
-    public func animateGhostSettle(to targetOrigin: CGPoint, completion: @escaping () -> Void) {
+    public func animateGhostSettle(to targetOrigin: CGPoint, completion: @escaping @MainActor @Sendable () -> Void) {
         guard let ghostLayer = ghostView.layer else {
             ghostView.frame.origin = targetOrigin
             completion()
@@ -521,14 +543,16 @@ public final class ReorderOverlayWindow: NSWindow {
     }
 
     /// Fades out the band (150ms ease-in), orders the window out, then calls completion.
-    public func animateFadeOut(completion: @escaping () -> Void) {
+    public func animateFadeOut(completion: @escaping @MainActor @Sendable () -> Void) {
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.15
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            self?.orderOut(nil)
-            completion()
+            MainActor.assumeIsolated {
+                self?.orderOut(nil)
+                completion()
+            }
         })
     }
 

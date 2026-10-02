@@ -2,8 +2,8 @@
 
 <p align="center">
   <a href="https://github.com/btj93/reel/releases/latest"><img src="https://img.shields.io/github/v/release/btj93/reel?style=flat-square&color=00E5FF" alt="Latest Release"></a>
-  <img src="https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple" alt="macOS 14+">
-  <img src="https://img.shields.io/badge/Swift-5.10%2B-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 5.10+">
+  <img src="https://img.shields.io/badge/macOS-15%2B-black?style=flat-square&logo=apple" alt="macOS 15+">
+  <img src="https://img.shields.io/badge/Swift-6%2B-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 6+">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/btj93/reel?style=flat-square" alt="License"></a>
   <a href="https://github.com/btj93/tap"><img src="https://img.shields.io/badge/homebrew-btj93%2Ftap-FBB040?style=flat-square&logo=homebrew&logoColor=white" alt="Homebrew"></a>
 </p>
@@ -62,9 +62,9 @@ No SIP disable required. Pure Swift, Accessibility API, and two read-only privat
 
 ## Requirements
 
-- macOS 14 (Sonoma) or later
+- macOS 15 (Sequoia) or later
 - Accessibility permission (prompted on first launch)
-- Swift 5.10+
+- Swift 6+
 
 ## Permissions
 

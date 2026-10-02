@@ -6,7 +6,8 @@ import Config
 
 /// Draws a focus indicator around the active window.
 /// Supports four styles: none, ring (animated border), raise (AX raise), flash (brief color pulse).
-public final class FocusIndicator: @unchecked Sendable {
+@MainActor
+public final class FocusIndicator {
     private var overlayWindow: NSWindow?
 
     // MARK: - Config-driven properties

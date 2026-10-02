@@ -6,7 +6,8 @@ import Platform
 
 /// Bridges the Core Strip model to real AX window positioning.
 /// Has two modes: instant (Phase 1) and animated (Phase 2).
-public final class StripController: @unchecked Sendable {
+@MainActor
+public final class StripController {
     /// The current strip state.
     public var strip: Strip
 
@@ -947,23 +948,24 @@ public final class StripController: @unchecked Sendable {
     /// Latest undelivered write per tile. A newer frame supersedes an older one
     /// instead of queueing every 120Hz tick, decimating input to the app's real
     /// AX throughput and bounding queued work to one block per tile (finding #2).
-    /// Guarded by `writeLock`.
-    private var pendingWrites: [TileID: PendingWrite] = [:]
+    /// Guarded by `writeLock`; the AX drain reads this state off the main actor.
+    nonisolated(unsafe) private var pendingWrites: [TileID: PendingWrite] = [:]
     /// Tiles with a drain block already in flight on their app's write queue.
     /// Guarded by `writeLock`.
-    private var inFlightTiles: Set<TileID> = []
-    private let writeLock = NSLock()
+    nonisolated(unsafe) private var inFlightTiles: Set<TileID> = []
+    nonisolated private let writeLock = NSLock()
     /// Serial fallback for the (defensive) case where a tile's window has no
     /// tracked AXApp — preserves ordering without the concurrent global queue.
-    private let fallbackWriteQueue = DispatchQueue(label: "reel.ax.write.fallback", qos: .userInteractive)
+    nonisolated private let fallbackWriteQueue = DispatchQueue(label: "reel.ax.write.fallback", qos: .userInteractive)
 
     /// Bumped whenever the controller loses ownership of a tile. A drain block
     /// stamped with an older value is discarded at dequeue. Guarded by `writeLock`.
-    private var writeGeneration: [TileID: UInt64] = [:]
+    nonisolated(unsafe) private var writeGeneration: [TileID: UInt64] = [:]
 
     private struct PendingWrite {
         let app: AXApp?
         let apply: @Sendable () -> AXResult<Void>
+        let onFailure: @Sendable () -> Void
         let generation: UInt64
     }
 
@@ -1018,7 +1020,15 @@ public final class StripController: @unchecked Sendable {
     private func enqueueWrite(tileID: TileID, app: AXApp?, apply: @escaping @Sendable () -> AXResult<Void>) {
         writeLock.lock()
         pendingWrites[tileID] = PendingWrite(
-            app: app, apply: apply, generation: writeGeneration[tileID, default: 0])
+            app: app,
+            apply: apply,
+            onFailure: { [weak self, mainHop] in
+                mainHop { [weak self] in
+                    _ = MainActor.assumeIsolated { self?.dirtyTileIDs.insert(tileID) }
+                }
+            },
+            generation: writeGeneration[tileID, default: 0]
+        )
         let alreadyInFlight = inFlightTiles.contains(tileID)
         if !alreadyInFlight { inFlightTiles.insert(tileID) }
         writeLock.unlock()
@@ -1035,7 +1045,7 @@ public final class StripController: @unchecked Sendable {
     /// Drain coalesced writes for `tileID` on the owning app's serial write queue.
     /// Applies the latest pending target, then re-checks for a newer one that
     /// arrived while applying, until none remain — then clears the in-flight flag.
-    private func drainWrites(_ tileID: TileID) {
+    nonisolated private func drainWrites(_ tileID: TileID) {
         while true {
             writeLock.lock()
             guard let pending = pendingWrites.removeValue(forKey: tileID) else {
@@ -1050,9 +1060,7 @@ public final class StripController: @unchecked Sendable {
             writeLock.unlock()
             if isStale { continue }
             let result = pending.apply()
-            if case .failure = result {
-                mainHop { [weak self] in self?.dirtyTileIDs.insert(tileID) }
-            }
+            if case .failure = result { pending.onFailure() }
         }
     }
 

@@ -11,6 +11,7 @@ import Core
 //
 // pid_t is Int32; test pids are arbitrary positive values.
 
+@MainActor
 func runL1FocusGateTests() {
     print()
     print("FocusEventGate Tests")

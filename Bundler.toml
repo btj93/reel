@@ -10,3 +10,4 @@ CFBundleIdentifier = "dev.reel.Reel"
 CFBundleName = "Reel"
 CFBundleDisplayName = "Reel"
 NSHighResolutionCapable = true
+NSScreenCaptureUsageDescription = "Reel captures window thumbnails while reordering columns."

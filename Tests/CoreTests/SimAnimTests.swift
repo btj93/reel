@@ -13,6 +13,7 @@ import WindowManager
 // every animation is advanced by hand through handleFrameTick.
 // ============================================================
 
+@MainActor
 func runSimAnim() {
     print()
     print("StripController Simulation — animation & gestures (W4b)")

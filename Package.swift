@@ -1,10 +1,10 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.0
 
 import PackageDescription
 
 let package = Package(
     name: "Reel",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .executable(name: "Reel", targets: ["Reel"]),
         .executable(name: "reel-msg", targets: ["ReelCLI"]),
@@ -75,5 +75,6 @@ let package = Package(
             name: "TestWindowHost",
             path: "Tests/E2E/TestWindowHost"
         ),
-    ]
+    ],
+    swiftLanguageModes: [.v6]
 )

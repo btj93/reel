@@ -66,6 +66,7 @@ private func withTempStore(_ body: (_ dir: URL, _ filePath: URL) -> Void) {
 
 private let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
 
+@MainActor
 func runL1StoreTests() {
     print()
     print("StripSnapshotStore Tests")

@@ -47,6 +47,8 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Reel captures window thumbnails while reordering columns.</string>
 </dict>
 </plist>
 PLIST
