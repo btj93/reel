@@ -35,7 +35,14 @@ final class ReorderOverlayController {
     private var insertionIndex: Int = 0
     private var isReady: Bool = false
 
-    private static let thumbnailReadyDeadline: Duration = .milliseconds(300) // keep drop latency within the R1 perf gate (trunk p95 + 100 ms)
+    // Upper bound on trigger -> overlay showing every tile. The R1 perf gate (trunk p95 + 100 ms)
+    // is measured on that span; tiles still missing a screenshot at the deadline show a
+    // placeholder and are swapped in when their late capture lands.
+    private static let thumbnailReadyDeadline: Duration = .milliseconds(300)
+
+    /// When `show()` ran (the drag-threshold trigger). The logger has no timestamps, so every
+    /// `[ReorderOverlay]` line carries `elapsedMs` measured from here.
+    private var triggerInstant = ContinuousClock.now
 
     /// Screenshots keyed by position in `[dragged] + nonDragged`. Filled as each capture
     /// finishes; tiles without an entry show a placeholder until a late capture lands.
@@ -85,6 +92,9 @@ final class ReorderOverlayController {
         //    `columns[draggedIndex]` below would trap.
         guard draggedIndex >= 0, draggedIndex < columns.count else { return }
 
+        triggerInstant = .now
+        log("trigger columns=\(columns.count) dragged=\(draggedIndex) style=\(thumbnailStyle)")
+
         captureTask?.cancel()
         readyDeadlineTask?.cancel()
         captureTask = nil
@@ -125,19 +135,31 @@ final class ReorderOverlayController {
         self.overlayWindow = window
 
         guard thumbnailStyle == "screenshot" else {
-            installThumbnails(generation: myGeneration)
+            installThumbnails(generation: myGeneration, reason: "icon")
             return
         }
 
         let capturedColumns = orderedColumns
         let capturedThumbnailHeight = thumbnailHeight
         captureTask = Task { @MainActor [weak self] in
-            let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let content: SCShareableContent?
+            do {
+                content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            } catch {
+                content = nil
+                self?.logFallback("capture-unavailable", generation: myGeneration, detail: "error=\"\(error)\"")
+            }
             guard !Task.isCancelled else { return }
             let windows = Dictionary((content?.windows ?? []).map { ($0.windowID, $0) },
                                      uniquingKeysWith: { first, _ in first })
             let requests = capturedColumns.enumerated().compactMap { index, column -> ThumbnailCaptureRequest? in
-                guard let window = windows[column.windowID] else { return nil }
+                guard let window = windows[column.windowID] else {
+                    if content != nil {
+                        self?.logFallback("window-missing", generation: myGeneration,
+                                          detail: "index=\(index) windowID=\(column.windowID)")
+                    }
+                    return nil
+                }
                 return ThumbnailCaptureRequest(index: index, window: window,
                                                aspectRatio: column.aspectRatio,
                                                thumbnailHeight: capturedThumbnailHeight)
@@ -147,21 +169,27 @@ final class ReorderOverlayController {
                     group.addTask { await Self.captureWindow(request) }
                 }
                 for await (index, image) in group {
-                    if let image { self?.receiveThumbnail(image, at: index, generation: myGeneration) }
+                    if let image {
+                        self?.receiveThumbnail(image, at: index, generation: myGeneration)
+                    } else if !Task.isCancelled {
+                        self?.logFallback("capture-failed", generation: myGeneration, detail: "index=\(index)")
+                    }
                 }
             }
-            self?.installThumbnails(generation: myGeneration)
+            self?.installThumbnails(generation: myGeneration, reason: "captures")
         }
         readyDeadlineTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: Self.thumbnailReadyDeadline)
             guard !Task.isCancelled else { return }
-            self?.installThumbnails(generation: myGeneration)
+            self?.logFallback("deadline", generation: myGeneration, detail: "deadline=\(Self.thumbnailReadyDeadline)")
+            self?.installThumbnails(generation: myGeneration, reason: "deadline")
         }
     }
 
     // MARK: - updateCursor(position:)
 
-    /// Routes cursor position updates. Buffered while screenshots are capturing.
+    /// Routes cursor position updates. Buffered until the overlay is ready (all captures
+    /// landed or the thumbnail deadline passed), then replayed.
     /// Position is in CG screen coordinates (top-left origin).
     func updateCursor(position: CGPoint) {
         if isReady {
@@ -205,6 +233,9 @@ final class ReorderOverlayController {
             return
         }
         generation += 1   // ready path only: retire this session
+        captureTask?.cancel()
+        captureTask = nil
+        thumbnailImages = [:]
 
         onCommit?(draggedIndex, insertionIndex)
 
@@ -299,6 +330,18 @@ final class ReorderOverlayController {
         return count
     }
 
+    private func log(_ message: String) {
+        let c = triggerInstant.duration(to: .now).components
+        let ms = Double(c.seconds) * 1000 + Double(c.attoseconds) / 1e15
+        print("[ReorderOverlay] \(message) elapsedMs=\(String(format: "%.1f", ms))")
+    }
+
+    /// Fallback lines are dropped for a superseded session so they never pollute the new drag's timing.
+    private func logFallback(_ reason: String, generation: Int, detail: String) {
+        guard self.generation == generation else { return }
+        log("fallback reason=\(reason) \(detail)")
+    }
+
     private var orderedColumns: [ColumnInfo] { [columns[draggedIndex]] + nonDraggedColumns }
 
     private func tileImage(_ image: CGImage, for column: ColumnInfo) -> NSImage {
@@ -308,11 +351,14 @@ final class ReorderOverlayController {
     private func receiveThumbnail(_ image: CGImage, at index: Int, generation: Int) {
         guard self.generation == generation else { return }
         thumbnailImages[index] = image
+        if thumbnailImages.count == orderedColumns.count {
+            log("all-tiles tiles=\(thumbnailImages.count) ready=\(isReady)")
+        }
         guard isReady else { return }
         overlayWindow?.replaceThumbnail(at: index, with: tileImage(image, for: orderedColumns[index]))
     }
 
-    private func installThumbnails(generation: Int) {
+    private func installThumbnails(generation: Int, reason: String) {
         guard self.generation == generation, !isReady, let window = overlayWindow else { return }
         readyDeadlineTask?.cancel()
         readyDeadlineTask = nil
@@ -323,6 +369,8 @@ final class ReorderOverlayController {
             let image = screenshot.map { tileImage($0, for: column) } ?? column.appIcon
             return (image: image, width: thumbnailHeight * column.aspectRatio, isPlaceholder: placeholder)
         }
+        let placeholders = thumbnails.filter(\.isPlaceholder).count
+        log("ready tiles=\(thumbnails.count) images=\(thumbnailImages.count) placeholders=\(placeholders) reason=\(reason)")
         let draggedResult = thumbnails[0]
         window.configureThumbnails(
             thumbnails: Array(thumbnails.dropFirst()),
