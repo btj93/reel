@@ -83,7 +83,8 @@ final class ReorderOverlayController {
         primaryScreenHeight: Double,
         thumbnailStyle: String,
         thumbnailHeight: Double,
-        gap: Double
+        gap: Double,
+        triggeredAt: ContinuousClock.Instant = .now
     ) {
         // 0. A multi-second press can outlive the layout it started on: focus
         //    hotkeys, IPC commands and the 500ms health check can all remove columns
@@ -92,7 +93,7 @@ final class ReorderOverlayController {
         //    `columns[draggedIndex]` below would trap.
         guard draggedIndex >= 0, draggedIndex < columns.count else { return }
 
-        triggerInstant = .now
+        triggerInstant = triggeredAt
         log("trigger columns=\(columns.count) dragged=\(draggedIndex) style=\(thumbnailStyle)")
 
         captureTask?.cancel()
@@ -181,7 +182,7 @@ final class ReorderOverlayController {
         readyDeadlineTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: Self.thumbnailReadyDeadline)
             guard !Task.isCancelled else { return }
-            self?.logFallback("deadline", generation: myGeneration, detail: "deadline=\(Self.thumbnailReadyDeadline)")
+            self?.logFallback("deadline", generation: myGeneration, detail: "deadlineMs=\(Int(Self.thumbnailReadyDeadline / .milliseconds(1)))")
             self?.installThumbnails(generation: myGeneration, reason: "deadline")
         }
     }
@@ -240,7 +241,7 @@ final class ReorderOverlayController {
         onCommit?(draggedIndex, insertionIndex)
 
         window.animateFadeOut { [weak self] in
-            self?.overlayWindow = nil
+            if self?.overlayWindow === window { self?.overlayWindow = nil }
         }
     }
 
@@ -268,7 +269,7 @@ final class ReorderOverlayController {
             let returnOrigin = window.settleOrigin(forGapIndex: originalGapIndex)
             window.animateGhostSettle(to: returnOrigin) { [weak self] in
                 window.animateFadeOut { [weak self] in
-                    self?.overlayWindow = nil
+                    if self?.overlayWindow === window { self?.overlayWindow = nil }
                 }
             }
         } else {
@@ -334,6 +335,7 @@ final class ReorderOverlayController {
         let c = triggerInstant.duration(to: .now).components
         let ms = Double(c.seconds) * 1000 + Double(c.attoseconds) / 1e15
         print("[ReorderOverlay] \(message) elapsedMs=\(String(format: "%.1f", ms))")
+        fflush(stdout)
     }
 
     /// Fallback lines are dropped for a superseded session so they never pollute the new drag's timing.

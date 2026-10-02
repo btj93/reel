@@ -469,6 +469,7 @@ public final class WindowManager {
             // Paused: don't open the reorder overlay — committing a drop runs
             // moveColumn + applyLayout + focusActiveWindow, all layout mutations.
             guard let self = self, !self.isPaused else { return }
+            let triggeredAt = ContinuousClock.now
             // Use the strip the cursor is currently on, not the active strip.
             let sc = self.stripControllerUnderCursor()
             let columns = self.buildColumnInfos(from: sc)
@@ -537,7 +538,8 @@ public final class WindowManager {
                 primaryScreenHeight: sc.primaryScreenHeight,
                 thumbnailStyle: self.config.reorderOverlay.thumbnailStyle,
                 thumbnailHeight: self.config.reorderOverlay.thumbnailHeight,
-                gap: self.config.gap
+                gap: self.config.gap,
+                triggeredAt: triggeredAt
             )
         }
 
