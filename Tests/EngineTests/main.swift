@@ -4,6 +4,7 @@ import Foundation
 
 let environment = ProcessInfo.processInfo.environment
 let only = environment["ENGINE_ONLY"]?.lowercased() ?? ""
+let margin = 0.05
 var checks = 0
 var failures = 0
 
@@ -104,7 +105,7 @@ struct Harness {
         h.census(30, [window(1), window(3)])
         check(h.world.groups[1]!.space == .skylight(20), "mixed census did not commit")
         check(h.world.spaces.live.count == before, "mixed census did not prune")
-        check(h.effects.contains { if case .requestCensus(1, EngineConfig.censusSettle) = $0 { return true }; return false },
+        check(h.effects.contains { if case .requestCensus(1, let after) = $0 { return abs(after - EngineConfig.censusSettle) < 1e-9 }; return false },
               "mixed census asks the observer for a settled re-read")
         h.census(30, [])
         check(h.world.groups[1]!.space == .skylight(20), "unconfirmed empty census did not commit")
@@ -123,7 +124,7 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
         h.send(.command(.focus(TileID(3)), .keyboard))
-        h.advance(0.2)
+        h.advance(EngineConfig.focusDebounce + margin)
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         let deferred = h.world.timers.keys.first!
         let old = h.world.scope(for: 1)!
@@ -136,10 +137,10 @@ struct Harness {
         h.census(10, [window(1), window(2), window(3)])
         check(h.active == TileID(3), "echo did not change saved active column")
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
-        h.advance(0.3)
+        h.advance(EngineConfig.focusDebounce + margin)
         check(h.active == TileID(3), "post-restore echo rejected on receipt, not after debounce")
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus, observedSpace: .skylight(20))))
-        h.advance(0.3)
+        h.advance(EngineConfig.focusDebounce + margin)
         check(h.active == TileID(3), "AX focus from a different observed identity cannot beat delayed Space notification")
         check(h.world.check().isEmpty, "focus echo invariants")
     }
@@ -161,7 +162,7 @@ struct Harness {
         h.send(.command(.focus(TileID(4)), .ipc))
         h.census(10, [window(1, app: 10), window(2, app: 20)])
         h.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation)))
-        h.advance(0.6)
+        h.advance(EngineConfig.crossingTTL + margin)
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         check(h.active == TileID(4), "expired crossing does not override saved focus")
         h.census(10, [window(1, app: 10), window(2, app: 20)])
@@ -178,7 +179,7 @@ struct Harness {
         h.send(.pointer(.cancel))
         let prior = h.offset
         h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .appActivation)))
-        h.advance(0.2)
+        h.advance(EngineConfig.focusDebounce + margin)
         check(h.offset == prior, "visible external target retains viewport")
         h.send(.command(.focus(TileID(1)), .keyboard))
         check(h.offset != prior, "keyboard target recenters")
@@ -214,12 +215,12 @@ struct Harness {
         h.send(.pointer(.beginGesture(TileID(999))))
         check(h.world.pointer.token == nil, "rejected gesture resets idle")
         if case .gesture = h.world.groups[1]!.strip.viewOffset { check(false, "reject left gesture latch") }
-        h.advance(0.2)
+        h.advance(EngineConfig.focusDebounce + margin)
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         let timer = h.world.timers.keys.first!
         h.send(.windowAdded(window(3)))
         check(h.world.timers.isEmpty, "adoption cancels deferred old focus")
-        h.send(.timer(timer), advance: 0.3)
+        h.send(.timer(timer), advance: EngineConfig.focusDebounce + margin)
         check(h.active == TileID(3), "late pre-adoption focus cannot win")
         h.send(.pointer(.beginGesture(TileID(3))))
         h.send(.spaceWillChange)
@@ -339,7 +340,7 @@ struct Harness {
         check(h.world.timers.count == 1, "timeout schedules scoped retry")
         h.send(.frameCompleted(tile: healthy.tile, revision: healthy.revision, result: .applied))
         check(h.world.appliedFrames[healthy.tile] == healthy, "healthy app completes while peer hung")
-        h.advance(0.2)
+        h.advance(EngineConfig.frameRetryDelay + margin)
         check(h.world.frames[hung.tile]!.revision > hung.revision, "retry issued newer revision")
         check(h.world.timers.isEmpty, "fired token consumed")
         let retried = h.world.frames[hung.tile]!
@@ -347,7 +348,7 @@ struct Harness {
         let cancelled = h.world.timers.keys.first!
         let old = h.world.scope(for: 1)!
         h.census(20, [window(3)])
-        h.send(.timer(cancelled), scope: old, advance: 0.3)
+        h.send(.timer(cancelled), scope: old, advance: EngineConfig.frameRetryDelay + margin)
         check(h.world.frames[hung.tile] == nil && h.world.timers.isEmpty, "cancelled retry cannot resurrect departed tile")
     }
     try section("554b4ed: snapshot round trip, logical widths, snap positions, nil bundle IDs, deterministic restore") {
@@ -549,22 +550,22 @@ struct Harness {
     section("d227a21: external focus stays quiet through momentum and its settle echo") {
         var h = Harness(animate: true)
         h.census(10, [window(1), window(2), window(3)])
-        h.advance(0.3)
+        h.advance(EngineConfig.focusDebounce + margin)
         h.send(.pointer(.beginGesture(TileID(1))))
         h.send(.pointer(.delta(300)))
         h.send(.pointer(.endGesture))
         let landed = h.active
         check(landed != TileID(1), "swipe landed away from the focus target")
         h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .appActivation)))
-        h.advance(0.2)
+        h.advance(EngineConfig.focusDebounce + margin)
         check(h.active == landed, "momentum ignores incremental focus")
         h.send(.tick, advance: 3)
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
-        h.advance(0.2)
+        h.advance(EngineConfig.focusDebounce + margin)
         check(h.active == landed, "settle echo inside the quiet window is ignored")
         h.advance(EngineConfig.gestureQuiet)
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
-        h.advance(0.2)
+        h.advance(EngineConfig.focusDebounce + margin)
         check(h.active == TileID(1), "focus resumes after the quiet window")
     }
     section("554b4ed: disk entries are consumed once and out-of-range presets are cleared") {
@@ -610,9 +611,9 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2)])
         h.census(30, [])
-        check(h.effects.contains { if case .requestCensus(1, EngineConfig.censusSettle) = $0 { return true }; return false },
+        check(h.effects.contains { if case .requestCensus(1, let after) = $0 { return abs(after - EngineConfig.censusSettle) < 1e-9 }; return false },
               "deferred empty census requests a settled re-read")
-        h.advance(0.6)
+        h.advance(EngineConfig.censusSettle + margin)
         h.census(30, [])
         check(h.world.groups[1]!.space == .skylight(30), "confirmed empty census commits")
         h.send(.windowAdded(window(5)))
@@ -621,7 +622,7 @@ struct Harness {
         check(h.tiles == [TileID(1), TileID(2)], "departing Space keeps its own columns")
         h.send(.spaceWillChange)
         h.census(40, [])
-        h.advance(0.6)
+        h.advance(EngineConfig.censusSettle + margin)
         h.census(40, [])
         h.send(.windowAdded(window(6)))
         check(h.tiles == [TileID(6)], "observed empty switch does not freeze the group")
@@ -701,13 +702,13 @@ struct Harness {
     section("probe 8: external focus cannot kill a swipe") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
-        h.advance(0.3)
+        h.advance(EngineConfig.focusDebounce + margin)
         h.send(.pointer(.beginGesture(TileID(1))))
         let start = h.offset
         h.send(.pointer(.delta(40)))
         h.send(.focus(FocusIntent(tile: TileID(3), pid: 3, source: .appActivation)))
         h.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus)))
-        h.advance(0.2)
+        h.advance(EngineConfig.focusDebounce + margin)
         check(h.gesture != nil, "swipe survives external focus")
         h.send(.pointer(.delta(40)))
         check(abs(h.offset - start - 80) < 0.001, "later deltas still apply")
@@ -763,7 +764,7 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(1)])
         check(h.effects.contains { if case .requestCensus = $0 { return true }; return false }, "duplicate census deferred")
-        h.advance(EngineConfig.censusSettle + 0.05)
+        h.advance(EngineConfig.censusSettle + margin)
         h.census(10, [window(1), window(1)])
         check(!h.effects.contains { if case .requestCensus = $0 { return true }; return false }, "settled duplicate read is dropped")
         h.census(10, [window(1)])
@@ -816,7 +817,7 @@ struct Harness {
         h.send(.spaceWillChange)
         fingerprint([], [])
         check(h.effects.contains { if case .requestCensus = $0 { return true }; return false }, "empty fingerprint census deferred")
-        h.advance(EngineConfig.censusSettle + 0.05)
+        h.advance(EngineConfig.censusSettle + margin)
         fingerprint([], [])
         check(h.world.groups[1]!.space == .fingerprint([]) && !h.world.groups[1]!.phase.isChanging, "settled empty re-read commits")
         h.send(.windowAdded(window(5)))
@@ -830,12 +831,12 @@ struct Harness {
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         h.send(.command(.focus(TileID(4)), .ipc))
         h.census(10, [window(1, app: 10), window(2, app: 20)])
-        h.advance(EngineConfig.focusDebounce + 0.05)
+        h.advance(EngineConfig.focusDebounce + margin)
         h.send(.pointer(.beginGesture(TileID(1))))
         h.send(.pointer(.delta(40)))
         let offset = h.offset
         h.send(.focus(FocusIntent(tile: TileID(2), source: .axFocus)))
-        h.advance(EngineConfig.focusDebounce + 0.05)
+        h.advance(EngineConfig.focusDebounce + margin)
         check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "AX focus during a swipe is recorded")
         check(h.gesture != nil && h.offset == offset, "recorded focus does not scroll the swipe")
         h.send(.pointer(.endGesture))
@@ -863,7 +864,7 @@ struct Harness {
     section("refused command leaves pending focus alone") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.advance(EngineConfig.focusDebounce + 0.05)
+        h.advance(EngineConfig.focusDebounce + margin)
         h.send(.focus(FocusIntent(tile: TileID(2), source: .axFocus)))
         h.send(.ipc(id: 1, command: .setWidth(TileID(1), -5)))
         check(!h.world.timers.isEmpty, "refused command does not cancel the debounced focus")
