@@ -18,6 +18,8 @@ public struct EngineConfig: Sendable {
     public static let censusSettle = 0.5
     public static let gestureQuiet = 0.3
     public static let flickVelocity = 50.0
+    public static let defaultGap = 8.0
+    public static let defaultColumnWidth = 0.5
 
     public let gap: Double
     public let defaultWidth: Double
@@ -25,10 +27,10 @@ public struct EngineConfig: Sendable {
     public let gestureSnap: Bool
     public let rules: [Rule]
 
-    public init(gap: Double = 8, defaultWidth: Double = 0.5, animate: Bool = true,
+    public init(gap: Double = defaultGap, defaultWidth: Double = defaultColumnWidth, animate: Bool = true,
                 gestureSnap: Bool = true, rules: [Rule] = []) {
-        self.gap = gap.isFinite && gap >= 0 ? gap : 8
-        self.defaultWidth = defaultWidth.isFinite && defaultWidth > 0 ? defaultWidth : 0.5
+        self.gap = gap.isFinite && gap >= 0 ? gap : Self.defaultGap
+        self.defaultWidth = defaultWidth.isFinite && defaultWidth > 0 ? defaultWidth : Self.defaultColumnWidth
         self.animate = animate
         self.gestureSnap = gestureSnap
         self.rules = rules
@@ -41,7 +43,7 @@ public struct DeferredCensus: Equatable, Sendable {
 }
 
 public enum SpacePhase: Equatable, Sendable {
-    case unknown
+    case unknown(deferred: DeferredCensus?)
     case settled(SpaceKey)
     case changing(from: SpaceKey, deferred: DeferredCensus?)
 
@@ -58,8 +60,10 @@ public enum SpacePhase: Equatable, Sendable {
     }
 
     var deferred: DeferredCensus? {
-        if case .changing(_, let deferred) = self { return deferred }
-        return nil
+        switch self {
+        case .unknown(let deferred), .changing(_, let deferred): deferred
+        case .settled: nil
+        }
     }
 }
 
@@ -67,7 +71,7 @@ public struct GroupState: Sendable {
     public internal(set) var strip: Strip
     public internal(set) var windows: [TileID: ObservedWindow] = [:]
     public internal(set) var floating: Set<TileID> = []
-    public internal(set) var phase: SpacePhase = .unknown
+    public internal(set) var phase: SpacePhase = .unknown(deferred: nil)
     public internal(set) var epoch: UInt64 = 0
     public internal(set) var focus: FocusState = .none
     public var space: SpaceKey? { phase.key }
@@ -158,6 +162,7 @@ public struct World: Sendable {
             if !frame.frame.rect.isFinite { errors.append("nonfinite frame") }
         }
         for work in timers.values where scope(for: work.scope.group) != work.scope { errors.append("stale timer") }
+        if spaces.live.keys.contains(where: { $0.space.isEmpty }) { errors.append("stash under an empty key") }
         if spaces.live.values.contains(where: { !$0.isValid }) || spaces.disk.contains(where: { !$0.isValid }) { errors.append("invalid snapshot") }
         return errors
     }

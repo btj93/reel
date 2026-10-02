@@ -41,7 +41,7 @@ public struct SpaceBook: Sendable {
         if let exact = lookupExact(group: group, space: space) { return SpaceMatch(snapshot: exact, source: .live(space)) }
         let fingerprint = Set(windows.map { $0.id.rawValue })
         let candidates = live.filter { $0.key.group == group && (!space.isAuthoritative || !$0.key.space.isAuthoritative) }.map(\.value)
-        if let winner = bestMatch(candidates, score: { similarity($0.fingerprint, fingerprint) }) {
+        if let winner = bestMatch(candidates, score: { (similarity($0.fingerprint, fingerprint), 0, 0) }) {
             return SpaceMatch(snapshot: candidates[winner], source: .live(candidates[winner].space))
         }
         return tolerantMatch(group: group, windows: windows)
@@ -62,9 +62,16 @@ public struct SpaceBook: Sendable {
 
     private func tolerantMatch(group: UInt32, windows: [ObservedWindow]) -> SpaceMatch? {
         let identities = Set(windows.map(WindowIdentity.init))
+        let bundles = Set(identities.map(\.bundleID))
+        let bundleByID = Dictionary(windows.map { ($0.id, $0.bundleID) }, uniquingKeysWith: { first, _ in first })
         let indexed = disk.indices.filter { disk[$0].group == group }
-        guard let winner = bestMatch(indexed.map { disk[$0] }, score: { similarity($0.identities, identities) })
-        else { return nil }
+        let winner = bestMatch(indexed.map { disk[$0] }) { saved in
+            let sameWindows = saved.windows.reduce(0) { bundleByID[$1.id] == .some($1.bundleID) ? $0 + 1 : $0 }
+            let union = saved.windows.count + windows.count - sameWindows
+            return (similarity(saved.bundles, bundles), union == 0 ? 0 : Double(sameWindows) / Double(union),
+                    similarity(saved.identities, identities))
+        }
+        guard let winner else { return nil }
         return SpaceMatch(snapshot: disk[indexed[winner]], source: .disk(indexed[winner]))
     }
 }
@@ -106,8 +113,8 @@ private func similarity<T: Hashable>(_ lhs: Set<T>, _ rhs: Set<T>) -> Double {
     return union == 0 ? 0 : Double(shared) / Double(union)
 }
 
-private func bestMatch(_ candidates: [Snapshot], score: (Snapshot) -> Double) -> Int? {
-    let scored = candidates.indices.map { (index: $0, score: score(candidates[$0])) }.filter { $0.score > SpaceBook.matchThreshold }
+private func bestMatch(_ candidates: [Snapshot], score: (Snapshot) -> (Double, Double, Double)) -> Int? {
+    let scored = candidates.indices.map { (index: $0, score: score(candidates[$0])) }.filter { $0.score.0 > SpaceBook.matchThreshold }
     return scored.min {
         if $0.score != $1.score { return $0.score > $1.score }
         let lhs = candidates[$0.index], rhs = candidates[$1.index]

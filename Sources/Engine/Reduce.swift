@@ -11,8 +11,11 @@ struct Pass {
 
 public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [Effect] {
     guard now.isFinite, now >= world.time else { return [.log("rejected clock")] }
-    guard event.scope.topologyRevision == world.topology.revision else { return [] }
-    guard event.kind.isGlobal || world.scope(for: event.scope.group) == event.scope else { return [] }
+    guard event.scope.topologyRevision == world.topology.revision,
+          event.kind.isGlobal || world.scope(for: event.scope.group) == event.scope else {
+        if case .ipc(let requestID, _) = event.kind { return [.reply(id: requestID, payload: .command(.refused("stale scope")))] }
+        return []
+    }
     world.time = now
     world.expireMomentum(now)
     var pass = Pass(now: now, scope: event.scope)
@@ -68,8 +71,9 @@ extension World {
     fileprivate mutating func schedule(_ action: ScheduledAction, delay: Double, _ pass: inout Pass) {
         let token = TimerToken(nextRevision())
         let deadline = pass.now + delay
-        timers[token] = ScheduledWork(scope: pass.scope, deadline: deadline, action: action)
-        pass.effects.append(.schedule(token: token, deadline: deadline, event: Event(scope: pass.scope, kind: .timer(token))))
+        let scope = scope(for: pass.scope.group) ?? pass.scope
+        timers[token] = ScheduledWork(scope: scope, deadline: deadline, action: action)
+        pass.effects.append(.schedule(token: token, deadline: deadline, event: Event(scope: scope, kind: .timer(token))))
     }
 
     fileprivate mutating func invalidate(_ tile: TileID, _ pass: inout Pass) {
@@ -95,10 +99,6 @@ extension World {
     fileprivate mutating func onFocusObserved(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
         let group = groups[id]!
         guard !group.phase.isChanging || intent.source == .appActivation else { return }
-        if !intent.source.centers, pointer.isSwiping(group: id) {
-            pass.effects.append(.log("focus suppressed during swipe source=\(intent.source.rawValue)"))
-            return
-        }
         cancelTimers(group: id, &pass, focusOnly: true)
         let local = intent.source == .appActivation && group.windows.values.contains { $0.pid == intent.pid }
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
@@ -116,12 +116,11 @@ extension World {
             return
         }
         guard !group.phase.isChanging, let tile = intent.tile, group.windows[tile] != nil else { return }
-        if pointer.isSwiping(group: id) {
-            guard intent.source.centers else { return }
+        if pointer.isSwiping(group: id), intent.source.centers {
             cancelPointer(&pass)
             group = groups[id]!
         }
-        if let index = group.strip.columnIndex(of: tile) {
+        if !pointer.isSwiping(group: id), let index = group.strip.columnIndex(of: tile) {
             if intent.source.centers {
                 let previousX = group.strip.columnX(at: group.strip.activeColumnIndex, time: pass.now)
                 group.strip.viewOffset.shiftBy(previousX - group.strip.columnX(at: index, time: pass.now))
@@ -152,9 +151,15 @@ extension World {
     }
 
     fileprivate mutating func add(_ window: ObservedWindow, to id: UInt32, _ pass: inout Pass) {
-        guard window.isValid, var group = groups[id], case .settled = group.phase,
-              !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
+        guard window.isValid, var group = groups[id], case .settled = group.phase else { return }
+        if let known = group.windows[window.id] {
+            if known.pid == window.pid, known.bundleID == window.bundleID { groups[id]!.windows[window.id] = window }
+            return
+        }
+        guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
+        endGesture(in: id, &pass)
+        group = groups[id]!
         group.windows[window.id] = window
         if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
@@ -162,10 +167,15 @@ extension World {
         pass.layout.insert(id)
     }
 
+    private mutating func endGesture(in id: UInt32, _ pass: inout Pass) {
+        if case .gesture(let session) = pointer, session.scope.group == id { cancelPointer(&pass) }
+    }
+
     fileprivate mutating func remove(_ tile: TileID, from id: UInt32, _ pass: inout Pass) {
-        guard let current = groups[id], !current.phase.isChanging, current.windows[tile] != nil else { return }
+        guard groups[id]?.windows[tile] != nil else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
         if pointer.tile == tile { cancelPointer(&pass) }
+        endGesture(in: id, &pass)
         var group = groups[id]!
         group.strip.removeTile(tile, at: pass.now)
         group.windows.removeValue(forKey: tile)
@@ -181,11 +191,16 @@ extension World {
     }
 
     fileprivate mutating func run(_ command: Command, source: FocusSource, group id: UInt32, _ pass: inout Pass) -> CommandOutcome {
+        let outcome = execute(command, source: source, group: id, &pass)
+        if outcome == .accepted { cancelTimers(group: id, &pass, focusOnly: true) }
+        return outcome
+    }
+
+    private mutating func execute(_ command: Command, source: FocusSource, group id: UInt32, _ pass: inout Pass) -> CommandOutcome {
         guard var group = groups[id], !group.phase.isChanging else { return .refused("space change in progress") }
         func missing(_ tile: TileID) -> CommandOutcome {
             group.windows[tile] == nil ? .unknownWindow(tile) : .refused("floating window")
         }
-        cancelTimers(group: id, &pass, focusOnly: true)
         let now = pass.now
         var recenter = false
         switch command {
@@ -248,12 +263,9 @@ extension World {
     fileprivate mutating func onPointer(_ input: PointerInput, token: PointerToken?, group id: UInt32, _ pass: inout Pass) {
         switch input {
         case .beginGesture(let tile), .openMenu(let tile), .beginReorder(let tile):
-            return beginPointer(input, tile: tile, group: id, &pass)
-        default:
-            guard let current = pointer.token, current == token, pointer.scope == pass.scope else { return }
-        }
-        switch input {
-        case .beginGesture, .openMenu, .beginReorder: break
+            beginPointer(input, tile: tile, group: id, &pass)
+        case _ where pointer.token == nil || pointer.token != token || pointer.scope != pass.scope:
+            return
         case .delta(let delta):
             guard delta.isFinite, case .gesture = pointer, var group = groups[id],
                   case .gesture(var gesture) = group.strip.viewOffset else { return cancelPointer(&pass) }
@@ -319,9 +331,11 @@ extension World {
         case .openMenu:
             pointer = .menu(TargetSession(token: token, scope: scope, tile: tile))
             pass.effects.append(.overlay(.menu(tile: tile, scope: scope, session: token)))
-        default:
+        case .beginReorder:
             pointer = .reorder(TargetSession(token: token, scope: scope, tile: tile))
             pass.effects.append(.overlay(.reorder(tile: tile, scope: scope, session: token)))
+        case .delta, .endGesture, .menu, .dropReorder, .cancel:
+            break
         }
     }
 
@@ -356,13 +370,25 @@ extension World {
         groups[id] = group
     }
 
-    fileprivate mutating func onSpaceChanged(key: SpaceKey, epoch: UInt64, windows: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
-        guard !key.isEmpty, let group = groups[id] else { return pass.effects.append(.log("space census without identity ignored")) }
+    fileprivate mutating func onSpaceChanged(key: SpaceKey, epoch: UInt64, windows observed: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
+        guard let group = groups[id], !key.isEmpty || (observed.isEmpty && !key.isAuthoritative) else {
+            return pass.effects.append(.log("space census without identity ignored"))
+        }
+        let owned = Set(groups.filter { $0.key != id }.values.flatMap { $0.windows.keys })
+        func accepted(_ window: ObservedWindow) -> Bool { window.isValid && !owned.contains(window.id) }
+        let windows = observed.filter(accepted)
+        for window in observed where !accepted(window) {
+            pass.effects.append(.log("census window dropped tile=\(window.id.rawValue)"))
+        }
         let verdict = censusVerdict(windows, group: id)
         if key == group.space {
             groups[id]!.phase = .settled(key)
             if case .crossing(_, _, let previous) = group.focus { groups[id]!.focus = previous.map(FocusState.resolved) ?? .none }
-            if verdict == .trusted { syncMembership(windows, group: id, &pass) }
+            if verdict == .trusted, !listsOtherSpaces(windows, group: id) {
+                for window in visualOrder(windows) { add(window, to: id, &pass) }
+            } else if !windows.isEmpty {
+                pass.effects.append(.log("same-Space census not adopted"))
+            }
             pass.layout.insert(id)
             pass.persist = true
             return
@@ -374,14 +400,15 @@ extension World {
         case .trusted: break
         case .empty where group.windows.isEmpty || (settled && deferred?.key == key): break
         case .mixed where settled, .invalid where settled:
-            if let from = group.space { groups[id]!.phase = .settled(from) }
+            groups[id]!.phase = group.space.map(SpacePhase.settled) ?? .unknown(deferred: nil)
             pass.effects.append(.log("\(verdict) space census dropped after settle"))
             pass.layout.insert(id)
             return
         case .empty, .mixed, .invalid:
             if case .settled = group.phase { beginSpaceChange(group: id, &pass) }
             let since = deferred.flatMap { verdict != .empty || $0.key == key ? $0.since : nil } ?? pass.now
-            if let from = groups[id]!.space { groups[id]!.phase = .changing(from: from, deferred: DeferredCensus(key: key, since: since)) }
+            let pending = DeferredCensus(key: key, since: since)
+            groups[id]!.phase = groups[id]!.space.map { .changing(from: $0, deferred: pending) } ?? .unknown(deferred: pending)
             pass.effects.append(.log("\(verdict) space census deferred"))
             pass.effects.append(.requestCensus(group: id, after: since + EngineConfig.censusSettle - pass.now))
             return
@@ -391,13 +418,13 @@ extension World {
 
     private mutating func commitSpace(_ key: SpaceKey, epoch: UInt64, windows: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
         let departing = groups[id]!
-        if let saved = snapshot(departing, id: id, time: pass.now) { spaces.live[GroupSpace(group: id, space: saved.space)] = saved }
+        stash(departing, id: id, time: pass.now)
         beginSpaceChange(group: id, &pass)
         let match = spaces.lookup(group: id, space: key, windows: windows)
         if let match { spaces.adopt(match, as: key) }
         let display = topology.groups.first { $0.id == id }!
         let group = restoredGroup(display: display, config: config, key: key, epoch: epoch, windows: windows,
-                                  saved: match?.snapshot, identityOnly: match?.fromDisk ?? false, time: pass.now)
+                                  saved: match?.snapshot, time: pass.now)
         groups[id] = group
         var restore = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
         var source: FocusSource = .restore
@@ -411,20 +438,23 @@ extension World {
         pass.persist = true
     }
 
+    fileprivate mutating func stash(_ group: GroupState?, id: UInt32, time: Double) {
+        guard let group, let saved = snapshot(group, id: id, time: time), !saved.space.isEmpty else { return }
+        spaces.live[GroupSpace(group: id, space: saved.space)] = saved
+    }
+
     private func censusVerdict(_ windows: [ObservedWindow], group id: UInt32) -> CensusVerdict {
-        let otherTiles = Set(groups.filter { $0.key != id }.values.flatMap { $0.windows.keys })
-        guard Set(windows.map(\.id)).count == windows.count,
-              windows.allSatisfy({ $0.isValid && !otherTiles.contains($0.id) }) else { return .invalid }
+        guard Set(windows.map(\.id)).count == windows.count else { return .invalid }
         guard !windows.isEmpty else { return .empty }
         var fingerprints = spaces.live.values.filter { $0.group == id }.map(\.fingerprint)
         fingerprints.append(Set(groups[id]!.windows.keys.map(\.rawValue)))
         return spansMultipleSpaces(onScreenIDs: Set(windows.map { $0.id.rawValue }), knownFingerprints: fingerprints) ? .mixed : .trusted
     }
 
-    private mutating func syncMembership(_ windows: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
-        let present = Set(windows.map(\.id))
-        for tile in groups[id]!.windows.keys.ordered() where !present.contains(tile) { remove(tile, from: id, &pass) }
-        for window in visualOrder(windows) where groups[id]!.windows[window.id] == nil { add(window, to: id, &pass) }
+    private func listsOtherSpaces(_ windows: [ObservedWindow], group id: UInt32) -> Bool {
+        let group = groups[id]!
+        let newcomers = Set(windows.lazy.filter { group.windows[$0.id] == nil }.map(\.id.rawValue))
+        return spaces.live.contains { $0.key.group == id && $0.key.space != group.space && !$0.value.fingerprint.isDisjoint(with: newcomers) }
     }
 
     fileprivate mutating func onFrameCompleted(_ tile: TileID, revision: UInt64, result: FrameResult, _ pass: inout Pass) {
@@ -497,8 +527,8 @@ extension World {
                 }
                 for column in old.strip.columns { group.strip.insertColumn(column, at: pass.now, atIndex: group.strip.columns.count) }
                 groups[destination.id] = group
-            } else if let saved = snapshot(old, id: destination.id, time: pass.now) {
-                spaces.live[GroupSpace(group: destination.id, space: saved.space)] = saved
+            } else {
+                stash(old, id: destination.id, time: pass.now)
             }
         }
         pass.persist = true
@@ -532,26 +562,13 @@ extension World {
             }
         }
         guard pass.persist else { return }
-        for id in groups.keys.sorted() {
-            if let group = groups[id], let saved = snapshot(group, id: id, time: pass.now) {
-                spaces.live[GroupSpace(group: id, space: saved.space)] = saved
-            }
-        }
+        for id in groups.keys.sorted() { stash(groups[id], id: id, time: pass.now) }
         pass.effects.append(.persist(spaces))
     }
 }
 
-enum CensusVerdict: CustomStringConvertible {
+enum CensusVerdict {
     case trusted, empty, mixed, invalid
-
-    var description: String {
-        switch self {
-        case .trusted: "trusted"
-        case .empty: "empty"
-        case .mixed: "mixed"
-        case .invalid: "invalid"
-        }
-    }
 }
 
 extension Strip {
@@ -585,7 +602,7 @@ extension Sequence where Element == TileID {
     func ordered() -> [TileID] { sorted { $0.rawValue < $1.rawValue } }
 }
 
-private func shouldFloat(_ window: ObservedWindow, config: EngineConfig) -> Bool {
+func shouldFloat(_ window: ObservedWindow, config: EngineConfig) -> Bool {
     config.rules.last(where: { window.bundleID == $0.bundleID })?.floating ?? window.floating
 }
 
@@ -593,67 +610,11 @@ private func distance(_ lhs: CGRect, _ rhs: CGRect) -> Double {
     hypot(lhs.midX - rhs.midX, lhs.midY - rhs.midY)
 }
 
-private func visualOrder(_ windows: [ObservedWindow]) -> [ObservedWindow] {
+func visualOrder(_ windows: [ObservedWindow]) -> [ObservedWindow] {
     windows.sorted {
         let lhsX = $0.initialFrame?.rect.minX ?? 0
         let rhsX = $1.initialFrame?.rect.minX ?? 0
         if lhsX != rhsX { return lhsX < rhsX }
         return $0.id.rawValue < $1.id.rawValue
     }
-}
-
-private func removing(_ tile: TileID, from saved: Snapshot) -> Snapshot {
-    let columns = saved.columns.compactMap { column -> SnapshotColumn? in
-        let windows = column.windows.filter { $0.id != tile }
-        guard !windows.isEmpty else { return nil }
-        return SnapshotColumn(windows: windows, width: column.width, activeTileIndex: min(column.activeTileIndex, windows.count - 1),
-                              snapIndex: column.snapIndex, presetIndex: column.presetIndex, isFullWidth: column.isFullWidth)
-    }
-    return Snapshot(group: saved.group, space: saved.space, columns: columns, floating: saved.floating.filter { $0.id != tile },
-                    activeColumnIndex: min(saved.activeColumnIndex, max(0, columns.count - 1)), offset: saved.offset,
-                    focusedTile: saved.focusedTile == tile ? nil : saved.focusedTile)
-}
-
-private func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, epoch: UInt64, windows: [ObservedWindow],
-                           saved: Snapshot?, identityOnly: Bool, time: Double) -> GroupState {
-    var group = GroupState(display: display, config: config)
-    group.phase = .settled(key)
-    group.epoch = epoch
-    group.windows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
-    var unused = Set(windows.map(\.id))
-    var mappedIDs: [TileID: TileID] = [:]
-    let byID = windows.sorted { $0.id.rawValue < $1.id.rawValue }
-    func match(_ window: ObservedWindow) -> ObservedWindow? {
-        let sameID = identityOnly ? nil : byID.first { $0.id == window.id && unused.contains($0.id) }
-        let candidate = sameID ?? byID.first { WindowIdentity($0) == WindowIdentity(window) && unused.contains($0.id) }
-        if let candidate { unused.remove(candidate.id); mappedIDs[window.id] = candidate.id }
-        return candidate
-    }
-    if let saved {
-        for column in saved.columns {
-            let matched = column.windows.compactMap { match($0) }
-            let tiled = matched.filter { !shouldFloat($0, config: config) }
-            for window in matched where shouldFloat(window, config: config) { group.floating.insert(window.id) }
-            guard !tiled.isEmpty else { continue }
-            var restored = Column(tiles: tiled.map(\.id), width: column.width)
-            let active = mappedIDs[column.windows[column.activeTileIndex].id]
-            restored.activeTileIndex = tiled.firstIndex(where: { $0.id == active }) ?? min(column.activeTileIndex, tiled.count - 1)
-            restored.presetIndex = column.presetIndex.flatMap { group.strip.widthPresets.indices.contains($0) ? $0 : nil }
-            restored.isFullWidth = column.isFullWidth
-            group.strip.insertColumn(restored, at: time, atIndex: group.strip.columns.count)
-            group.strip.snapIndices[group.strip.columns.count - 1] = min(column.snapIndex, max(0, group.strip.snapPoints.count - 1))
-        }
-        for window in saved.floating { if let match = match(window) { group.floating.insert(match.id) } }
-    }
-    for window in visualOrder(windows) where unused.contains(window.id) {
-        if shouldFloat(window, config: config) { group.floating.insert(window.id) }
-        else { group.strip.insertColumn(Column(tiles: [window.id], width: group.strip.defaultWidth), at: time, atIndex: group.strip.columns.count) }
-    }
-    group.strip.activeColumnIndex = min(saved?.activeColumnIndex ?? 0, max(0, group.strip.columns.count - 1))
-    group.strip.viewOffset = .static(saved?.offset ?? 0)
-    if let oldFocus = saved?.focusedTile, let focused = mappedIDs[oldFocus] {
-        group.focus = .resolved(FocusDecision(tile: focused, source: .restore, time: time))
-    }
-    group.strip.recalculateWidths(at: time)
-    return group
 }

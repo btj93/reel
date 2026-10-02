@@ -667,7 +667,7 @@ struct Harness {
     }
     section("probe 5: persist keeps unvisited disk Spaces") {
         var h = Harness()
-        let unvisited = Snapshot(group: 1, space: .skylight(99), columns: [SnapshotColumn(windows: [window(50)], width: .fixed(400))])
+        let unvisited = Snapshot(group: 1, space: .skylight(99), columns: [SnapshotColumn(windows: [window(50, bundle: "other.app")], width: .fixed(400))])
         h.send(.loadSnapshots([unvisited]))
         h.census(10, [window(1)])
         let payload: [Snapshot] = h.effects.compactMap { effect -> [Snapshot]? in if case .persist(let book) = effect { return book.persisted }; return nil }.last ?? []
@@ -917,6 +917,10 @@ struct FuzzStream {
             h.send(.pointer(.menu(pick(actions)!)), group: id)
         case 8: h.send(.windowRemoved(tile), group: id)
         case 9:
+            if rng.next(4) == 0, let known = group.windows[tile] {
+                h.send(.windowAdded(ObservedWindow(id: known.id, pid: known.pid, bundleID: known.bundleID, title: "retitled-\(rng.next(9))")), group: id)
+                break
+            }
             nextID += 1
             h.send(.windowAdded(window(nextID, bundle: rng.next(2) == 0 ? nil : "fuzz", floating: rng.next(4) == 0)), group: id)
         case 10:
@@ -930,7 +934,10 @@ struct FuzzStream {
         case 12:
             priorScopes.append(h.world.scope(for: id)!)
             nextID += 1
-            h.census(UInt64(100 + rng.next(4)), [window(nextID)], group: id)
+            var windows = [window(nextID)]
+            if rng.next(3) == 0 { windows.append(ObservedWindow(id: TileID(nextID + 5000), pid: 1, bundleID: nil, initialFrame: AXRect(.zero))) }
+            if rng.next(3) == 0, let foreign = h.world.groups.first(where: { $0.key != id })?.value.windows.values.first { windows.append(foreign) }
+            h.census(UInt64(100 + rng.next(4)), windows, group: id)
         case 13: h.send(.windowRemoved(tile), group: id, scope: pick(priorScopes)!)
         case 14: h.send(.command(.toggleFloating(tile), .ipc), group: id)
         case 15:
@@ -950,7 +957,9 @@ struct FuzzStream {
         case 24: h.send(.ipc(id: UInt64(rng.next(1000)), command: rng.next(2) == 0 ? .focus(tile) : .close(tile)), group: id)
         case 25: h.send(.query(id: UInt64(rng.next(1000))), group: id)
         case 26: h.send(.loadSnapshots(h.world.spaces.persisted), group: id)
-        case 27: h.census(rng.next(2) == 0 ? UInt64(100 + rng.next(4)) : 10, [], group: id)
+        case 27:
+            if rng.next(3) == 0 { h.send(.spaceChanged(key: .fingerprint([]), epoch: epoch, windows: []), group: id) }
+            else { h.census(rng.next(2) == 0 ? UInt64(100 + rng.next(4)) : 10, [], group: id) }
         case 28, 29:
             let saved = h.world.spaces.live.values.filter { $0.group == id }.sorted { $0.space.debugDescription < $1.space.debugDescription }
             guard let visit = pick(saved) else { h.send(.tick, group: id); break }
@@ -965,7 +974,10 @@ struct FuzzStream {
         if case .crossing = after?.focus { reached["dock crossing", default: 0] += 1 }
         if after?.space != before.space, (after?.strip.columns.count ?? 0) > 1 { reached["multi-column restore", default: 0] += 1 }
         if h.world.groups.count != before.groups { reached["group added or removed", default: 0] += 1 }
-        if case .gesture = h.world.pointer, case .animation = after?.strip.viewOffset { reached["gesture during animation", default: 0] += 1 }
+        if after?.space == .fingerprint([]) { reached["empty fingerprint key", default: 0] += 1 }
+        if h.effects.contains(where: { if case .log(let line) = $0 { return line.hasPrefix("census window dropped") }; return false }) {
+            reached["census window dropped", default: 0] += 1
+        }
     }
 }
 
@@ -980,7 +992,8 @@ struct FuzzStream {
             check(violations.isEmpty, "seed=\(seed) step=\(step): \(violations)")
             if !violations.isEmpty { break }
         }
-        let states = ["fingerprint key", "dock crossing", "multi-column restore", "group added or removed"]
+        let states = ["fingerprint key", "dock crossing", "multi-column restore", "group added or removed",
+                      "empty fingerprint key", "census window dropped"]
         print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
     }
