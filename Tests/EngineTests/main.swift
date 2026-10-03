@@ -1620,6 +1620,24 @@ struct FuzzStream {
         separate.census(20, [window(3)])
         check(tiles(separate, 1) == [3], "and its saved strip restores")
     }
+    section("R5 topology: an unplugged display's columns go to the nearest strip; other strips keep their view") {
+        var h = Harness(displays: [display(), display(2, x: 1000), display(3, x: 2000)])
+        h.census(10, [window(1)])
+        h.census(20, [window(2)], group: 2)
+        h.census(30, [window(5)], group: 3)
+        h.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)])))
+        check(tiles(h, 2) == [2, 5] && tiles(h, 1) == [1], "the rightmost display's columns join the middle strip: \(tiles(h, 1)) | \(tiles(h, 2))")
+        var scrolled = Harness(gestureSnap: false)
+        scrolled.census(10, (1...5).map { window($0) })
+        scrolled.send(.pointer(.beginGesture(TileID(1))))
+        scrolled.send(.pointer(.delta(-170)))
+        scrolled.send(.pointer(.endGesture))
+        let view = scrolled.offset
+        scrolled.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)])))
+        check(scrolled.offset == view, "plugging in another display leaves this strip's view: \(view) -> \(scrolled.offset)")
+        scrolled.send(.topologyChanged(topology(2, [display()])))
+        check(scrolled.world.groups.keys.sorted() == [1, 2], "a topology of the same revision is dropped")
+    }
     section("R5 topology keeps every window: saved strips of the Space shown now, and empty Spaces") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(100, [window(5)])
@@ -1715,7 +1733,7 @@ struct FuzzStream {
         check(narrow.columnData[0].cachedWidth == 1000, "and the narrow display for a column on it")
     }
     section("R5 focus up and down: the nearest strip in that direction") {
-        var h = Harness(displays: [display(), display(2, y: 830), display(3, y: -830), display(4, y: 1660)], separateSpaces: false)
+        var h = Harness(displays: [display(), display(2, y: 1660), display(3, y: -830), display(4, y: 830)], separateSpaces: false)
         h.census(10, [window(1)])
         h.census(10, [window(2)], group: 2)
         h.census(10, [window(3)], group: 3)
@@ -1723,9 +1741,9 @@ struct FuzzStream {
         h.send(.command(.focus(TileID(1)), .keyboard))
         check(h.world.activeGroup == 1, "the newest focus decides the active group")
         let down = h.send(.command(.focusDown, .keyboard), group: 1)
-        check(h.world.activeGroup == 2 && down.contains { if case .focus(TileID(2), .keyboard) = $0 { return true }; return false },
-              "focus-down lands on the strip right below")
-        h.send(.command(.focusUp, .keyboard), group: 2)
+        check(h.world.activeGroup == 4 && down.contains { if case .focus(TileID(4), .keyboard) = $0 { return true }; return false },
+              "focus-down lands on the strip right below, whatever the display ids")
+        h.send(.command(.focusUp, .keyboard), group: 4)
         check(h.world.activeGroup == 1, "focus-up comes back, not past it")
         h.send(.command(.focusUp, .keyboard), group: 1)
         check(h.world.activeGroup == 3, "and goes on up")
