@@ -48,6 +48,8 @@ struct Harness {
     var reduceCPU: Duration = .zero
     /// Restores that asked the OS for focus from a group other than the one commands acted on.
     var stolenFocus = 0
+    /// Events after which a group's `focusedAt` moved back.
+    var rewoundFocus = 0
 
     init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [Display] = [display()],
          separateSpaces: Bool = true) {
@@ -74,7 +76,9 @@ struct Harness {
         let cpu = threadCPUTime()
         let start = ContinuousClock.now
         let leader = world.activeGroup
+        let focusedAt = world.groups.mapValues(\.focusedAt)
         effects = reduce(&world, event, now: time)
+        if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
         if event.scope.group != leader, effects.contains(where: { if case .focus(_, .restore) = $0 { true } else { false } }) { stolenFocus += 1 }
         reduceTime += start.duration(to: .now)
         reduceCPU += threadCPUTime() - cpu
@@ -3493,6 +3497,7 @@ struct FuzzStream {
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
         check(stream.reached["mixed read frozen", default: 0] == 0, "seed=\(seed) every settled mixed fingerprint read commits within the bound")
         check(stream.reached["window lost on a topology change", default: 0] == 0, "seed=\(seed) no topology change loses a window")
+        check(stream.h.rewoundFocus == 0, "seed=\(seed) a group's focusedAt never moves back: \(stream.h.rewoundFocus)")
         check(stream.h.stolenFocus == 0, "seed=\(seed) only the group commands act on restores OS focus: \(stream.h.stolenFocus)")
     }
 }

@@ -112,7 +112,9 @@ extension World {
         cancelTimers(group: id, &pass, focusOnly: true)
         let local = intent.source == .appActivation && group.windows.values.contains { $0.pid == intent.pid }
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
-        if let previous = group.focus.decision, previous.source.protectsFocus, pass.now - previous.time < EngineConfig.focusDebounce { return }
+        // A report this soon after a focus Reel made, here or on the display commands act on, is stale.
+        let recent = [group.focus.decision, activeGroup.flatMap { groups[$0]?.focus.decision }].compactMap { $0 }
+        if recent.contains(where: { $0.source.protectsFocus && pass.now - $0.time < EngineConfig.focusDebounce }) { return }
         guard let tile = intent.tile else { return }
         if group.windows[tile] != nil { schedule(.focus(intent), delay: EngineConfig.focusDebounce, &pass) }
         else if group.hidden[tile] != nil { groups[id]!.focus = .crossing(intent: intent, time: pass.now, previous: group.focus.decision) }
@@ -148,6 +150,7 @@ extension World {
             group.strip.columns[index].activeTileIndex = group.strip.columns[index].tiles.firstIndex(of: tile)!
         }
         group.focus = .resolved(FocusDecision(tile: tile, source: intent.source, time: quietSince ?? pass.now))
+        group.focusedAt = max(group.focusedAt, quietSince ?? pass.now)
         groups[id] = group
         if intent.source != .axFocus, quietSince == nil {
             pass.effects.append(.focus(tile: tile, source: intent.source))
@@ -583,6 +586,7 @@ extension World {
         let live = if case .live? = match?.source { true } else { false }
         var group = restoredGroup(display: display, config: config, key: key, epoch: epoch, windows: windows,
                                   saved: match?.snapshot, hidesMissing: live, time: pass.now)
+        group.focusedAt = departing.focusedAt
         // A saved window another display holds now, on screen or hidden, is that display's.
         group.hidden = group.hidden.filter { tile, _ in !groups.contains { $0.key != id && ($0.value.windows[tile] != nil || $0.value.hidden[tile] != nil) } }
         groups[id] = group

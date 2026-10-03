@@ -96,8 +96,6 @@ public final class Loop {
         observer.start(timeout: 1.5) { [weak self] in
             guard let self else { return }
             world.groups.keys.sorted().forEach(census(group:))
-            // Each census restored a focus; the real one decides which group commands act on.
-            reportFrontmostFocus()
             spaces.start()
         }
     }
@@ -174,6 +172,8 @@ public final class Loop {
         let epoch = (world.groups[group]?.epoch ?? 0) + 1
         logLine("loop: census group=\(group) key=\(key.debugDescription) windows=\(windows.count)")
         send(.spaceChanged(key: key, epoch: epoch, windows: windows), group: group)
+        // A display that restored quietly may now hold the OS focus, whose report came while its window was unknown.
+        reportFrontmostFocus()
     }
 
     /// Only strips whose display now shows another Space are torn down and read again, so a switch on one display

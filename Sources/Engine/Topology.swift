@@ -230,7 +230,7 @@ extension World {
         if group.space == nil, let donor = arrivals.first(where: { $0.source.space != nil })?.source {
             group.phase = donor.phase
             group.epoch = donor.epoch
-            if kept == nil { group.focus = donor.focus }
+            if kept == nil { (group.focus, group.focusedAt) = (donor.focus, donor.focusedAt) }
         }
         let active = (kept ?? arrivals.first?.source)?.strip.activeColumn?.activeTile
         group.strip = GroupState(display: display, config: config).strip

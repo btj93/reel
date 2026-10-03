@@ -154,6 +154,9 @@ public struct GroupState: Sendable {
     public internal(set) var phase: SpacePhase = .unknown(deferred: nil)
     public internal(set) var epoch: UInt64 = 0
     public internal(set) var focus: FocusState = .none
+    /// When the user or the OS last focused a window here. It only moves forward: a close, a hide or an empty Space
+    /// clears the decision, not this.
+    public internal(set) var focusedAt = -Double.infinity
     /// Windows whose app hid, or that minimized, with the place they left. A Space change stashes them with the strip;
     /// a close forgets them.
     public internal(set) var hidden: [TileID: HiddenTile] = [:]
@@ -309,10 +312,11 @@ public struct World: Sendable {
         EventScope(topologyRevision: stamp.revision, group: group, spaceEpoch: stamp.epochs[group] ?? .max)
     }
 
-    /// The group commands act on: the one holding the newest focus decision, else the leftmost.
+    /// The group commands act on: the one focused last, else the leftmost.
     public var activeGroup: UInt32? {
-        let decided = groups.compactMap { id, group in group.focus.decision.map { (id: id, time: $0.time) } }
-        return decided.max { $0.time != $1.time ? $0.time < $1.time : $0.id > $1.id }?.id ?? topology.groups.first?.id
+        let focused = groups.filter { $0.value.focusedAt > -.infinity }
+        return focused.max { $0.value.focusedAt != $1.value.focusedAt ? $0.value.focusedAt < $1.value.focusedAt : $0.key > $1.key }?.key
+            ?? topology.groups.first?.id
     }
 
     public func owner(of tile: TileID) -> UInt32? { groups.first { $0.value.windows[tile] != nil }?.key }
@@ -394,6 +398,7 @@ public struct World: Sendable {
             if strip.columnData.contains(where: { !$0.cachedWidth.isFinite || $0.cachedWidth <= 0 }) { errors.append("invalid width") }
             if strip.snapIndices.contains(where: { !strip.snapPoints.indices.contains($0) }) { errors.append("invalid snap index") }
             if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
+            if let decision = group.focus.decision, decision.time > group.focusedAt { errors.append("group \(id): focus decision newer than focusedAt") }
             if group.space == nil, !group.windows.isEmpty { errors.append("windows without a Space") }
             if group.hidden.keys.contains(where: { tile in groups.values.contains { $0.windows[tile] != nil } }) { errors.append("hidden window managed") }
             if let deferred = group.phase.deferred, !deferred.key.isAuthoritative, deferred.settledReads >= EngineConfig.censusReads {
