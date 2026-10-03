@@ -324,7 +324,6 @@ public struct World: Sendable {
         switch kind {
         case .windowAdded(let window): return owner(of: window.id) ?? home(window) ?? activeGroup
         case .windowRemoved(let id), .windowMoved(let id, _), .frameCompleted(let id, _, _): tile = id
-        case .windowsHidden(let ids): tile = ids.first { owner(of: $0) != nil }
         case .focus(let intent) where intent.tile == nil:
             return groups.keys.sorted().first { id in groups[id]!.windows.values.contains { $0.pid == intent.pid } } ?? activeGroup
         case .focus(let intent): tile = intent.tile
