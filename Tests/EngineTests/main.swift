@@ -1884,7 +1884,7 @@ struct FuzzStream {
               "[[rules]] bundle_id and floating")
         let defaults = try? AppConfig.parse("")
         check(defaults?.engine.gap == EngineConfig.defaultGap && defaults?.indicator.style == .ring && defaults?.engine.raiseHeight == 0
-              && defaults?.keys[.focusLeft] == "alt-h" && ["focus_up", "focus_down"].compactMap { name in defaults?.keys.first { $0.key.rawValue == name }?.value } == ["alt-k", "alt-j"],
+              && defaults?.keys[.focusLeft] == "alt-h" && defaults?.keys[.focusUp] == "alt-k" && defaults?.keys[.focusDown] == "alt-j",
               "an empty file gives the defaults")
         let ring = try? AppConfig.parse("[indicator]\nstyle = \"ring\"\nraise_height = 24")
         check(ring?.engine.raiseHeight == 0, "raise_height lowers columns only in raise style")

@@ -351,6 +351,8 @@ bounce_damping_ratio = 0.6
 [keys]
 focus_left = ""
 focus_right = ""
+focus_up = ""
+focus_down = ""
 move_left = ""
 move_right = ""
 cycle_width = ""
