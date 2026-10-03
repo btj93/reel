@@ -96,6 +96,8 @@ struct Harness {
         effects.compactMap { if case .setFrame(let request) = $0 { return request }; return nil }
     }
 
+    var persisted: Bool { effects.contains { if case .persist = $0 { return true }; return false } }
+
     var censusRequest: Double? {
         effects.lazy.compactMap { if case .requestCensus(_, let after) = $0 { return after }; return nil }.first
     }
@@ -132,6 +134,22 @@ struct Harness {
               "departing stash saved before the empty Space")
         h.census(10, [window(1), window(2)])
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(377), "departing layout survives bad census")
+        check(h.world.check().isEmpty, "census invariants")
+    }
+    section("2d4bb1d: a mixed read repeated past the settle keeps both Spaces' layouts") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.setWidth(TileID(1), 377), .ipc))
+        h.census(20, [window(3), window(4)])
+        h.send(.command(.setWidth(TileID(3), 333), .ipc))
+        h.census(30, [window(1), window(3)])
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(30, [window(1), window(3)])
+        h.census(10, [window(1), window(2)])
+        check(h.world.groups[1]!.space == .skylight(10) && h.censusRequest == nil, "returning to Space 10 is not deferred")
+        check(h.tiles == [TileID(1), TileID(2)] && h.widths.first == .fixed(377), "Space 10 keeps width 377")
+        h.census(20, [window(3), window(4)])
+        check(h.tiles == [TileID(3), TileID(4)] && h.widths.first == .fixed(333), "Space 20 keeps width 333")
         check(h.world.check().isEmpty, "census invariants")
     }
     section("c9d3e80 1aa4ede: Space-switch focus echoes cannot overwrite departing focus") {
@@ -825,6 +843,8 @@ struct Harness {
         check(reused.contains { if case .log(let line) = $0 { return line.contains("identity changed") }; return false },
               "a known id with a different owner is logged")
         check(h.world.groups[1]!.windows[TileID(1)]?.pid == 1, "a known id with a different owner is not refreshed")
+        h.send(.windowChanged(window(1, app: 77)))
+        check(h.world.groups[1]!.windows[TileID(1)]?.pid == 1, "windowChanged with a different owner does not refresh the live window")
     }
     section("Space census: in fingerprint mode an empty Space commits after its settle re-read") {
         var h = Harness()
@@ -940,12 +960,14 @@ struct Harness {
         h.census(10, [window(1), window(2)])
         let focused = h.world.groups[1]!.focus.decision?.tile
         let effects = h.send(.windowChanged(ObservedWindow(id: TileID(3), pid: 3, bundleID: "test.app", title: "renamed")), scope: old)
+        check(h.persisted, "a refreshed stash is persisted")
         check(h.tiles == [TileID(1), TileID(2)] && h.world.groups[1]!.focus.decision?.tile == focused, "stashed window stays on its Space")
         check(!effects.contains { if case .focus = $0 { return true }; if case .raise = $0 { return true }; return false },
               "stashed window is neither focused nor raised")
         check(h.world.spaces.lookupExact(group: 1, space: .skylight(20))?.windows.first?.title == "renamed", "the stash gets the new title")
         h.send(.windowChanged(ObservedWindow(id: TileID(3), pid: 99, bundleID: "test.app", title: "reused")))
         check(h.logged("identity changed tile=3"), "a stashed id with a different owner is logged")
+        check(!h.persisted, "nothing refreshed, nothing persisted")
         check(h.world.spaces.lookupExact(group: 1, space: .skylight(20))?.windows.first?.title == "renamed",
               "a stashed id with a different owner is not refreshed")
     }
@@ -1007,11 +1029,11 @@ struct Harness {
         h.advance(EngineConfig.censusSettle + margin)
         h.census(10, [window(1), window(2), window(3)])
         check(h.world.groups[1]!.space == .skylight(10) && Set(h.tiles) == [TileID(1), TileID(2), TileID(3)], "the settled read commits")
-        check(h.stash(20) == [TileID(4)], "the moved window leaves the old Space's stash")
         h.census(20, [window(4)])
-        check(h.tiles == [TileID(4)], "the old Space keeps the rest")
+        check(h.world.groups[1]!.space == .skylight(20) && h.tiles == [TileID(4)], "visiting the old Space shows the rest")
         h.census(10, [window(1), window(2), window(3)])
         check(h.world.groups[1]!.space == .skylight(10) && h.tiles.count == 3, "returning is a clean commit")
+        check(h.stash(20) == [TileID(4)], "the visit healed the old Space's stash")
     }
     section("Moved windows: a same-Space read listing a stashed window re-reads, then moves it") {
         var h = Harness()
@@ -1023,7 +1045,81 @@ struct Harness {
         h.advance(EngineConfig.censusSettle + margin)
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: read))
         check(Set(h.tiles) == [TileID(1), TileID(2), TileID(3), TileID(9)], "the settled read adopts the moved and the new window")
-        check(h.stash(20) == [TileID(4)] && h.world.groups[1]!.space == .skylight(10), "the moved window leaves the old stash")
+        h.census(20, [window(4)])
+        check(h.world.groups[1]!.space == .skylight(20) && h.tiles == [TileID(4)], "visiting the old Space shows the rest")
+    }
+    section("Moved windows: a stale same-Space read repeated past the settle costs gaps, not another Space's layout") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.send(.command(.setWidth(TileID(3), 333), .ipc))
+        h.census(10, [window(1), window(2)])
+        let stale = [window(3), window(4)]
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: stale))
+        h.advance(EngineConfig.censusSettle + margin)
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: stale))
+        h.census(20, [window(3), window(4)])
+        check(h.tiles == [TileID(3), TileID(4)] && h.widths.first == .fixed(333), "Space 20 keeps its layout")
+        h.census(10, [window(1), window(2)])
+        check(h.world.groups[1]!.space == .skylight(10) && h.tiles == [TileID(1), TileID(2)], "Space 10 heals on its next visit")
+    }
+    section("Moved windows: a window on all desktops costs at most one deferral") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.census(20, [window(3), window(4)])
+        h.send(.windowAdded(window(9)))
+        let switches: [(UInt64, [UInt32])] = [(10, [1, 2, 9]), (20, [3, 4, 9])]
+        var deferrals = 0
+        for step in 0..<6 {
+            let (space, ids) = switches[step % 2]
+            h.census(space, ids.map { window($0) })
+            if h.censusRequest != nil {
+                deferrals += 1
+                h.advance(EngineConfig.censusSettle + margin)
+                h.census(space, ids.map { window($0) })
+            }
+            check(h.world.groups[1]!.space == .skylight(space) && Set(h.tiles) == Set(ids.map(TileID.init)), "switch \(step) lands on \(space)")
+        }
+        check(deferrals <= 1, "at most one deferral across six switches, got \(deferrals)")
+    }
+    section("Moved windows: windowAdded for a known window leaves other Spaces alone") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(9)])
+        h.census(20, [window(3), window(4), window(9)])
+        let effects = h.send(.windowAdded(window(9)))
+        check(!effects.contains { if case .focus = $0 { return true }; if case .raise = $0 { return true }; return false },
+              "a known window is not focused again")
+        h.send(.windowAdded(window(9, app: 99)))
+        check(h.stash(10)?.contains(TileID(9)) == true, "the other Space keeps the window")
+        h.census(10, [window(1), window(2), window(9)])
+        check(h.world.groups[1]!.space == .skylight(10) && h.censusRequest == nil, "the next switch is not deferred")
+    }
+    section("Moved windows: a same-Space deferral keeps the swipe and pending focus") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        h.advance(EngineConfig.focusDebounce + margin)
+        var queued = h
+        h.send(.pointer(.beginGesture(TileID(1))))
+        h.send(.pointer(.delta(40)))
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
+        check(h.censusRequest != nil && h.gesture != nil, "the deferral keeps the swipe")
+        queued.send(.focus(FocusIntent(tile: TileID(2), source: .axFocus)))
+        queued.send(.spaceChanged(key: .skylight(10), epoch: queued.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
+        queued.advance(EngineConfig.focusDebounce + margin)
+        check(queued.world.groups[1]!.phase.isChanging && queued.world.groups[1]!.focus.decision?.tile == TileID(2),
+              "focus queued before the hold lands inside it")
+        queued.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
+        queued.advance(EngineConfig.focusDebounce + margin)
+        check(queued.world.groups[1]!.phase.isChanging && queued.world.groups[1]!.focus.decision?.tile == TileID(1),
+              "focus observed during the hold lands")
+        queued.advance(EngineConfig.censusSettle)
+        queued.send(.spaceChanged(key: .skylight(10), epoch: queued.world.groups[1]!.epoch + 1, windows: [window(1), window(2)]))
+        check(!queued.world.groups[1]!.phase.isChanging && queued.world.groups[1]!.focus.decision?.tile == TileID(1), "the re-read keeps it")
+        h.send(.windowAdded(window(8)))
+        check(h.logged("window add dropped during space change tile=8"), "a dropped windowAdded is logged")
+        h.advance(EngineConfig.censusSettle + margin)
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2)]))
+        check(h.tiles == [TileID(1), TileID(2)] && h.gesture != nil, "a re-read that changes nothing keeps the swipe")
     }
     section("Moved windows: TODO(R4) fingerprint mode cannot tell a moved window from a stale read") {
         var h = Harness()
