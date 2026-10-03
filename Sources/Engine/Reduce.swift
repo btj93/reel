@@ -274,6 +274,8 @@ extension World {
             return .accepted
         case .recover:
             return recover(group: id, &pass)
+        case .clearPositions:
+            return clearPositions(&pass)
         default:
             break
         }
@@ -339,8 +341,8 @@ extension World {
             guard group.windows[tile] != nil else { return .unknownWindow(tile) }
             pass.effects.append(.close(tile))
             return .accepted
-        case .recover, .release:
-            preconditionFailure("run handles recover and release")
+        case .recover, .release, .clearPositions:
+            preconditionFailure("run handles recover, release and clearPositions")
         }
         if recenter, !group.strip.columns.isEmpty {
             if case .gesture = group.strip.viewOffset {} else {
@@ -388,7 +390,7 @@ extension World {
             case .toggleFullWidth: targeted = .toggleFullWidth(session.tile)
             case .close: targeted = .close(session.tile)
             case .focus: targeted = .focus(session.tile)
-            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release: return
+            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release, .clearPositions: return
             }
             _ = run(targeted, source: .click, group: id, &pass)
         case .dropReorder(let requested):
@@ -667,6 +669,18 @@ extension World {
             appliedFrames.removeValue(forKey: tile)
         }
         pass.layout.insert(id)
+        return .accepted
+    }
+
+    /// Forget every saved strip, on disk and in this session. No pending work may save one again: a Space change still
+    /// in progress would stash the departing strip, so it refuses, and a debounced focus would save the strip it moves,
+    /// so it is cancelled. The empty book goes out at once; the strips on screen are saved again at their next change.
+    private mutating func clearPositions(_ pass: inout Pass) -> CommandOutcome {
+        guard !groups.values.contains(where: \.phase.isChanging) else { return .refused("space change in progress") }
+        for id in groups.keys.sorted() { cancelTimers(group: id, &pass, focusOnly: true) }
+        spaces = SpaceBook()
+        pass.effects.append(.persist(spaces))
+        pass.effects.append(.log("positions cleared"))
         return .accepted
     }
 

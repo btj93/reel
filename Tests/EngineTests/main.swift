@@ -2309,6 +2309,35 @@ struct FuzzStream {
         check(disk.tiles == [TileID(1), TileID(2)] && disk.world.groups[1]!.strip.columns[0].width == .fixed(300),
               "after a restart, a saved untitled window that now has its title tiles")
     }
+    section("73ef68d: clear-positions leaves nothing a pending capture can save again") {
+        var h = Harness()
+        h.send(.loadSnapshots([Snapshot(group: 1, space: .skylight(90), columns: [SnapshotColumn(windows: [window(9, bundle: "other.app")], width: .fixed(300))])]))
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.setWidth(TileID(1), 377), .ipc))
+        h.census(20, [window(3), window(4)])
+        h.send(.focus(FocusIntent(tile: TileID(4), source: .axFocus)), advance: 1)
+        let pending = h.world.timers.keys.first
+        check(pending != nil && h.world.spaces.persisted.count == 3, "a debounced focus is pending over a saved book")
+        h.send(.ipc(id: 7, command: .clearPositions))
+        check(h.effects.contains { if case .reply(7, .command(.accepted)) = $0 { return true }; return false }, "clear accepted")
+        let books = h.effects.compactMap { if case .persist(let book) = $0 { return book.persisted }; return nil }
+        check(books.count == 1 && books[0].isEmpty, "the empty book is persisted at once")
+        check(h.world.spaces.persisted.isEmpty && h.world.timers.isEmpty, "nothing saved, and the pending focus is cancelled")
+        var saved: [Effect] = []
+        if let pending { saved += h.send(.timer(pending), advance: EngineConfig.focusDebounce + margin) }
+        saved += h.send(.tick)
+        h.advance(1)
+        check(!saved.contains { if case .persist = $0 { return true }; return false } && h.world.spaces.persisted.isEmpty,
+              "the old timer and later ticks save nothing")
+        h.send(.command(.setWidth(TileID(3), 333), .ipc))
+        check(h.world.spaces.persisted.map(\.space) == [.skylight(20)], "a change after the clear saves only the strip on screen")
+        var changing = Harness()
+        changing.census(10, [window(1), window(2)])
+        changing.send(.spaceWillChange)
+        changing.send(.ipc(id: 8, command: .clearPositions))
+        check(changing.effects.contains { if case .reply(8, .command(.refused)) = $0 { return true }; return false }
+              && !changing.world.spaces.persisted.isEmpty, "a clear during a Space change is refused, since the commit would save the departing strip")
+    }
     try section("R4 codec: one versioned file; another version or shape is refused") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
