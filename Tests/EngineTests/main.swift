@@ -1753,6 +1753,30 @@ struct FuzzStream {
         check(joined.tiles == [TileID(5), TileID(6)] && joined.widths.last == .fixed(288),
               "a merged group finds the strip one of its displays saved alone")
     }
+    section("R5 replug: with separate Spaces a display finds the strips it saved before it was unplugged") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1)])
+        h.census(20, [window(3)], group: 2)
+        h.send(.command(.setWidth(TileID(3), 377), .ipc), group: 2)
+        h.census(21, [window(4)], group: 2)
+        h.send(.topologyChanged(topology(2, [display()])))
+        let disk = (try? SpaceBook.decode(SpaceBook.encode(h.world.spaces.persisted))) ?? []
+        h.send(.topologyChanged(topology(3, [display(), display(2, x: 1000)])))
+        h.census(20, [window(3)], group: 2)
+        check(tiles(h, 2) == [3] && h.world.groups[2]!.strip.columns.first?.width == .fixed(377), "display 2's saved strip restores after replug")
+        check(h.stash(20, group: 1) == nil && h.world.check().isEmpty, "the strip is saved once, under display 2: \(h.world.check())")
+        var restarted = Harness(displays: [display(), display(2, x: 1000)])
+        restarted.send(.loadSnapshots(disk))
+        restarted.census(30, [window(1)])
+        restarted.census(31, [window(3)], group: 2)
+        check(restarted.world.groups[2]!.strip.columns.first?.width == .fixed(377), "and after a restart from what was saved while it was gone")
+        var shared = Harness(displays: [display(), display(2, y: 830)], separateSpaces: false)
+        shared.census(10, [window(1)])
+        shared.census(20, [window(3)])
+        shared.census(10, [window(5)], group: 2)
+        shared.census(20, [window(6)], group: 2)
+        check(tiles(shared, 2) == [6] && shared.stash(20, group: 1) == [TileID(3)], "with shared Spaces each display keeps its own strip of a Space")
+    }
     section("R5 routing: events go to the group of their window, census windows to the display under them") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(10, [window(1)])
