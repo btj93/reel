@@ -26,8 +26,12 @@ func window(_ id: UInt32, app: Int32? = nil, bundle: String? = "test.app", float
                    initialFrame: x.map { AXRect(CGRect(x: $0, y: 30, width: 350, height: 600)) })
 }
 
-func display(_ id: UInt32 = 1, x: Double = 0) -> DisplayGroup {
-    DisplayGroup(id: id, displays: [id], frame: CGRect(x: x, y: 30, width: 1000, height: 800))
+func display(_ id: UInt32 = 1, x: Double = 0, y: Double = 0, width: Double = 1000) -> Display {
+    Display(id: id, frame: CGRect(x: x, y: y, width: width, height: 830), area: CGRect(x: x, y: y + 30, width: width, height: 800))
+}
+
+func topology(_ revision: UInt64, _ displays: [Display], separateSpaces: Bool = true) -> Topology {
+    Topology(revision: revision, displays: displays, separateSpaces: separateSpaces, primaryScreenHeight: 900)
 }
 
 func threadCPUTime() -> Duration {
@@ -43,8 +47,9 @@ struct Harness {
     var reduceTime: Duration = .zero
     var reduceCPU: Duration = .zero
 
-    init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [DisplayGroup] = [display()]) {
-        world = World(topology: Topology(revision: 1, groups: displays, primaryScreenHeight: 900),
+    init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [Display] = [display()],
+         separateSpaces: Bool = true) {
+        world = World(topology: topology(1, displays, separateSpaces: separateSpaces),
                       config: EngineConfig(animate: animate, gestureSnap: gestureSnap, rules: rules))
     }
 
@@ -303,11 +308,12 @@ struct Harness {
         h.send(.pointer(.openMenu(TileID(1))))
         let old = h.world.scope(for: 1)!
         let oldFrame = h.world.frames[TileID(1)]!
-        h.send(.topologyChanged(Topology(revision: 2, groups: [display()], primaryScreenHeight: 900)))
+        h.send(.topologyChanged(topology(2, [display()])))
         check(h.world.pointer.token == nil, "topology cancels overlay")
         check(Set(h.tiles) == Set([TileID(1), TileID(2)]), "hot-unplug migrates windows")
         let staleEffects = h.send(.windowRemoved(TileID(1)), scope: old)
-        check(staleEffects.isEmpty, "old-topology event produces no effects")
+        check(staleEffects.count == 1 && h.logged("stale topology revision dropped rev=1 current=2"),
+              "an old-topology event is dropped with one log line")
         h.send(.frameCompleted(tile: oldFrame.tile, revision: oldFrame.revision, result: .applied), scope: old)
         check(h.tiles.contains(TileID(1)), "old topology cannot remove current tile")
         check(h.world.appliedFrames[TileID(1)] == nil, "old topology cannot acknowledge frame")
@@ -355,12 +361,12 @@ struct Harness {
         check(h.offset == dropped, "slow free release does not snap or reuse old momentum")
     }
     section("2be34bd: secondary screen coordinate round trip and reorder at end") {
-        let group = display(2, x: -1000)
+        let topology = topology(1, [display(2, x: -1000)])
+        let group = topology.groups[0]
         let local = StripRect(CGRect(x: 100, y: 20, width: 300, height: 400))
         let global = axRect(viewportRect(local, offset: 50), on: group)
         check(global.rect.minX == -950 && global.rect.minY == 50, "local offset becomes global AX frame")
         check(stripRect(global, on: group, offset: 50) == local, "coordinate round trip")
-        let topology = Topology(revision: 1, groups: [group], primaryScreenHeight: 900)
         let appKit = screenRect(global, in: topology)
         check(appKit.rect.minY == 450, "screen wrapper uses AppKit bottom-left origin")
         check(axRect(appKit, in: topology) == global, "AppKit/AX round trip")
@@ -585,7 +591,7 @@ struct Harness {
         check(!h.requests.isEmpty, "config reload relayouts")
         h.send(.windowAdded(window(3)))
         check(h.world.groups[1]!.strip.columns.first { $0.tiles == [TileID(3)] }?.width == .proportion(0.4), "new columns use the reloaded width")
-        let bad = World(topology: Topology(revision: 4, groups: [DisplayGroup(id: 1, displays: [1], frame: .zero)], primaryScreenHeight: 900))
+        let bad = World(topology: topology(4, [Display(id: 1, frame: .zero, area: .zero)]))
         check(bad.groups.isEmpty && bad.topology.revision == 4, "zero-size display at launch does not trap")
     }
     section("d227a21: external focus stays quiet through momentum and its settle echo") {
@@ -1296,9 +1302,9 @@ struct Harness {
         check(effects.contains { if case .reply(5, .command(.refused)) = $0 { return true }; return false }, "stale IPC is refused, not dropped")
         let query = h.send(.query(id: 6), scope: old)
         check(query.contains { if case .reply(6, .snapshots) = $0 { return true }; return false }, "stale query still gets the snapshots")
-        let topology = h.world.scope(for: 1)!
-        h.send(.topologyChanged(Topology(revision: 2, groups: [display()], primaryScreenHeight: 900)))
-        let stale = h.send(.query(id: 7), scope: topology)
+        let before = h.world.scope(for: 1)!
+        h.send(.topologyChanged(topology(2, [display()])))
+        let stale = h.send(.query(id: 7), scope: before)
         check(stale.contains { if case .reply(7, .snapshots(let snapshots)) = $0 { return snapshots.isEmpty }; return false },
               "a query from an old topology gets an empty reply")
     }
@@ -1399,7 +1405,7 @@ struct FuzzStream {
         case 14: h.send(.command(.toggleFloating(tile), .ipc), group: id)
         case 15:
             let groups = rng.next(3) == 0 ? [display()] : [display(), display(2, x: Double(1000 + rng.next(100)))]
-            h.send(.topologyChanged(Topology(revision: h.world.topology.revision + 1, groups: groups, primaryScreenHeight: 900)), group: 1)
+            h.send(.topologyChanged(topology(h.world.topology.revision + 1, groups)), group: 1)
         case 16: h.send(.pointer(.beginReorder(tile)), group: id)
         case 17: h.send(.pointer(.dropReorder(rng.next(10) - 3)), group: id)
         case 18: h.send(.spaceWillChange, group: id)
@@ -2230,7 +2236,7 @@ struct FuzzStream {
         merged.census(10, [window(3)], group: 2)
         merged.send(.windowsHidden([TileID(1)]), group: 1)
         merged.send(.windowAdded(window(1)), group: 2)
-        merged.send(.topologyChanged(Topology(revision: 2, groups: [display(1)], primaryScreenHeight: 900)))
+        merged.send(.topologyChanged(topology(2, [display(1)])))
         check(merged.world.groups[1]!.windows[TileID(1)] != nil && merged.world.check().isEmpty,
               "a window hidden on one display and shown on another forgets its hidden place when the displays merge")
         var ruled = Harness(rules: [Rule(bundleID: "float.app", floating: true)])
@@ -2243,7 +2249,7 @@ struct FuzzStream {
         moved.send(.command(.toggleFloating(TileID(3)), .keyboard), group: 1)
         moved.send(.command(.focus(TileID(1)), .keyboard), group: 1, advance: 1)
         moved.send(.windowsHidden([TileID(2), TileID(3)]), group: 1, advance: 1)
-        moved.send(.topologyChanged(Topology(revision: 2, groups: [display(2)], primaryScreenHeight: 900)))
+        moved.send(.topologyChanged(topology(2, [display(2)])))
         moved.send(.windowAdded(window(2, app: 7)), group: 2)
         moved.send(.windowAdded(window(3, app: 7)), group: 2)
         moved.advance(1)
@@ -2306,7 +2312,7 @@ struct FuzzStream {
               "an interior focus never overshoots (\(start)->\(end), range \(samples.min()!)...\(samples.max()!))")
     }
     section("R3 frames: a layout that overflows to infinity is never written") {
-        var h = Harness(displays: [DisplayGroup(id: 1, displays: [1], frame: CGRect(x: 0, y: 30, width: 1e308, height: 800))])
+        var h = Harness(displays: [Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1e308, height: 830), area: CGRect(x: 0, y: 30, width: 1e308, height: 800))])
         let steps: [(String, Event.Kind)] = [("layout", .spaceChanged(key: .skylight(10), epoch: 1, windows: (1...4).map { window($0) })),
                                              ("release", .command(.release, .ipc))]
         for (name, kind) in steps {

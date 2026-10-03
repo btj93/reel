@@ -41,6 +41,11 @@ public struct DisplayInfo: Sendable {
         )
     }
 
+    /// The full display frame in CG coordinates (top-left origin), the space AX frames and cursor points live in.
+    public func cgFrame(primaryScreenHeight: CGFloat) -> CGRect {
+        CGRect(x: frame.minX, y: primaryScreenHeight - frame.maxY, width: frame.width, height: frame.height)
+    }
+
     public init(
         displayID: CGDirectDisplayID,
         frame: CGRect,

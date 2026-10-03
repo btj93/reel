@@ -30,26 +30,23 @@ public struct SpaceStorm: Sendable {
     }
 }
 
-/// Turns `activeSpaceDidChange` into one `spaceWillChange` per notification and one census per change, and names the
-/// Space a census read. Every notification tears the strip down, since a focus or swipe pending against it may be
-/// about to land on another Space (1aa4ede); a system Space (Mission Control, the Dock, Notification Center) is
-/// ignored, as it is not a place windows live.
+/// Turns `activeSpaceDidChange` into a `changed` call per notification, with the delay before the census, and names
+/// the Space a census read. The loop tears down each strip whose display now shows another Space, since a focus or
+/// swipe pending against it may be about to land there (1aa4ede); a system Space (Mission Control, the Dock,
+/// Notification Center) is ignored, as it is not a place windows live.
 @MainActor
 public final class SpaceObserver {
     private var storm = SpaceStorm()
     private var token: NSObjectProtocol?
     private var fallbackLogged = false
     private let clock: () -> Double
-    private let notify: () -> Void
-    private let census: (_ delay: Double) -> Void
+    private let changed: (_ delay: Double) -> Void
     private let log: (String) -> Void
 
-    /// `notify` sends `spaceWillChange`; `census` reads the Space now (delay 0) or after the churn settles.
-    public init(clock: @escaping () -> Double, notify: @escaping () -> Void, census: @escaping (_ delay: Double) -> Void,
-                log: @escaping (String) -> Void) {
+    /// `changed` tears down the strips concerned and reads their census now (delay 0) or after the churn settles.
+    public init(clock: @escaping () -> Double, changed: @escaping (_ delay: Double) -> Void, log: @escaping (String) -> Void) {
         self.clock = clock
-        self.notify = notify
-        self.census = census
+        self.changed = changed
         self.log = log
     }
 
@@ -68,16 +65,21 @@ public final class SpaceObserver {
 
     private func spaceDidChange() {
         if let space = SpaceIdentity.currentSpace(), !space.isUserSpace { return log("space: system Space ignored sid=\(space.sid)") }
-        notify()
         let delay = storm.notified(at: clock())
         if delay > 0 { log("space: storm, coalesced \(storm.coalesced) notification(s)") }
-        census(delay)
+        changed(delay)
+    }
+
+    /// The Space `display` shows. When every display shares one Space, a display SkyLight cannot name per display
+    /// shows the active one.
+    nonisolated public static func space(display: CGDirectDisplayID, shared: Bool) -> SpaceSnapshot? {
+        SpaceIdentity.currentSpace(displayID: display) ?? (shared ? SpaceIdentity.currentSpace() : nil)
     }
 
     /// The key for a census of `windows` on `display`: the window server's Space id, or the fingerprint of the read when
     /// SkyLight cannot answer. Nil for a system Space, which no strip belongs to.
-    public func key(display: CGDirectDisplayID, windows: [ObservedWindow]) -> SpaceKey? {
-        if let space = SpaceIdentity.currentSpace(displayID: display) {
+    public func key(display: CGDirectDisplayID, shared: Bool, windows: [ObservedWindow]) -> SpaceKey? {
+        if let space = Self.space(display: display, shared: shared) {
             fallbackLogged = false
             return space.isUserSpace ? space.key : nil
         }
@@ -87,8 +89,20 @@ public final class SpaceObserver {
     }
 
     /// The Space focus is observed on, stamped where the observation is made: an activation recorded on the departing
-    /// Space is a Dock click, one recorded on the destination is macOS arriving there (e3e6267). Nil without SkyLight.
-    nonisolated public static func observedSpace() -> SpaceKey? {
-        SpaceIdentity.currentSpace().flatMap { $0.isUserSpace ? $0.key : nil }
+    /// Space is a Dock click, one recorded on the destination is macOS arriving there (e3e6267). Read on the display
+    /// under `frame`, the focused window, when it is known, since separate Spaces give each display its own; else the
+    /// active Space. Nil without SkyLight.
+    nonisolated public static func observedSpace(at frame: CGRect? = nil) -> SpaceKey? {
+        let display = frame.flatMap { displayID(at: CGPoint(x: $0.midX, y: $0.midY)) }
+        let space = display.flatMap { SpaceIdentity.currentSpace(displayID: $0) } ?? SpaceIdentity.currentSpace()
+        return space.flatMap { $0.isUserSpace ? $0.key : nil }
+    }
+
+    /// The display under `point`, in CG coordinates. A window-server query, safe on any thread.
+    nonisolated public static func displayID(at point: CGPoint) -> CGDirectDisplayID? {
+        var display: CGDirectDisplayID = 0
+        var count: UInt32 = 0
+        guard CGGetDisplaysWithPoint(point, 1, &display, &count) == .success, count > 0 else { return nil }
+        return display
     }
 }

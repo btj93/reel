@@ -3,6 +3,7 @@ import Core
 import Engine
 import Foundation
 import IPC
+import Platform
 
 /// Maps `reel-msg` commands onto engine commands and read-only views of the world. The socket server runs each
 /// request on the main thread, which never waits on an app, so a hung app cannot stall a reply.
@@ -10,7 +11,7 @@ import IPC
 public final class IPCBridge {
     private let loop: Loop
     private let server = SocketServer()
-    public static let version = "next-r4"
+    public static let version = "next-r5"
 
     public init(loop: Loop) {
         self.loop = loop
@@ -40,7 +41,8 @@ public final class IPCBridge {
         case .toggleFloating: return onFocused(Command.toggleFloating)
         case .closeWindow: return onFocused(Command.close)
         case .recover: return reply(loop.recover())
-        case .focusUp, .focusDown: return ReelResponse(success: false, message: "one display until R5")
+        case .focusUp: return reply(loop.request(.focusUp))
+        case .focusDown: return reply(loop.request(.focusDown))
         case .listPositions: return json(Self.positions(loop.world.spaces.persisted))
         case .clearPositions:
             let outcome = loop.request(.clearPositions)
@@ -81,7 +83,7 @@ public final class IPCBridge {
     /// `slivered`: parked off screen, or stuck there.
     public static func layouts(world: World, active: UInt32, windows: [UInt32: (frame: CGRect, onScreen: Bool)]) -> [String: Any] {
         func entries(_ saved: Snapshot) -> [[String: Any]] {
-            let area = world.topology.groups.first { $0.id == saved.group }?.frame
+            let area = world.topology.group(id: saved.group)?.frame
             let columns = saved.columns.flatMap { column in column.windows.map { ($0, Optional(column)) } }
             return (columns + saved.floating.map { ($0, nil) }).map { window, column in
                 let now = windows[window.id.rawValue]
@@ -115,15 +117,8 @@ public final class IPCBridge {
 
     /// Where the window server has every window now, on any Space.
     private func windowServerFrames() -> [UInt32: (frame: CGRect, onScreen: Bool)] {
-        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return [:] }
-        var frames: [UInt32: (frame: CGRect, onScreen: Bool)] = [:]
-        for info in list {
-            guard let id = info[kCGWindowNumber as String] as? UInt32,
-                  let bounds = (info[kCGWindowBounds as String] as? NSDictionary).flatMap({ CGRect(dictionaryRepresentation: $0 as CFDictionary) })
-            else { continue }
-            frames[id] = (bounds, info[kCGWindowIsOnscreen as String] as? Bool ?? false)
-        }
-        return frames
+        Dictionary(windowInfo(onScreenOnly: false).map { ($0.windowID, (frame: $0.bounds, onScreen: $0.isOnScreen)) },
+                   uniquingKeysWith: { first, _ in first })
     }
 
     private func onFocused(_ command: (TileID) -> Command) -> ReelResponse {
@@ -159,14 +154,16 @@ public final class IPCBridge {
     }
 
     private func listWindows() -> [[String: Any]] {
-        let state = loop.world.groups[loop.group]
-        return (state?.windows.values.sorted { $0.id.rawValue < $1.id.rawValue } ?? []).map {
-            ["id": $0.id.rawValue, "pid": $0.pid, "bundleID": $0.bundleID ?? "", "title": $0.title,
-             "floating": state?.floating.contains($0.id) == true]
+        loop.world.groups.keys.sorted().flatMap { id in
+            let state = loop.world.groups[id]!
+            return state.windows.values.sorted { $0.id.rawValue < $1.id.rawValue }.map {
+                ["id": $0.id.rawValue, "pid": $0.pid, "bundleID": $0.bundleID ?? "", "title": $0.title,
+                 "floating": state.floating.contains($0.id), "groupID": id]
+            }
         }
     }
 
-    /// The shape the smoke harness reads: one active group with its columns, frames in CG coordinates.
+    /// The shape the smoke harness reads: every group with its displays and columns, frames in CG coordinates.
     public static func layout(world: World, active: UInt32, now: Double) -> [String: Any] {
         let now = max(now, world.time)
         let groups: [[String: Any]] = world.topology.groups.compactMap { display in
@@ -194,10 +191,11 @@ public final class IPCBridge {
                 return entry
             }
             return [
-                "groupID": [display.id], "isActive": display.id == active,
-                "regions": [["displayID": display.id, "minX": display.frame.minX, "minY": display.frame.minY,
-                             "maxX": display.frame.maxX, "maxY": display.frame.maxY,
-                             "width": display.frame.width, "height": display.frame.height]],
+                "groupID": display.displays.map(\.id), "isActive": display.id == active,
+                "regions": display.displays.map { member in
+                    ["displayID": member.id, "minX": member.area.minX, "minY": member.area.minY, "maxX": member.area.maxX,
+                     "maxY": member.area.maxY, "width": member.area.width, "height": member.area.height]
+                },
                 "viewPos": strip.viewPos(at: now), "workingAreaMinX": display.frame.minX, "workingAreaWidth": display.frame.width,
                 "gap": strip.gap, "activeColumnIndex": strip.activeColumnIndex,
                 "space": state.space?.debugDescription ?? NSNull(), "spaceEpoch": state.epoch,

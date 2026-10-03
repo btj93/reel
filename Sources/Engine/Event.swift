@@ -42,6 +42,8 @@ func appBundles(_ windows: [ObservedWindow]) -> Set<String> { Set(windows.compac
 
 public enum Command: Sendable {
     case focusLeft, focusRight
+    /// The active window of the nearest strip above or below, across independent groups.
+    case focusUp, focusDown
     case focus(TileID)
     case moveLeft, moveRight
     case setWidth(TileID, Double)
@@ -55,6 +57,13 @@ public enum Command: Sendable {
     case release
     /// Forget every saved strip, in this session and on disk.
     case clearPositions
+
+    var tile: TileID? {
+        switch self {
+        case .focus(let tile), .setWidth(let tile, _), .toggleFullWidth(let tile), .toggleFloating(let tile), .close(let tile): tile
+        default: nil
+        }
+    }
 }
 
 public enum PointerInput: Sendable {
@@ -66,6 +75,13 @@ public enum PointerInput: Sendable {
     case beginReorder(TileID)
     case dropReorder(Int)
     case cancel
+
+    var tile: TileID? {
+        switch self {
+        case .beginGesture(let tile), .openMenu(let tile), .beginReorder(let tile): tile
+        default: nil
+        }
+    }
 }
 
 public enum FrameResult: Sendable {
@@ -99,7 +115,7 @@ public struct Event: Sendable {
 
         var isGlobal: Bool {
             switch self {
-            case .topologyChanged, .configChanged, .loadSnapshots, .query, .windowChanged: true
+            case .topologyChanged, .configChanged, .loadSnapshots, .query, .windowChanged, .tick: true
             default: false
             }
         }
