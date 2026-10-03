@@ -580,9 +580,12 @@ extension World {
         let live = if case .live? = match?.source { true } else { false }
         var group = restoredGroup(display: display, config: config, key: key, epoch: epoch, windows: windows,
                                   saved: match?.snapshot, hidesMissing: live, time: pass.now)
-        // A saved window another display holds now is that display's.
-        group.hidden = group.hidden.filter { tile, _ in owner(of: tile).map { $0 == id } ?? true }
+        // A saved window another display holds now, on screen or hidden, is that display's.
+        group.hidden = group.hidden.filter { tile, _ in !groups.contains { $0.key != id && ($0.value.windows[tile] != nil || $0.value.hidden[tile] != nil) } }
         groups[id] = group
+        for other in groups.keys where other != id {
+            for window in windows { groups[other]!.hidden[window.id] = nil }
+        }
         var restore = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
         var source: FocusSource = .restore
         // Only an activation of an app with no window here is a Dock click across Spaces; a focus held for a hidden
@@ -705,6 +708,8 @@ extension World {
                 stash(state, id: old.id, time: pass.now)
                 continue
             }
+            // Its strip on screen moves with its windows, so its own saved copy would list them twice.
+            if next.group(id: old.id) == nil, let space = state.space { spaces.live[GroupSpace(group: old.id, space: space)] = nil }
             var routed: [UInt32: [Column]] = [home: []]
             for index in state.strip.columns.indices {
                 routed[destination(state.strip.regionForColumn(index, at: pass.now).displayID) ?? home, default: []]

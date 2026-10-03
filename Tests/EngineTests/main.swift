@@ -1347,8 +1347,28 @@ struct FuzzStream {
 
     mutating func pick<T>(_ values: [T]) -> T? { values.isEmpty ? nil : values[rng.next(values.count)] }
 
+    /// Merge, split, unplug, replug, resolution change and no display at all, with Spaces shared or separate.
+    mutating func reconfigure() {
+        let width = Double(1000 + rng.next(3) * 300)
+        let layouts: [[Display]] = [
+            [display()],
+            [display(width: width)],
+            [display(), display(2, x: 1000)],
+            [display(), display(2, x: Double(1000 + rng.next(2)))],
+            [display(), display(2, y: 830)],
+            [display(width: width), display(2, x: width), display(3, x: width + 1000, y: Double(rng.next(2) * 830))],
+            [display(2, x: 1000)],
+            [display(3, x: -1000), display(2, x: 1000), display()],
+            [],
+        ]
+        let next = topology(h.world.topology.revision + 1, pick(layouts)!, separateSpaces: rng.next(2) == 0)
+        h.send(.topologyChanged(next), scope: EventScope(topologyRevision: h.world.topology.revision, group: 0, spaceEpoch: 0))
+        if next.groups.contains(where: { $0.displays.count > 1 }) { reached["merged group", default: 0] += 1 }
+        if next.groups.isEmpty { reached["no display", default: 0] += 1 }
+    }
+
     mutating func step() {
-        let id = pick(h.world.groups.keys.sorted())!
+        guard let id = pick(h.world.groups.keys.sorted()) else { return reconfigure() }
         let group = h.world.groups[id]!
         let tile = pick(group.windows.keys.sorted { $0.rawValue < $1.rawValue }) ?? TileID(99999)
         let epoch = group.epoch + 1
@@ -1397,15 +1417,13 @@ struct FuzzStream {
         case 12:
             priorScopes.append(h.world.scope(for: id)!)
             nextID += 1
-            var windows = [window(nextID)]
+            var windows = [window(nextID, x: rng.next(2) == 0 ? nil : Double(rng.next(3000) - 1000))]
             if rng.next(3) == 0 { windows.append(ObservedWindow(id: TileID(nextID + 5000), pid: 1, bundleID: nil, initialFrame: AXRect(.zero))) }
             if rng.next(3) == 0, let foreign = h.world.groups.first(where: { $0.key != id })?.value.windows.values.first { windows.append(foreign) }
             h.census(UInt64(100 + rng.next(4)), windows, group: id)
         case 13: h.send(.windowRemoved(tile), group: id, scope: pick(priorScopes)!)
         case 14: h.send(.command(.toggleFloating(tile), .ipc), group: id)
-        case 15:
-            let groups = rng.next(3) == 0 ? [display()] : [display(), display(2, x: Double(1000 + rng.next(100)))]
-            h.send(.topologyChanged(topology(h.world.topology.revision + 1, groups)), group: 1)
+        case 15: reconfigure()
         case 16: h.send(.pointer(.beginReorder(tile)), group: id)
         case 17: h.send(.pointer(.dropReorder(rng.next(10) - 3)), group: id)
         case 18: h.send(.spaceWillChange, group: id)
@@ -1413,7 +1431,7 @@ struct FuzzStream {
             let all = h.world.groups.values.flatMap { $0.windows.values }.sorted { $0.id.rawValue < $1.id.rawValue }
             let target = pick(all)
             h.send(.focus(FocusIntent(tile: target?.id, pid: target?.pid, source: .appActivation)), group: id)
-        case 20: h.send(.command(rng.next(2) == 0 ? .focusLeft : .focusRight, .keyboard), group: id)
+        case 20: h.send(.command(pick([.focusLeft, .focusRight, .focusUp, .focusDown])!, .keyboard), group: id)
         case 21: h.send(.command(rng.next(2) == 0 ? .moveLeft : .moveRight, .keyboard), group: id)
         case 22: h.send(.command(.cycleWidthPreset, .keyboard), group: id)
         case 23: h.send(.command(.toggleFullWidth(tile), .keyboard), group: id)
@@ -1507,6 +1525,224 @@ struct FuzzStream {
     }
 }
 
+
+@MainActor func displayTests() {
+    func tiles(_ h: Harness, _ group: UInt32) -> [UInt32] { h.world.groups[group]?.strip.columns.flatMap(\.tiles).map(\.rawValue) ?? [] }
+    func onDisplay(_ h: Harness, _ group: UInt32, _ display: UInt32) -> [UInt32] {
+        let strip = h.world.groups[group]!.strip
+        return strip.columns.indices.filter { strip.regionForColumn($0, at: h.time).displayID == display }
+            .flatMap { strip.columns[$0].tiles.map(\.rawValue) }
+    }
+    func valid(_ topology: Topology) -> Bool { World(topology: topology).check().isEmpty }
+
+    section("R5 topology: touching displays share a strip only when every display shows the same Space") {
+        let side = [display(), display(2, x: 1000)]
+        let shared = topology(1, side, separateSpaces: false)
+        check(shared.groups.map(\.id) == [1] && shared.groups[0].displays.map(\.id) == [1, 2], "side by side with shared Spaces: one group")
+        check(topology(1, side).groups.map(\.id) == [1, 2], "separate Spaces: one group per display")
+        check(topology(1, [display(), display(2, x: 1000.5)], separateSpaces: false).groups.count == 1, "edges within 0.5 px touch")
+        check(topology(1, [display(), display(2, x: 1001)], separateSpaces: false).groups.count == 2, "a 1 px gap splits")
+        check(topology(1, [display(), display(2, y: 830)], separateSpaces: false).groups.count == 2, "stacked displays split")
+        check(topology(1, [display(), display(2, x: 1000, y: 830)], separateSpaces: false).groups.count == 2,
+              "a corner without vertical overlap splits")
+        let chain = topology(1, [display(7, x: 2000), display(3), display(5, x: 1000)], separateSpaces: false)
+        check(chain.groups.map(\.id) == [3] && chain.groups[0].displays.map(\.id) == [3, 5, 7], "a chain of three: smallest id, left to right")
+        let swapped = topology(1, [display(2), display(1, x: 1000)], separateSpaces: false)
+        check(swapped.groups.map(\.id) == [1] && swapped.groups[0].displays.map(\.id) == [2, 1], "the id is the smallest display wherever it sits")
+        check(topology(1, [display(9, x: 1000), display(4, y: 830)]).groups.map(\.id) == [4, 9], "groups run left to right")
+        check([shared, chain, swapped, topology(1, side), topology(1, [display(), display(2, y: 830)])].allSatisfy(valid), "grouping invariants")
+    }
+    section("R5 merge: shared Spaces join side-by-side strips left to right, keeping hidden places and saved strips") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1), window(2)])
+        h.census(20, [window(3)], group: 2)
+        h.census(21, [window(4)], group: 2)
+        h.send(.windowsHidden([TileID(2)]))
+        h.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)], separateSpaces: false)))
+        check(h.world.groups.keys.sorted() == [1] && tiles(h, 1) == [1, 4], "one strip, left display first: \(tiles(h, 1))")
+        check(h.world.groups[1]!.hidden[TileID(2)] != nil, "the hidden place survives")
+        check(h.stash(20) == [TileID(3)] && h.world.spaces.live.keys.allSatisfy { $0.group == 1 }, "the other display's saved strip moves over")
+        check(h.world.spaces.lookupExact(group: 1, space: .skylight(21)) == nil, "the strip it had on screen is not saved twice")
+        check(h.world.check().isEmpty, "merge invariants: \(h.world.check())")
+        h.census(20, [window(3)])
+        check(tiles(h, 1) == [3], "its saved strip restores on the merged group")
+    }
+    section("R5 split: each column goes to the display it centers on") {
+        var h = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        h.census(10, (1...5).map { window($0) })
+        h.send(.command(.focus(TileID(3)), .keyboard))
+        h.send(.windowsHidden([TileID(5)]))
+        let left = onDisplay(h, 1, 1), right = onDisplay(h, 1, 2)
+        check(!left.isEmpty && !right.isEmpty, "the strip straddles the seam: \(left) | \(right)")
+        h.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)])))
+        check(tiles(h, 1) == left && tiles(h, 2) == right, "columns follow their display: \(tiles(h, 1)) | \(tiles(h, 2))")
+        check(h.world.groups[2]!.space == .skylight(10) && h.world.groups[1]!.hidden[TileID(5)] != nil,
+              "the new strip takes the Space; the hidden place stays with the group's own display")
+        check(h.world.check().isEmpty, "split invariants: \(h.world.check())")
+    }
+    section("R5 hot-plug: unplug keeps every column, replug regroups") {
+        var h = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        h.census(10, (1...5).map { window($0) })
+        let count = h.world.groups[1]!.strip.columns.count
+        h.send(.topologyChanged(topology(2, [display()], separateSpaces: false)))
+        check(h.world.groups[1]!.strip.columns.count == count && h.world.check().isEmpty, "unplug keeps the column count")
+        let frames = h.requests.map(\.frame.rect)
+        check(frames.count == 5 && frames.allSatisfy { $0.maxX > 0 && $0.minX < 1000 }, "every frame is on or parked at the remaining display")
+        h.send(.topologyChanged(topology(3, [display(), display(2, x: 1000)], separateSpaces: false)))
+        check(h.world.groups.keys.sorted() == [1] && h.world.groups[1]!.strip.groupArea.regions.count == 2, "replug regroups into one strip")
+        var replug = Harness(displays: [display(2, x: 1000)])
+        replug.census(20, [window(6)], group: 2)
+        replug.census(10, [window(7), window(8)], group: 2)
+        replug.send(.windowsHidden([TileID(8)]), group: 2)
+        replug.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)], separateSpaces: false)), group: 2)
+        check(replug.world.groups.keys.sorted() == [1] && tiles(replug, 1) == [7] && replug.world.groups[1]!.hidden[TileID(8)] != nil
+              && replug.stash(20) == [TileID(6)], "a smaller display plugged in takes over the strip, its hidden places and saved strips")
+        check(replug.world.check().isEmpty, "replug invariants: \(replug.world.check())")
+        var separate = Harness(displays: [display(), display(2, x: 1000)])
+        separate.census(10, [window(1)])
+        separate.census(20, [window(3)], group: 2)
+        separate.census(21, [window(4)], group: 2)
+        separate.send(.topologyChanged(topology(2, [display()])))
+        check(tiles(separate, 1) == [1, 4] && separate.stash(20) == [TileID(3)], "unplug with separate Spaces keeps the strip and saved strips")
+        separate.census(20, [window(3)])
+        check(tiles(separate, 1) == [3], "and its saved strip restores")
+    }
+    section("R5 headless: with no display every strip is saved until one returns") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.setWidth(TileID(1), 377), .ipc))
+        h.send(.topologyChanged(topology(2, [])))
+        check(h.world.groups.isEmpty && h.stash(10) == [TileID(1), TileID(2)] && h.world.check().isEmpty, "the strip is saved")
+        h.send(.topologyChanged(topology(3, [display()])), scope: EventScope(topologyRevision: 2, group: 0, spaceEpoch: 0))
+        h.census(10, [window(1), window(2)])
+        check(h.tiles == [TileID(1), TileID(2)] && h.widths.first == .fixed(377), "it restores when a display returns")
+    }
+    section("R5 resolution: a new size keeps the strip and fits the new area") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.send(.topologyChanged(topology(2, [display(width: 1600)])))
+        let half = ColumnWidth.proportion(0.5).resolve(workingAreaWidth: 1600, gap: h.world.config.gap)
+        check(h.tiles == [TileID(1), TileID(2)] && h.world.groups[1]!.strip.columnData.allSatisfy { $0.cachedWidth == half },
+              "proportional widths follow the new size: \(h.world.groups[1]!.strip.columnData.map(\.cachedWidth))")
+        check(h.requests.allSatisfy { $0.frame.rect.height == 800 && $0.frame.rect.width < 1600 }, "frames fit the new area")
+    }
+    section("R5 width: presets and full width resolve against the display the column centers on") {
+        var h = Harness(displays: [display(), display(2, x: 1000, width: 1600)], separateSpaces: false)
+        h.census(10, (1...4).map { window($0) })
+        h.send(.command(.focus(TileID(4)), .keyboard))
+        let strip = h.world.groups[1]!.strip
+        check(strip.regionForColumn(strip.activeColumnIndex, at: h.time).displayID == 2, "the focused column centers on the wide display")
+        h.send(.command(.cycleWidthPreset, .keyboard))
+        let gap = h.world.config.gap
+        let preset = EngineConfig.defaultWidthPresets[0]
+        let active = h.world.groups[1]!.strip
+        check(abs(active.columnData[active.activeColumnIndex].cachedWidth - ColumnWidth.proportion(preset).resolve(workingAreaWidth: 1600, gap: gap)) < 0.5,
+              "the preset resolves against 1600: \(active.columnData[active.activeColumnIndex].cachedWidth)")
+        h.send(.command(.toggleFullWidth(TileID(4)), .keyboard))
+        let full = h.world.groups[1]!.strip
+        check(full.columnData[full.activeColumnIndex].cachedWidth == 1600, "full width fills the display it centers on")
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.send(.command(.toggleFullWidth(TileID(1)), .keyboard))
+        let narrow = h.world.groups[1]!.strip
+        check(narrow.columnData[0].cachedWidth == 1000, "and the narrow display for a column on it")
+    }
+    section("R5 focus up and down: the nearest strip in that direction") {
+        var h = Harness(displays: [display(), display(2, y: 830), display(3, y: -830), display(4, y: 1660)], separateSpaces: false)
+        h.census(10, [window(1)])
+        h.census(10, [window(2)], group: 2)
+        h.census(10, [window(3)], group: 3)
+        h.census(10, [window(4)], group: 4)
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        check(h.world.activeGroup == 1, "the newest focus decides the active group")
+        let down = h.send(.command(.focusDown, .keyboard), group: 1)
+        check(h.world.activeGroup == 2 && down.contains { if case .focus(TileID(2), .keyboard) = $0 { return true }; return false },
+              "focus-down lands on the strip right below")
+        h.send(.command(.focusUp, .keyboard), group: 2)
+        check(h.world.activeGroup == 1, "focus-up comes back, not past it")
+        h.send(.command(.focusUp, .keyboard), group: 1)
+        check(h.world.activeGroup == 3, "and goes on up")
+        let top = h.send(.ipc(id: 9, command: .focusUp), group: 3)
+        check(top.contains { if case .reply(9, .command(.refused("no strip above"))) = $0 { return true }; return false }, "nothing above is refused")
+        check(h.world.route(.command(.focusDown, .keyboard)) == 3, "commands route to the active group")
+    }
+    section("R5 Spaces per display: a switch on one display leaves the other strip alone") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1), window(2)])
+        h.census(20, [window(3)], group: 2)
+        let first = h.world.groups[1]!
+        let frames = h.world.frames.filter { $0.key.rawValue < 3 }.mapValues(\.revision)
+        check(h.world.groupsOnAnotherSpace([1: .skylight(10), 2: .skylight(21)]) == [2], "only the display that changed Space is concerned")
+        check(h.world.groupsOnAnotherSpace([2: .skylight(21)]) == [1, 2], "a display SkyLight cannot name is concerned")
+        var written: [TileID] = []
+        written += h.send(.spaceWillChange, group: 2).compactMap { if case .setFrame(let r) = $0 { return r.tile }; return nil }
+        h.census(21, [window(4)], group: 2)
+        written += h.requests.map(\.tile)
+        check(!written.contains(TileID(1)) && !written.contains(TileID(2)), "no write reaches the other display's windows")
+        check(h.world.groups[1]!.epoch == first.epoch && h.world.groups[1]!.space == .skylight(10)
+              && h.world.frames.filter { $0.key.rawValue < 3 }.mapValues(\.revision) == frames, "its scope and frames stand")
+        check(h.world.groups[1]!.strip.viewOffset.current(at: h.time) == first.strip.viewOffset.current(at: h.time), "its view stands")
+    }
+    section("R5 persistence: a merged group finds its saved strips after a restart") {
+        var before = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        before.census(10, [window(1), window(2)])
+        before.send(.command(.setWidth(TileID(1), 377), .ipc))
+        let saved = (try? SpaceBook.decode(SpaceBook.encode(before.world.spaces.persisted))) ?? []
+        check(saved.map(\.group) == [1], "the merged group saves under its smallest display")
+        var after = Harness(displays: [display(2, x: 1000), display()], separateSpaces: false)
+        after.send(.loadSnapshots(saved))
+        after.census(99, [window(1), window(2)])
+        check(after.tiles == [TileID(1), TileID(2)] && after.widths.first == .fixed(377), "a restart restores the merged strip")
+        var alone = Harness(displays: [display(), display(2, x: 1000)])
+        alone.census(10, [window(1)])
+        alone.census(20, [window(5), window(6)], group: 2)
+        alone.send(.command(.setWidth(TileID(6), 288), .ipc), group: 2)
+        let disk = (try? SpaceBook.decode(SpaceBook.encode(alone.world.spaces.persisted))) ?? []
+        var joined = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        joined.send(.loadSnapshots(disk))
+        joined.census(77, [window(5), window(6)])
+        check(joined.tiles == [TileID(5), TileID(6)] && joined.widths.last == .fixed(288),
+              "a merged group finds the strip one of its displays saved alone")
+    }
+    section("R5 routing: events go to the group of their window, census windows to the display under them") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1)])
+        h.census(20, [window(3)], group: 2)
+        check(h.world.route(.focus(FocusIntent(tile: TileID(3), source: .axFocus))) == 2, "focus routes to the window's group")
+        check(h.world.route(.windowAdded(window(7, x: 1200))) == 2 && h.world.route(.windowAdded(window(8, x: 100))) == 1,
+              "a new window routes to the display under it")
+        check(h.world.routed([window(7, x: 1200), window(8, x: 100), window(9), window(1)], to: 2).map(\.id.rawValue) == [7, 9],
+              "a census takes windows on its display and frameless ones, never another group's")
+        h.census(10, [window(1), window(7, x: 1200)])
+        check(h.tiles == [TileID(1)], "a census never adopts a window on another display")
+        h.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus, observedSpace: .skylight(20))), group: 2)
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.world.groups[2]!.focus.decision?.tile == TileID(3), "focus observed on that display's own Space is honored")
+        h.send(.windowsHidden([TileID(3)]), group: 1)
+        check(h.world.groups[2]!.hidden[TileID(3)] != nil && h.world.trackedElsewhere.contains(3),
+              "a hide reaches the owning group, and the Observer keeps hearing the hidden window")
+    }
+    section("5753fc0: merge and split keep every display routed to its live group; config reaches every strip") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1)])
+        h.census(20, [window(2)], group: 2)
+        h.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)], separateSpaces: false)))
+        check(h.world.topology.group(of: 1)?.id == 1 && h.world.topology.group(of: 2)?.id == 1, "merge: both displays route to the merged group")
+        check(h.world.route(.command(.focus(TileID(2)), .keyboard)) == 1, "a window from the second display routes to the merged group")
+        let merged = h.world.scope(for: 1)!
+        h.send(.topologyChanged(topology(3, [display(), display(2, x: 1000)])))
+        check(h.world.topology.group(of: 1)?.id == 1 && h.world.topology.group(of: 2)?.id == 2, "split: each display routes to its own group")
+        h.send(.topologyChanged(topology(4, [display()])))
+        check(h.world.topology.group(of: 2) == nil && Set(h.tiles) == [TileID(1), TileID(2)], "unplug drops the display, not its windows")
+        h.send(.windowRemoved(TileID(1)), scope: merged)
+        check(h.logged("stale topology revision dropped") && h.tiles.contains(TileID(1)), "work stamped before the change is dropped and logged")
+        var config = Harness(displays: [display(), display(2, x: 1000)])
+        config.census(10, [window(1), window(2)])
+        config.census(20, [window(3), window(4)], group: 2)
+        config.send(.configChanged(EngineConfig(gap: 20, animate: false)))
+        let groups = Set(config.requests.map(\.scope.group))
+        check(groups == [1, 2], "a config reload relayouts every strip: \(groups)")
+    }
+}
 
 @MainActor func runtimeTests() {
     section("R3 config: every key parses into the schema") {
@@ -3022,7 +3258,7 @@ struct FuzzStream {
             check(violations.isEmpty, "seed=\(seed) step=\(step): \(violations)")
             if !violations.isEmpty { break }
         }
-        let states = ["hidden return", "fingerprint key", "dock crossing", "multi-column restore", "group added or removed",
+        let states = ["hidden return", "fingerprint key", "dock crossing", "multi-column restore", "group added or removed", "merged group", "no display",
                       "empty fingerprint key", "census window dropped", "hidden place stashed", "hidden place restored",
                       "stashed late title", "dock crossing honored", "positions cleared", "mixed read committed"]
         print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
@@ -3050,7 +3286,7 @@ struct FuzzStream {
 }
 
 MainActor.assumeIsolated {
-    do { try replayTests(); probeTests(); runtimeTests(); try spaceTests() }
+    do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests() }
     catch { check(false, "unexpected error: \(error)") }
     var seeds: [UInt64] = [0]
     for value in (environment["ENGINE_FUZZ_SEEDS"] ?? "").split(separator: ",") {
