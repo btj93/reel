@@ -2453,11 +2453,16 @@ struct FuzzStream {
         check(h.active == TileID(3) && h.world.groups[1]!.focus.decision?.source == .appActivation,
               "the re-read a settle later still focuses the clicked app's window")
     }
-    section("R4 fingerprint: a read still mixed a settle later commits only onto a known Space") {
+    section("R4 fingerprint: a read still mixed a settle later commits only onto a Space of this session") {
         var h = Harness()
         func fingerprint(_ ids: [UInt32]) {
-            h.send(.spaceChanged(key: .fingerprint(Set(ids)), epoch: h.world.groups[1]!.epoch + 1, windows: ids.map { window($0) }))
+            h.send(.spaceChanged(key: .fingerprint(Set(ids)), epoch: h.world.groups[1]!.epoch + 1,
+                                 windows: ids.map { window($0, bundle: $0 < 3 ? "a.app" : "b.app") }))
         }
+        h.send(.loadSnapshots([Snapshot(group: 1, space: .skylight(70), columns: [
+            SnapshotColumn(windows: [window(81, bundle: "a.app")], width: .fixed(300)),
+            SnapshotColumn(windows: [window(82, bundle: "b.app")], width: .fixed(300)),
+        ])]))
         fingerprint([1, 2])
         h.send(.command(.setWidth(TileID(1), 377), .ipc))
         fingerprint([3, 4])
