@@ -1,6 +1,7 @@
 import Core
 import Engine
 import Foundation
+import Runtime
 
 let environment = ProcessInfo.processInfo.environment
 let only = environment["ENGINE_ONLY"]?.lowercased() ?? ""
@@ -1312,7 +1313,7 @@ struct FuzzStream {
         let tile = pick(group.windows.keys.sorted { $0.rawValue < $1.rawValue }) ?? TileID(99999)
         let epoch = group.epoch + 1
         let before = (space: group.space, groups: h.world.groups.count)
-        switch rng.next(32) {
+        switch rng.next(35) {
         case 0: h.send(.command(.focus(tile), .ipc), group: id)
         case 1: h.send(.focus(FocusIntent(tile: tile, source: .axFocus)), group: id)
         case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keyboard), group: id)
@@ -1379,7 +1380,14 @@ struct FuzzStream {
             let key: SpaceKey = rng.next(2) == 0 ? .fingerprint(visit.fingerprint) : visit.space
             h.send(.spaceChanged(key: key.isEmpty ? .skylight(10) : key, epoch: epoch, windows: visit.windows), group: id)
         case 30: h.send(.pointer(.cancel), group: id)
-        case 31: h.send(.configChanged(EngineConfig(gap: Double(rng.next(20)), animate: rng.next(2) == 0, gestureSnap: rng.next(2) == 0)), group: id)
+        case 31: h.send(.configChanged(EngineConfig(gap: Double(rng.next(20)), animate: rng.next(2) == 0, gestureSnap: rng.next(2) == 0,
+                                                    snapPoints: pick([[.middle], [.left, .right], [.left, .middle, .right]])!,
+                                                    raiseHeight: Double(rng.next(3) * 10))), group: id)
+        case 32:
+            let frame = CGRect(x: Double(rng.next(2000) - 500), y: Double(rng.next(300)), width: Double(rng.next(1500)), height: 600)
+            h.send(.windowMoved(tile, AXRect(frame)), group: id)
+        case 33: h.send(.command(rng.next(4) == 0 ? .release : .recover, .ipc), group: id)
+        case 34: h.send(.ipc(id: UInt64(rng.next(1000)), command: .recover), group: id, scope: pick(priorScopes)!)
         default: h.send(.tick, group: id)
         }
         let after = h.world.groups[id]
@@ -1391,6 +1399,290 @@ struct FuzzStream {
         if h.effects.contains(where: { if case .log(let line) = $0 { return line.hasPrefix("census window dropped") }; return false }) {
             reached["census window dropped", default: 0] += 1
         }
+    }
+}
+
+
+@MainActor func runtimeTests() {
+    section("R3 config: every key parses into the schema") {
+        let text = """
+        [layout]
+        gap = 12
+        default_width = 0.4
+        width_presets = [0.25, 0.75, 1]
+        snap = ["left", "right"]
+
+        [animation]
+        enabled = false
+        stiffness = 500
+        damping_ratio = 0.8
+        bounce_distance = 30
+        bounce_damping_ratio = 0.5
+
+        [keys]
+        focus_left = "ctrl-h"
+        focus_right = "ctrl-l"
+        move_left = "ctrl-shift-h"
+        move_right = "ctrl-shift-l"
+        cycle_width = "ctrl-r"
+        toggle_full_width = "ctrl-f"
+        toggle_floating = ""
+        close_window = "ctrl-w"
+
+        [indicator]
+        style = "raise"
+        color = "#ff8800"
+        width = 4
+        corner_radius = 6
+        raise_height = 24
+
+        [[rules]]
+        bundle_id = "us.zoom.xos"
+        floating = true
+
+        [[rules]]
+        bundle_id = "com.apple.finder"
+        floating = false
+        """
+        guard let config = try? AppConfig.parse(text) else { return check(false, "full config parses") }
+        let engine = config.engine
+        check(engine.gap == 12 && engine.defaultWidth == 0.4, "layout.gap, layout.default_width")
+        check(engine.widthPresets == [0.25, 0.75, 1], "layout.width_presets")
+        check(engine.snapPoints == [.left, .right], "layout.snap")
+        check(!engine.animate && engine.scroll.stiffness == 500 && abs(engine.scroll.damping - 0.8 * 2 * sqrt(500 * engine.scroll.mass)) < 1e-9, "animation.enabled, stiffness, damping_ratio")
+        check(engine.bounceDistance == 30 && engine.bounceDampingRatio == 0.5, "animation.bounce_distance, bounce_damping_ratio")
+        check(config.keys[.focusLeft] == "ctrl-h" && config.keys[.focusRight] == "ctrl-l" && config.keys[.moveLeft] == "ctrl-shift-h"
+              && config.keys[.moveRight] == "ctrl-shift-l" && config.keys[.cycleWidth] == "ctrl-r"
+              && config.keys[.toggleFullWidth] == "ctrl-f" && config.keys[.toggleFloating] == "" && config.keys[.closeWindow] == "ctrl-w",
+              "every [keys] action")
+        check(config.indicator == IndicatorConfig(style: .raise, color: "#ff8800", width: 4, cornerRadius: 6, raiseHeight: 24),
+              "every [indicator] key")
+        check(engine.raiseHeight == 24, "raise style lowers unfocused columns by raise_height")
+        check(engine.rules == [Rule(bundleID: "us.zoom.xos", floating: true), Rule(bundleID: "com.apple.finder", floating: false)],
+              "[[rules]] bundle_id and floating")
+        let defaults = try? AppConfig.parse("")
+        check(defaults?.engine.gap == EngineConfig.defaultGap && defaults?.indicator.style == .ring && defaults?.engine.raiseHeight == 0
+              && defaults?.keys[.focusLeft] == "alt-h", "an empty file gives the defaults")
+        let ring = try? AppConfig.parse("[indicator]\nstyle = \"ring\"\nraise_height = 24")
+        check(ring?.engine.raiseHeight == 0, "raise_height lowers columns only in raise style")
+    }
+    section("R3 config: unknown keys and bad values are load errors that name the key") {
+        func error(_ text: String) -> String? {
+            do { _ = try AppConfig.parse(text); return nil } catch { return error.description }
+        }
+        check(error("gapp = 3") == "unknown key gapp", "unknown top-level key")
+        check(error("[layout]\ngapp = 3") == "unknown key layout.gapp", "unknown key in a section")
+        check(error("[keybindings]\nfocus_left = \"alt-h\"") == "unknown key keybindings", "the old schema's section is unknown")
+        check(error("[keys]\nfocus_up = \"alt-k\"") == "unknown key keys.focus_up", "an action this runtime lacks is unknown")
+        check(error("[[rules]]\napp_id = \"x\"\nfloating = true") == "unknown key rules[0].app_id", "unknown key in a rule")
+        check(error("[[rules]]\nbundle_id = \"x\"") == "rules[0] needs bundle_id and floating", "a rule needs both keys")
+        check(error("[layout]\ngap = -1") == "layout.gap must be a number >= 0.0", "negative gap")
+        check(error("[layout]\ngap = \"wide\"") == "layout.gap must be a number >= 0.0", "gap of the wrong type")
+        check(error("[layout]\ndefault_width = 1.5") == "layout.default_width must be a proportion in (0, 1]", "width above 1")
+        check(error("[layout]\nwidth_presets = [0.5, 0]") == "layout.width_presets must be a number > 0.0", "zero preset")
+        check(error("[layout]\nsnap = [\"centre\"]") == "layout.snap must be one of left, middle, right", "unknown snap point")
+        check(error("[animation]\nenabled = 1") == "animation.enabled must be true or false", "flag of the wrong type")
+        check(error("[animation]\nstiffness = 0") == "animation.stiffness must be a number > 0.0", "zero stiffness")
+        check(error("[indicator]\nstyle = \"glow\"") == "indicator.style must be one of none, ring, raise, flash", "unknown style")
+        check(error("[indicator]\ncolor = \"#12345\"") == "indicator.color must be \"auto\" or #RGB / #RRGGBB", "bad color")
+        check(error("layout = 3") == "layout must be a table", "a section that is not a table")
+        check(error("[layout\ngap = 3")?.hasPrefix("syntax:") == true, "a TOML syntax error")
+    }
+    section("R3 config: the smoke harness's ReelNext file parses") {
+        let smoke = """
+        [layout]
+        gap = 64
+        snap = ["middle"]
+
+        [animation]
+        enabled = true
+        stiffness = 800
+        damping_ratio = 1.0
+        bounce_distance = 40
+        bounce_damping_ratio = 0.6
+
+        [keys]
+        focus_left = ""
+        focus_right = ""
+        move_left = ""
+        move_right = ""
+        cycle_width = ""
+        toggle_full_width = ""
+        toggle_floating = ""
+        close_window = ""
+
+        [indicator]
+        style = "none"
+        """
+        let config = try? AppConfig.parse(smoke)
+        check(config?.engine.gap == 64 && config?.keys.values.allSatisfy(\.isEmpty) == true && config?.indicator.style == IndicatorStyle.none,
+              "Tests/Smoke/lib.sh write_test_config for ReelNext")
+    }
+    section("R3 config: a reload applies presets, snap points and springs to live strips") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2)])
+        h.send(.configChanged(EngineConfig(gap: 20, widthPresets: [0.25, 0.75], snapPoints: [.left, .middle], stiffness: 300,
+                                           bounceDistance: 10)))
+        let strip = h.world.groups[1]!.strip
+        check(strip.widthPresets == [.proportion(0.25), .proportion(0.75)] && strip.snapPoints == [.left, .middle], "presets and snap points")
+        check(strip.snapIndices.allSatisfy { $0 == strip.defaultSnapIndex }, "snap indices move to the new default")
+        check(strip.scrollSpringParams.stiffness == 300 && strip.bounceDistance == 10 && strip.gap == 20, "springs, bounce and gap")
+        h.send(.command(.cycleWidthPreset, .keyboard))
+        check(h.world.groups[1]!.strip.columnData[h.world.groups[1]!.strip.activeColumnIndex].cachedWidth == 250, "cycling uses the new presets")
+        check(h.world.check().isEmpty, "config invariants")
+    }
+    section("R3 scheduler: a cancelled token never delivers, and a stale owner is dropped") {
+        var now = 0.0
+        var delivered: [UInt64] = []
+        var censuses: [UInt32] = []
+        var live = EventScope(topologyRevision: 1, group: 1, spaceEpoch: 1)
+        let scheduler = Scheduler(clock: { now }, isCurrent: { $0 == live }, deliver: { job in
+            switch job {
+            case .event(let event): if case .timer(let token) = event.kind { delivered.append(token.rawValue) }
+            case .census(let group): censuses.append(group)
+            }
+        }, log: { _ in })
+        func timer(_ raw: UInt64, _ scope: EventScope = live) -> (Scheduler.Key, Scheduler.Job) {
+            (.engine(TimerToken(raw)), .event(Event(scope: scope, kind: .timer(TimerToken(raw)))))
+        }
+        for raw: UInt64 in [1, 2, 3] {
+            let (key, job) = timer(raw)
+            scheduler.schedule(key, deadline: Double(raw) * 0.1, owner: live, job: job)
+        }
+        scheduler.cancel(.engine(TimerToken(2)))
+        now = 0.15
+        scheduler.fire(now: now)
+        check(delivered == [1], "only the due token fires")
+        now = 1
+        scheduler.fire(now: now)
+        check(delivered == [1, 3], "the cancelled token never delivers")
+        scheduler.fire(now: 5)
+        check(delivered == [1, 3] && scheduler.pendingCount == 0, "a fired token delivers once")
+        let (key, job) = timer(4)
+        scheduler.schedule(key, deadline: 2, owner: live, job: job)
+        scheduler.schedule(.census(group: 1), deadline: 2, owner: live, job: .census(group: 1))
+        live = EventScope(topologyRevision: 1, group: 1, spaceEpoch: 2)
+        scheduler.fire(now: 3)
+        check(delivered == [1, 3] && censuses.isEmpty, "a token whose owner epoch moved on is dropped")
+        scheduler.schedule(.census(group: 1), deadline: 4, owner: live, job: .census(group: 1))
+        scheduler.schedule(.census(group: 1), deadline: 6, owner: live, job: .census(group: 1))
+        scheduler.fire(now: 5)
+        check(censuses.isEmpty && scheduler.pendingCount == 1, "a census request replaces the pending one")
+        scheduler.fire(now: 6)
+        check(censuses == [1], "the replacement census fires")
+    }
+    section("R3 echo: the written revision decides echo, never a clock") {
+        var ledger = EchoLedger()
+        let tile = TileID(7)
+        let first = CGRect(x: 100, y: 30, width: 500, height: 800)
+        let second = CGRect(x: 80, y: 30, width: 500, height: 800)
+        ledger.wrote(tile, revision: 1, frame: first)
+        ledger.wrote(tile, revision: 2, frame: second)
+        check(ledger.classify(tile, observed: second.offsetBy(dx: 0.4, dy: 0)) == .echo(revision: 2), "the app's rounding of our write is an echo")
+        check(ledger.classify(tile, observed: second) == .echo(revision: 2), "a second notification for the same write is an echo")
+        check(ledger.classify(tile, observed: first) == .foreign, "an older write is forgotten once a newer one echoed")
+        ledger.wrote(tile, revision: 3, frame: first)
+        ledger.wrote(tile, revision: 4, frame: second)
+        check(ledger.classify(tile, observed: first) == .echo(revision: 3), "a late echo of an earlier write in flight is still an echo")
+        check(ledger.classify(tile, observed: CGRect(x: 80, y: 30, width: 500, height: 620)) == .echo(revision: 4),
+              "a height the app chose is still our write")
+        let moved = CGRect(x: 300, y: 30, width: 500, height: 800)
+        check(ledger.classify(tile, observed: moved) == .foreign, "a frame we never wrote is the user")
+        ledger.wrote(tile, revision: 5, frame: second)
+        check(ledger.classify(tile, observed: moved) == .repeated, "an app that keeps refusing our frame is heard once")
+        check(ledger.classify(tile, observed: second) == .echo(revision: 5), "an accepted write clears the refusal")
+        check(ledger.classify(tile, observed: moved) == .foreign, "the same user frame later is heard again")
+        ledger.forget(tile)
+        check(ledger.classify(tile, observed: second) == .foreign, "a forgotten window has no echoes")
+        for revision in 10...(10 + UInt64(EchoLedger.history)) {
+            ledger.wrote(tile, revision: revision, frame: first.offsetBy(dx: Double(revision) * 10, dy: 0))
+        }
+        check(ledger.classify(tile, observed: first.offsetBy(dx: 100, dy: 0)) == .foreign, "history is bounded")
+    }
+    section("R3 user resize: the column adopts the width and the next layout keeps it") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        let request = h.world.frames[TileID(1)]!
+        let resized = CGRect(x: request.frame.rect.minX + 40, y: request.frame.rect.minY, width: 640, height: request.frame.rect.height)
+        h.send(.windowMoved(TileID(1), AXRect(resized)))
+        check(h.widths.first == .fixed(640) && h.world.groups[1]!.strip.columns[0].presetIndex == nil, "the column takes the user's width")
+        check(h.requests.first { $0.tile == TileID(1) }?.frame.rect.width == 640, "the window is rewritten at its new width")
+        check(h.requests.first { $0.tile == TileID(1) }?.frame.rect.minX == request.frame.rect.minX, "and back at its column's x")
+        h.send(.command(.focusRight, .keyboard))
+        h.send(.command(.focusLeft, .keyboard))
+        check(h.requests.allSatisfy { $0.tile != TileID(1) || $0.frame.rect.width == 640 }, "later layouts keep the width")
+        let moved = h.world.frames[TileID(1)]!.frame.rect.offsetBy(dx: 0, dy: 50)
+        h.send(.windowMoved(TileID(1), AXRect(moved)))
+        check(h.widths.first == .fixed(640) && h.requests.first { $0.tile == TileID(1) }?.frame.rect.minY == request.frame.rect.minY,
+              "a pure move keeps the width and puts the window back")
+        h.send(.windowMoved(TileID(1), AXRect(moved.insetBy(dx: -0.75, dy: 0))))
+        check(h.widths.first == .fixed(640), "a resize within the slop is rounding, not a new width")
+        h.send(.windowMoved(TileID(2), AXRect(CGRect(x: 0, y: 0, width: 5000, height: 500))))
+        check(h.world.groups[1]!.strip.columnData[1].cachedWidth == 1000, "a width wider than the screen is clamped")
+        h.send(.command(.toggleFloating(TileID(2)), .ipc))
+        h.send(.windowMoved(TileID(2), AXRect(CGRect(x: 10, y: 10, width: 300, height: 300))))
+        check(h.requests.isEmpty, "a floating window keeps the frame the user gave it")
+        h.send(.spaceWillChange)
+        h.send(.windowMoved(TileID(1), AXRect(CGRect(x: 10, y: 10, width: 300, height: 300))))
+        check(h.widths.first == .fixed(640) && h.requests.isEmpty, "a move during a Space change is ignored")
+        check(h.world.check().isEmpty, "user resize invariants")
+    }
+    section("R3 recover: every frame is written again") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.tick)
+        check(h.requests.isEmpty, "a settled strip writes nothing")
+        h.send(.command(.recover, .ipc))
+        check(Set(h.requests.map(\.tile)) == [TileID(1), TileID(2), TileID(3)], "recover rewrites every tiled window")
+        check(h.world.check().isEmpty, "recover invariants")
+    }
+    section("R3 release: quitting brings every off-screen window back on screen") {
+        var h = Harness()
+        h.census(10, (1...6).map { window($0) })
+        let area = h.world.topology.groups[0].frame
+        let offScreen = h.world.frames.values.filter { $0.frame.rect.intersection(area).width < 2 }.map(\.tile)
+        check(!offScreen.isEmpty, "a six-column strip hides some columns")
+        h.send(.command(.release, .ipc))
+        let released = Dictionary(uniqueKeysWithValues: h.requests.map { ($0.tile, $0.frame.rect) })
+        check(Set(released.keys) == Set(offScreen), "only off-screen windows move")
+        check(released.values.allSatisfy { area.contains($0) }, "each lands fully inside the working area")
+        check(Set(released.values.map(\.origin)).count == released.count, "cascaded, so none hides another exactly")
+    }
+    section("R3 raise style: unfocused columns sit lower, derived from the active column") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
+        h.census(10, [window(1), window(2)])
+        let top = h.world.topology.groups[0].frame.minY
+        func y(_ tile: UInt32) -> Double? { h.world.frames[TileID(tile)].map { Double($0.frame.rect.minY) } }
+        check(h.active == TileID(1) && y(1) == top && y(2) == top + 20, "the active column rises, the other falls")
+        h.send(.command(.focusRight, .keyboard))
+        check(y(2) == top && y(1) == top + 20, "focus moves the raise with it")
+        h.send(.configChanged(EngineConfig(animate: false)))
+        check(y(1) == top && y(2) == top, "turning raise off levels every column")
+        check(!h.world.needsTicks, "a settled strip needs no frame ticks")
+    }
+    section("R3 frame loop: needsTicks follows scroll and width springs") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.focusLeft, .keyboard))
+        check(h.world.needsTicks, "an animating strip asks for ticks")
+        for _ in 0..<200 { h.send(.tick, advance: 0.02) }
+        check(!h.world.needsTicks, "a settled strip lets the frame loop pause")
+        h.send(.command(.cycleWidthPreset, .keyboard))
+        check(h.world.needsTicks, "a width spring asks for ticks")
+    }
+    section("R3 lane 8: full width keeps the logical width, a preset cycle replaces it") {
+        var h = Harness()
+        h.census(10, [window(1)])
+        let before = h.world.groups[1]!.strip.columns[0].width
+        h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
+        check(h.world.groups[1]!.strip.columns[0].width == before, "full width keeps the logical width")
+        h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
+        check(h.world.groups[1]!.strip.columnData[0].cachedWidth == 500, "toggling back restores it")
+        h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
+        h.send(.command(.cycleWidthPreset, .ipc))
+        let column = h.world.groups[1]!.strip.columns[0]
+        check(!column.isFullWidth && column.width == .proportion(0.33), "a cycle leaves full width for the next preset")
     }
 }
 
@@ -1431,7 +1723,7 @@ struct FuzzStream {
 }
 
 MainActor.assumeIsolated {
-    do { try replayTests(); probeTests() }
+    do { try replayTests(); probeTests(); runtimeTests() }
     catch { check(false, "unexpected error: \(error)") }
     var seeds: [UInt64] = [0]
     for value in (environment["ENGINE_FUZZ_SEEDS"] ?? "").split(separator: ",") {

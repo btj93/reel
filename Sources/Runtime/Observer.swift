@@ -122,6 +122,8 @@ final class AppWorker: @unchecked Sendable {
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.restored(facts(window))) }
         case kAXMovedNotification, kAXResizedNotification:
             guard let id = windowID(for: element), let window = windows[id], case .success(let frame) = window.getFrame() else { return }
+            // Someone else sized the window, so the next write must set the size again, not just the position.
+            if lastSize[id] != frame.size { lastSize[id] = nil }
             post(.moved(id, frame))
         case kAXTitleChangedNotification:
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.retitled(facts(window))) }

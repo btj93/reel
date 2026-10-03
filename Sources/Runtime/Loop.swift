@@ -264,13 +264,14 @@ public final class Loop {
         paused = false
         send(.command(.release, .ipc))
         quitting = true
-        observer.stop()
         hotkeys.stop()
+        // Queued behind the release writes on each app thread, and ahead of the stop.
         let drained = DispatchGroup()
         for worker in observer.workers.values {
             drained.enter()
             worker.app.perform { drained.leave() }
         }
+        observer.stop()
         drained.notify(queue: .main) { exit(0) }
         Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { _ in exit(0) }
     }

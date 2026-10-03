@@ -36,7 +36,8 @@ DRY="${SMOKE_DRY_RUN:-0}"
 SMOKE_TAG="$$"
 
 BIN_DIR="$REPO_ROOT/.build/debug"
-BIN_REEL="$BIN_DIR/Reel"
+# BIN_REEL picks the binary under test: trunk Reel by default, `BIN_REEL=.build/debug/ReelNext` for the rewrite.
+BIN_REEL="${BIN_REEL:-$BIN_DIR/Reel}"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
 

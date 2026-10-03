@@ -22,6 +22,15 @@ public struct IndicatorConfig: Equatable, Sendable {
     public var width = 3.0
     public var cornerRadius = 10.0
     public var raiseHeight = 20.0
+
+    public init(style: IndicatorStyle = .ring, color: String = "auto", width: Double = 3, cornerRadius: Double = 10,
+                raiseHeight: Double = 20) {
+        self.style = style
+        self.color = color
+        self.width = width
+        self.cornerRadius = cornerRadius
+        self.raiseHeight = raiseHeight
+    }
 }
 
 public struct ConfigError: Error, Equatable, CustomStringConvertible {

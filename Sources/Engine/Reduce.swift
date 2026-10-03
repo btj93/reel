@@ -629,9 +629,10 @@ extension World {
         for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) where target.isOffScreen {
             guard let pid = group.windows[target.tileID]?.pid else { continue }
             let size = CGSize(width: min(target.frame.width, area.width), height: min(target.frame.height, area.height))
-            let offset = step.truncatingRemainder(dividingBy: max(1, min(area.width - size.width, area.height - size.height)))
+            let origin = CGPoint(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
+                                 y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)))
             step += 30
-            let frame = AXRect(CGRect(origin: CGPoint(x: area.minX + offset, y: area.minY + offset), size: size))
+            let frame = AXRect(CGRect(origin: origin, size: size))
             let request = FrameRequest(tile: target.tileID, pid: pid, frame: frame, revision: nextRevision(), scope: scope)
             frames[target.tileID] = request
             pass.effects.append(.setFrame(request))
