@@ -16,7 +16,9 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
         switch event.kind {
         case .ipc(let requestID, _): return [.reply(id: requestID, payload: .command(.refused("stale scope")))]
         case .query(let requestID): return [.reply(id: requestID, payload: .snapshots([]))]
-        default: return []
+        default:
+            guard event.scope.topologyRevision != world.topology.revision else { return [] }
+            return [.log("stale topology revision dropped rev=\(event.scope.topologyRevision) current=\(world.topology.revision)")]
         }
     }
     world.time = now
@@ -33,7 +35,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
         world.remove(tile, from: id, &pass)
         pass.persist = true
     case .windowsHidden(let tiles):
-        world.hide(tiles, from: id, &pass)
+        world.hide(tiles, &pass)
         pass.persist = true
     case .windowMoved(let tile, let frame): world.onWindowMoved(tile, frame: frame, group: id, &pass)
     case .focus(let intent): world.onFocusObserved(intent, group: id, &pass)
@@ -51,7 +53,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .spaceChanged(let key, let epoch, let windows): world.onSpaceChanged(key: key, epoch: epoch, windows: windows, group: id, &pass)
     case .frameCompleted(let tile, let revision, let result): world.onFrameCompleted(tile, revision: revision, result: result, &pass)
     case .timer(let token): world.onTimer(token, group: id, &pass)
-    case .tick: world.onTick(group: id, &pass)
+    case .tick: world.onTick(&pass)
     }
     world.flush(&pass)
     return pass.effects
@@ -67,7 +69,7 @@ extension World {
         return serial
     }
 
-    fileprivate mutating func cancelTimers(group: UInt32, _ pass: inout Pass, focusOnly: Bool = false) {
+    mutating func cancelTimers(group: UInt32, _ pass: inout Pass, focusOnly: Bool = false) {
         for token in timers.keys.sorted() {
             guard let work = timers[token], work.scope.group == group else { continue }
             if focusOnly, case .retryFrames = work.action { continue }
@@ -84,13 +86,13 @@ extension World {
         pass.effects.append(.schedule(token: token, deadline: deadline, event: Event(scope: scope, kind: .timer(token))))
     }
 
-    fileprivate mutating func invalidate(_ tile: TileID, _ pass: inout Pass) {
+    mutating func invalidate(_ tile: TileID, _ pass: inout Pass) {
         frames.removeValue(forKey: tile)
         appliedFrames.removeValue(forKey: tile)
         pass.effects.append(.invalidateFrame(tile: tile, revision: nextRevision()))
     }
 
-    fileprivate mutating func cancelPointer(_ pass: inout Pass) {
+    mutating func cancelPointer(_ pass: inout Pass) {
         switch pointer {
         case .gesture(let session):
             if var group = groups[session.scope.group] {
@@ -231,6 +233,7 @@ extension World {
         if group.space?.isEmpty == true { group.phase = .settled(.fingerprint([window.id.rawValue])) }
         group.windows[window.id] = window
         group.hidden.removeValue(forKey: window.id)
+        for other in groups.keys where other != id { groups[other]!.hidden[window.id] = nil }
         if let returning { group.putBack(window, from: returning, config: config, at: pass.now) }
         else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
@@ -279,6 +282,9 @@ extension World {
             return recover(group: id, &pass)
         case .clearPositions:
             return clearPositions(&pass)
+        case .focusUp, .focusDown:
+            if case .focusUp = command { return focusVertically(up: true, source: source, from: id, &pass) }
+            return focusVertically(up: false, source: source, from: id, &pass)
         default:
             break
         }
@@ -344,8 +350,8 @@ extension World {
             guard group.windows[tile] != nil else { return .unknownWindow(tile) }
             pass.effects.append(.close(tile))
             return .accepted
-        case .recover, .release, .clearPositions:
-            preconditionFailure("run handles recover, release and clearPositions")
+        case .recover, .release, .clearPositions, .focusUp, .focusDown:
+            preconditionFailure("run handles recover, release, clearPositions and vertical focus")
         }
         if recenter, !group.strip.columns.isEmpty {
             if case .gesture = group.strip.viewOffset {} else {
@@ -357,6 +363,17 @@ extension World {
         pass.layout.insert(id)
         pass.persist = true
         return .accepted
+    }
+
+    private mutating func focusVertically(up: Bool, source: FocusSource, from id: UInt32, _ pass: inout Pass) -> CommandOutcome {
+        let here = topology.group(id: id)!.frame.midY
+        let target = topology.groups.filter { up ? $0.frame.midY < here : $0.frame.midY > here }
+            .min { abs($0.frame.midY - here) < abs($1.frame.midY - here) }
+        guard let target else { return .refused(up ? "no strip above" : "no strip below") }
+        guard let group = groups[target.id], let tile = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile else {
+            return .refused("empty strip")
+        }
+        return run(.focus(tile), source: source, group: target.id, &pass)
     }
 
     fileprivate mutating func onPointer(_ input: PointerInput, token: PointerToken?, group id: UInt32, _ pass: inout Pass) {
@@ -393,7 +410,8 @@ extension World {
             case .toggleFullWidth: targeted = .toggleFullWidth(session.tile)
             case .close: targeted = .close(session.tile)
             case .focus: targeted = .focus(session.tile)
-            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release, .clearPositions: return
+            case .focusLeft, .focusRight, .focusUp, .focusDown, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release,
+                 .clearPositions: return
             }
             _ = run(targeted, source: .click, group: id, &pass)
         case .dropReorder(let requested):
@@ -488,10 +506,9 @@ extension World {
         guard let group = groups[id], !key.isEmpty || (observed.isEmpty && !key.isAuthoritative) else {
             return pass.effects.append(.log("space census without identity ignored"))
         }
-        let owned = Set(groups.filter { $0.key != id }.values.flatMap { $0.windows.keys })
-        func accepted(_ window: ObservedWindow) -> Bool { window.isValid && !owned.contains(window.id) }
-        let windows = observed.filter(accepted)
-        for window in observed where !accepted(window) {
+        let mine = Set(routed(observed, to: id).map(\.id))
+        let windows = observed.filter { $0.isValid && mine.contains($0.id) }
+        for window in observed where !window.isValid || owner(of: window.id).map({ $0 != id }) == true {
             pass.effects.append(.log("census window dropped tile=\(window.id.rawValue)"))
         }
         let verdict = censusVerdict(windows, group: id)
@@ -556,13 +573,18 @@ extension World {
         beginSpaceChange(group: id, &pass)
         let departing = groups[id]!
         stash(departing, id: id, time: pass.now)
-        let match = onto.flatMap { spaces.lookup(group: id, space: $0, windows: windows) }
+        let display = topology.group(id: id)!
+        let match = onto.flatMap { spaces.lookup(group: display, space: $0, windows: windows) }
         if let match { spaces.adopt(match, as: key) }
-        let display = topology.groups.first { $0.id == id }!
         let live = if case .live? = match?.source { true } else { false }
-        let group = restoredGroup(display: display, config: config, key: key, epoch: epoch, windows: windows,
+        var group = restoredGroup(display: display, config: config, key: key, epoch: epoch, windows: windows,
                                   saved: match?.snapshot, hidesMissing: live, time: pass.now)
+        // A saved window another display holds now, on screen or hidden, is that display's.
+        group.hidden = group.hidden.filter { tile, _ in !groups.contains { $0.key != id && ($0.value.windows[tile] != nil || $0.value.hidden[tile] != nil) } }
         groups[id] = group
+        for other in groups.keys where other != id {
+            for window in windows { groups[other]!.hidden[window.id] = nil }
+        }
         var restore = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
         var source: FocusSource = .restore
         // Only an activation of an app with no window here is a Dock click across Spaces; a focus held for a hidden
@@ -578,7 +600,7 @@ extension World {
         pass.persist = true
     }
 
-    private mutating func stash(_ group: GroupState?, id: UInt32, time: Double) {
+    mutating func stash(_ group: GroupState?, id: UInt32, time: Double) {
         guard let group, let saved = snapshot(group, id: id, time: time), !saved.space.isEmpty else { return }
         spaces.live[GroupSpace(group: id, space: saved.space)] = saved
     }
@@ -643,61 +665,23 @@ extension World {
         }
     }
 
-    fileprivate mutating func onTick(group id: UInt32, _ pass: inout Pass) {
-        guard var group = groups[id], !group.phase.isChanging else { return }
-        _ = group.strip.settleWidthAnimations(at: pass.now)
-        _ = group.strip.settleRaiseAnimations(at: pass.now)
-        if case .animation(let animation) = group.strip.viewOffset, animation.isDone(at: pass.now) {
-            group.strip.viewOffset = .static(animation.to)
-        }
-        if case .momentum(let scope, nil) = pointer, scope.group == id, !group.strip.viewOffset.isAnimating {
-            pointer = .momentum(scope, settledAt: pass.now)
-        }
-        groups[id] = group
-        pass.layout.insert(id)
-    }
-
-    fileprivate mutating func onTopology(_ next: Topology, _ pass: inout Pass) {
-        guard next.revision > topology.revision, next.isValid else { return }
-        cancelPointer(&pass)
-        for id in groups.keys.sorted() { cancelTimers(group: id, &pass) }
-        for tile in frames.keys.ordered() { invalidate(tile, &pass) }
-        let previous = groups
-        let previousTopology = topology
-        topology = next
-        groups = [:]
-        for display in next.groups {
-            var group = previous[display.id] ?? GroupState(display: display, config: config)
-            group.strip.groupArea = GroupState.area(for: display)
-            group.strip.recalculateWidths(at: pass.now)
-            if case .changing(let from, _) = group.phase { group.phase = .settled(from) }
-            group.focus = .none
-            groups[display.id] = group
-            pass.layout.insert(display.id)
-        }
-        for id in previous.keys.sorted() where groups[id] == nil {
-            guard let old = previous[id], let oldDisplay = previousTopology.groups.first(where: { $0.id == id }),
-                  let destination = next.groups.min(by: { distance($0.frame, oldDisplay.frame) < distance($1.frame, oldDisplay.frame) })
-            else { continue }
-            var group = groups[destination.id]!
-            if group.space == nil, let key = old.space {
-                group.phase = .settled(key)
-                group.epoch = old.epoch
+    /// Only strips still moving are laid out, so a frame tick costs nothing on displays at rest.
+    fileprivate mutating func onTick(_ pass: inout Pass) {
+        for id in groups.keys.sorted() {
+            guard var group = groups[id], !group.phase.isChanging else { continue }
+            let momentum = if case .momentum(let scope, nil) = pointer { scope.group == id } else { false }
+            guard group.isAnimating || momentum else { continue }
+            _ = group.strip.settleWidthAnimations(at: pass.now)
+            _ = group.strip.settleRaiseAnimations(at: pass.now)
+            if case .animation(let animation) = group.strip.viewOffset, animation.isDone(at: pass.now) {
+                group.strip.viewOffset = .static(animation.to)
             }
-            if group.space == old.space {
-                for window in old.windows.values.sorted(by: { $0.id.rawValue < $1.id.rawValue }) where group.windows[window.id] == nil {
-                    group.windows[window.id] = window
-                    group.hidden.removeValue(forKey: window.id)
-                    if old.floating.contains(window.id) { group.floating.insert(window.id) }
-                }
-                for column in old.strip.columns { group.strip.insertColumn(column, at: pass.now, atIndex: group.strip.columns.count) }
-                for (tile, hidden) in old.hidden where group.windows[tile] == nil && group.hidden[tile] == nil { group.hidden[tile] = hidden }
-                groups[destination.id] = group
-            } else {
-                stash(old, id: destination.id, time: pass.now)
+            if momentum, case .momentum(let scope, nil) = pointer, !group.strip.viewOffset.isAnimating {
+                pointer = .momentum(scope, settledAt: pass.now)
             }
+            groups[id] = group
+            pass.layout.insert(id)
         }
-        pass.persist = true
     }
 
     /// Forget what was written so the flush writes every frame again. Pending focus is left alone.
@@ -733,8 +717,14 @@ extension World {
     /// Release only walks the strip, so windows that leave it alive (their app hid, or one minimized) get their release
     /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them. Each one's
     /// column, or its floating, and its release frame are remembered.
-    fileprivate mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
-        hideOnSavedStrips(Set(tiles).filter { groups[id]?.windows[$0] == nil }, at: pass.now)
+    fileprivate mutating func hide(_ tiles: [TileID], _ pass: inout Pass) {
+        hideOnSavedStrips(Set(tiles).filter { owner(of: $0) == nil }, at: pass.now)
+        for id in groups.keys.sorted() where tiles.contains(where: { groups[id]!.windows[$0] != nil }) {
+            hide(tiles.filter { groups[id]!.windows[$0] != nil }, from: id, &pass)
+        }
+    }
+
+    private mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
         let writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
         for tile in tiles {
             guard let group = groups[id], let window = group.windows[tile] else { continue }
@@ -753,7 +743,7 @@ extension World {
     /// strip, as an absent window does on return, so the strip is still listed whole when the rest comes back on screen.
     private mutating func hideOnSavedStrips(_ tiles: Set<TileID>, at time: Double) {
         for (key, saved) in spaces.live where saved.windows.contains(where: { tiles.contains($0.id) }) {
-            guard let display = topology.groups.first(where: { $0.id == key.group }) else { continue }
+            guard let display = topology.group(id: key.group) else { continue }
             let rest = saved.windows.filter { !tiles.contains($0.id) }
             let group = restoredGroup(display: display, config: config, key: key.space, epoch: 0, windows: rest, saved: saved,
                                       hidesMissing: true, time: time)
@@ -768,10 +758,10 @@ extension World {
 
     /// Where quitting leaves each tile: off-screen ones come back on screen at their own size, cascaded so none hides
     /// another completely, and columns the raise style lowered, or whose last write failed, go to their full frame.
-    /// The cascade starts one step further for each hidden window, so successive hides do not stack exactly.
+    /// The cascade starts one step further for each hidden window, so successive hides do not stack exactly. Each
+    /// lands on the display of the group nearest where it was parked.
     private func releaseFrames(group id: UInt32, at time: Double) -> [(tile: TileID, pid: Int32, frame: AXRect)] {
-        guard let group = groups[id], let display = topology.groups.first(where: { $0.id == id }) else { return [] }
-        let area = display.frame
+        guard let group = groups[id], let display = topology.group(id: id) else { return [] }
         var step = 30 * Double(group.hidden.count)
         return computeTargetFrames(strip: group.strip, time: time).compactMap { target in
             guard let pid = group.windows[target.tileID]?.pid else { return nil }
@@ -780,6 +770,7 @@ extension World {
                 return config.raiseHeight > 0 || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
             }
             let size = target.frame.size
+            let area = display.displays.min { abs($0.area.midX - frame.rect.midX) < abs($1.area.midX - frame.rect.midX) }!.area
             defer { step += 30 }
             return (target.tileID, pid, AXRect(CGRect(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
                                                       y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)),
@@ -812,7 +803,7 @@ extension World {
     fileprivate mutating func flush(_ pass: inout Pass) {
         for id in pass.layout.sorted() {
             guard var group = groups[id], !group.phase.isChanging, let scope = scope(for: id),
-                  let display = topology.groups.first(where: { $0.id == id }) else { continue }
+                  let display = topology.group(id: id) else { continue }
             if config.raiseHeight > 0 {
                 group.strip.retargetRaise(height: config.raiseHeight, params: config.animate ? config.scroll : nil, at: pass.now)
                 groups[id] = group
@@ -893,10 +884,6 @@ func shouldFloat(_ window: ObservedWindow, config: EngineConfig) -> Bool {
 /// floated never had floating facts, so it stays.
 func joinsStrip(was old: ObservedWindow, now new: ObservedWindow, config: EngineConfig) -> Bool {
     shouldFloat(old, config: config) && !shouldFloat(new, config: config)
-}
-
-private func distance(_ lhs: CGRect, _ rhs: CGRect) -> Double {
-    hypot(lhs.midX - rhs.midX, lhs.midY - rhs.midY)
 }
 
 func visualOrder(_ windows: [ObservedWindow]) -> [ObservedWindow] {

@@ -148,6 +148,20 @@ func removing(_ ids: Set<UInt32>, from saved: Snapshot) -> Snapshot {
                     hidden: saved.hidden.filter { !ids.contains($0.window.id.rawValue) })
 }
 
+extension Snapshot {
+    /// This strip saved under `group`, after `existing`'s columns and hidden windows when that group saved this Space
+    /// too. A window `existing` already lists stays where it is there.
+    func moved(to group: UInt32, after existing: Snapshot?) -> Snapshot {
+        let rest = existing.map { removing($0.fingerprint.union($0.hidden.map(\.window.id.rawValue)), from: self) } ?? self
+        let base = existing.map { $0.columns.count + $0.hidden.filter { $0.width != nil }.count } ?? 0
+        return Snapshot(group: group, space: space, columns: (existing?.columns ?? []) + rest.columns,
+                        floating: (existing?.floating ?? []) + rest.floating,
+                        activeColumnIndex: existing?.activeColumnIndex ?? rest.activeColumnIndex, offset: existing?.offset ?? rest.offset,
+                        focusedTile: existing?.focusedTile ?? rest.focusedTile,
+                        hidden: (existing?.hidden ?? []) + rest.hidden.map { $0.placed(at: $0.place + base) })
+    }
+}
+
 func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
     func fresh(_ old: ObservedWindow) -> ObservedWindow { old.id == window.id ? window : old }
     let columns = saved.columns.map {

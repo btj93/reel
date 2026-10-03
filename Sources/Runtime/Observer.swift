@@ -39,9 +39,9 @@ enum Observation: Sendable {
 /// Space or topology change is dropped by `reduce` however late the main loop reads it.
 final class ScopeClock: @unchecked Sendable {
     private let lock = NSLock()
-    private var scope: EventScope?
+    private var scope: Stamp?
 
-    var current: EventScope? {
+    var current: Stamp? {
         get { lock.withLock { scope } }
         set { lock.withLock { scope = newValue } }
     }
@@ -87,7 +87,7 @@ public struct SizeCache {
 /// One app's AX state. `windows` and every AX call live on the app's `AXApp` thread; the main loop only queues work.
 final class AppWorker: @unchecked Sendable {
     let app: AXApp
-    private let send: @Sendable (Observation, EventScope?) -> Void
+    private let send: @Sendable (Observation, Stamp?) -> Void
     private let clock: ScopeClock
     private var windows: [CGWindowID: AXWindow] = [:]
     private var sizes = SizeCache()
@@ -99,7 +99,7 @@ final class AppWorker: @unchecked Sendable {
 
     var pid: Int32 { app.pid }
 
-    init(pid: Int32, bundleID: String?, clock: ScopeClock, send: @escaping @Sendable (Observation, EventScope?) -> Void) {
+    init(pid: Int32, bundleID: String?, clock: ScopeClock, send: @escaping @Sendable (Observation, Stamp?) -> Void) {
         app = AXApp(pid: pid, bundleIdentifier: bundleID)
         self.send = send
         self.clock = clock
@@ -173,7 +173,9 @@ final class AppWorker: @unchecked Sendable {
     func reportFocus(activation: Bool, space: SpaceKey?) {
         app.perform { [self] in
             let stamp = clock.current
-            send(.focused(pid: pid, app.focusedWindowID(), activation: activation, space: space), stamp)
+            let id = app.focusedWindowID()
+            let frame = activation ? nil : id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
+            send(.focused(pid: pid, id, activation: activation, space: activation ? space : SpaceObserver.observedSpace(at: frame)), stamp)
         }
     }
 
@@ -221,7 +223,9 @@ final class AppWorker: @unchecked Sendable {
         case kAXTitleChangedNotification:
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.retitled(facts(window))) }
         case kAXFocusedWindowChangedNotification:
-            post(.focused(pid: pid, windowID(for: element), activation: false, space: SpaceObserver.observedSpace()))
+            let id = windowID(for: element)
+            let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
+            post(.focused(pid: pid, id, activation: false, space: SpaceObserver.observedSpace(at: frame)))
         default: break
         }
     }
@@ -262,7 +266,7 @@ public final class Observer {
     private(set) var workers: [Int32: AppWorker] = [:]
     let allowedPids: Set<Int32>?
     private let executor: Executor
-    private let emit: (Event.Kind, EventScope?) -> Void
+    private let emit: (Event.Kind, Stamp?) -> Void
     let clock = ScopeClock()
     private let managed: () -> Set<CGWindowID>
     /// Windows the engine keeps off the current strip: hidden ones and every saved strip's, so a close there is heard.
@@ -281,7 +285,7 @@ public final class Observer {
 
     init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
          elsewhere: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
-         emit: @escaping (Event.Kind, EventScope?) -> Void, log: @escaping (String) -> Void) {
+         emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
@@ -430,7 +434,7 @@ public final class Observer {
     /// Facts that hold whatever the epoch (a window died, a write finished) go out under the current scope; what an
     /// app saw (a new window, a move, focus) keeps the scope it was observed under, and is dropped when it was seen
     /// with no scope at all (the health check and the next census pick the window up).
-    func receive(_ observation: Observation, stamp: EventScope?) {
+    func receive(_ observation: Observation, stamp: Stamp?) {
         func emitObserved(_ kind: Event.Kind) { if let stamp { emit(kind, stamp) } }
         switch observation {
         case .discovered(let pid, let windows):
@@ -464,8 +468,8 @@ public final class Observer {
             emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus,
                                             observedSpace: space)))
         case .wrote(let tile, let revision, let frame, let landed, let result):
-            executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
-            emit(.frameCompleted(tile: tile, revision: revision, result: result), nil)
+            let scope = executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
+            emit(.frameCompleted(tile: tile, revision: revision, result: result), scope.map(Stamp.init))
         }
     }
 }

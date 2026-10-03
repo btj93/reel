@@ -43,7 +43,8 @@ public func managedPidAllowlist(_ environment: [String: String] = ProcessInfo.pr
 @MainActor
 public final class Loop {
     public private(set) var world: World
-    public private(set) var group: UInt32
+    /// The group commands act on.
+    public var group: UInt32 { world.activeGroup ?? 0 }
     public private(set) var config = AppConfig()
     public private(set) var configError: String?
     public private(set) var paused = false
@@ -56,6 +57,7 @@ public final class Loop {
     private(set) var scheduler: Scheduler!
     public private(set) var store: SnapshotStore!
     private(set) var spaces: SpaceObserver!
+    private(set) var displays: DisplayObserver!
     private let frameLoop = FrameLoop()
     private let indicator = FocusIndicator()
     private let hotkeys = HotkeyManager()
@@ -63,58 +65,63 @@ public final class Loop {
     private var lastRequest: UInt64 = 0
     private var indicatorTile: TileID?
     private var quitting = false
-    private var screenToken: NSObjectProtocol?
 
     public init() {
-        let topology = Self.readTopology(revision: 1)
-        world = World(topology: topology)
-        group = topology.groups.first?.id ?? 0
+        world = World(topology: DisplayObserver.read(revision: 1))
         executor = Executor(worker: { [unowned self] in observer.workers[$0] }, log: logLine)
         observer = Observer(executor: executor, allowedPids: allowedPids,
-                            managed: { [unowned self] in Set(world.groups[group]?.windows.keys.map(\.rawValue) ?? []) },
+                            managed: { [unowned self] in Set(world.groups.values.flatMap(\.windows.keys).map(\.rawValue)) },
                             elsewhere: { [unowned self] in world.trackedElsewhere },
                             paused: { [unowned self] in paused },
                             emit: { [unowned self] in send($0, stamp: $1) }, log: logLine)
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },
                               deliver: { [unowned self] in run($0) }, log: logLine)
         store = SnapshotStore(directory: paths.stateDir, log: logLine)
-        spaces = SpaceObserver(clock: TimeUtil.now, notify: { [unowned self] in send(.spaceWillChange) },
-                               census: { [unowned self] delay in census(group: group, after: delay) }, log: logLine)
+        spaces = SpaceObserver(clock: TimeUtil.now, changed: { [unowned self] in spaceChanged(after: $0) }, log: logLine)
+        displays = DisplayObserver(current: { [unowned self] in world.topology }, changed: { [unowned self] in topologyChanged($0) },
+                                   log: logLine)
         frameLoop.onTick = { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
         hotkeys.onAction = { [weak self] action in MainActor.assumeIsolated { self?.hotkey(action) } }
     }
 
     public func start() {
-        logLine("loop: group=\(group) area=\(world.topology.groups.first?.frame ?? .zero) managedPids=\(allowedPids.map { $0.sorted().description } ?? "all")")
-        observer.clock.current = world.scope(for: group)
-        let scope = world.scope(for: group) ?? EventScope(topologyRevision: world.topology.revision, group: group, spaceEpoch: 0)
-        reduceAndRun(Event(scope: scope, kind: .loadSnapshots(store.load())))
+        logLine("loop: groups=\(DisplayObserver.describe(world.topology)) separateSpaces=\(world.topology.separateSpaces) managedPids=\(allowedPids.map { $0.sorted().description } ?? "all")")
+        observer.clock.current = world.stamp
+        sendGlobal(.loadSnapshots(store.load()))
         // The defaults go live first, so a file the schema rejects leaves hotkeys working and the error in the menu bar.
         apply(config)
         reloadConfig()
         frameLoop.start()
-        screenToken = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
-                                                             object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.screensChanged() }
-        }
+        displays.start()
         observer.start(timeout: 1.5) { [weak self] in
             guard let self else { return }
-            census(group: group)
+            world.groups.keys.sorted().forEach(census(group:))
+            // Each census restored a focus; the real one decides which group commands act on.
+            reportFrontmostFocus()
             spaces.start()
         }
     }
 
     // MARK: Events
 
-    /// Reduce `kind` under `stamp`, the scope it was observed under, or else the group's current scope.
-    public func send(_ kind: Event.Kind, stamp: EventScope? = nil) {
-        guard !quitting, let scope = stamp ?? world.scope(for: group) else { return }
+    /// Reduce `kind` in `group`, else the group the engine routes it to, under the scope that group had in `stamp`,
+    /// when it was observed, or else its current scope.
+    public func send(_ kind: Event.Kind, group: UInt32? = nil, stamp: Stamp? = nil) {
+        guard !quitting, let id = group ?? world.route(kind),
+              let scope = stamp.map({ world.scope(for: id, stamp: $0) }) ?? world.scope(for: id) else { return }
+        reduceAndRun(Event(scope: scope, kind: kind))
+    }
+
+    /// A global event goes out even with no display, so a topology or config change is never lost.
+    private func sendGlobal(_ kind: Event.Kind) {
+        let scope = world.activeGroup.flatMap(world.scope(for:))
+            ?? EventScope(topologyRevision: world.topology.revision, group: 0, spaceEpoch: 0)
         reduceAndRun(Event(scope: scope, kind: kind))
     }
 
     private func reduceAndRun(_ event: Event) {
         let effects = reduce(&world, event, now: max(TimeUtil.now(), world.time))
-        observer.clock.current = world.scope(for: group)
+        observer.clock.current = world.stamp
         run(effects)
         if world.needsTicks || indicator.isAnimating { frameLoop.resume() }
         updateIndicator()
@@ -160,50 +167,49 @@ public final class Loop {
     /// A fresh on-screen read, sent as a new `spaceChanged`; a deferred census is never answered from a cache. Every
     /// census proposes the next epoch, so the one `reduce` commits retires the old Space's focus events and timers.
     private func census(group: UInt32) {
-        let windows = observer.census()
-        guard let key = spaces.key(display: group, windows: windows) else { return logLine("loop: census skipped on a system Space") }
+        let windows = world.routed(observer.census(), to: group)
+        guard let key = spaces.key(display: group, shared: !world.topology.separateSpaces, windows: windows) else {
+            return logLine("loop: census skipped on a system Space group=\(group)")
+        }
         let epoch = (world.groups[group]?.epoch ?? 0) + 1
-        logLine("loop: census key=\(key.debugDescription) windows=\(windows.count)")
-        send(.spaceChanged(key: key, epoch: epoch, windows: windows))
+        logLine("loop: census group=\(group) key=\(key.debugDescription) windows=\(windows.count)")
+        send(.spaceChanged(key: key, epoch: epoch, windows: windows), group: group)
+    }
+
+    /// Only strips whose display now shows another Space are torn down and read again, so a switch on one display
+    /// leaves the others alone. A display showing a system Space (a full-screen app) is left as it is.
+    private func spaceChanged(after delay: Double) {
+        let shared = !world.topology.separateSpaces
+        var reads: [UInt32: SpaceKey] = [:]
+        var system = Set<UInt32>()
+        for id in world.groups.keys {
+            guard let space = SpaceObserver.space(display: id, shared: shared) else { continue }
+            if space.isUserSpace { reads[id] = space.key } else { system.insert(id) }
+        }
+        for id in world.groupsOnAnotherSpace(reads) where !system.contains(id) {
+            send(.spaceWillChange, group: id)
+            census(group: id, after: delay)
+        }
     }
 
     private func tick() {
-        send(.tick)
+        sendGlobal(.tick)
         indicator.tick(time: TimeUtil.now())
         if !world.needsTicks && !indicator.isAnimating { frameLoop.pause() }
     }
 
-    /// A new working area or primary display. The census adopts windows into a group that just appeared (the first
-    /// display after a headless start), and recover rewrites every frame for the new area.
-    private func screensChanged() {
-        let next = Self.readTopology(revision: world.topology.revision + 1)
-        let id = next.groups.first?.id ?? 0
-        guard next.groups.first?.frame != world.topology.groups.first?.frame || id != group else { return }
-        logLine("loop: topology rev=\(next.revision) group=\(id) area=\(next.groups.first?.frame ?? .zero)")
-        let scope = world.scope(for: group) ?? EventScope(topologyRevision: world.topology.revision, group: group, spaceEpoch: 0)
-        reduceAndRun(Event(scope: scope, kind: .topologyChanged(next)))
-        group = id
+    private func topologyChanged(_ next: Topology) {
+        sendGlobal(.topologyChanged(next))
         // A config loaded while no display existed was dropped for want of a scope.
-        send(.configChanged(config.engine))
-        census(group: id)
+        sendGlobal(.configChanged(config.engine))
+        world.groups.keys.sorted().forEach(census(group:))
         recover()
-    }
-
-    /// The primary display only; multi-display grouping arrives with R5.
-    static func readTopology(revision: UInt64) -> Topology {
-        let displays = DisplayManager()
-        displays.refresh()
-        guard let main = displays.displays[CGMainDisplayID()] ?? displays.mainDisplay else {
-            return Topology(revision: revision, groups: [], primaryScreenHeight: 0)
-        }
-        let area = main.workingArea(primaryScreenHeight: displays.primaryScreenHeight)
-        return Topology(revision: revision, groups: [DisplayGroup(id: main.displayID, displays: [main.displayID], frame: area)],
-                        primaryScreenHeight: displays.primaryScreenHeight)
+        onChange?()
     }
 
     // MARK: Commands
 
-    public func pid(of tile: TileID) -> Int32? { world.groups[group]?.windows[tile]?.pid }
+    public func pid(of tile: TileID) -> Int32? { world.owner(of: tile).flatMap { world.groups[$0]?.windows[tile]?.pid } }
 
     /// The window a toggle or close acts on: the focus decision, else the active column's tile.
     public var focusedTile: TileID? {
@@ -215,14 +221,20 @@ public final class Loop {
     @discardableResult
     public func recover() -> CommandOutcome {
         observer.workers.values.forEach { $0.forgetSizes() }
-        return request(.recover)
+        return everyGroup(.recover)
+    }
+
+    @discardableResult
+    private func everyGroup(_ command: Command) -> CommandOutcome {
+        let outcomes = world.groups.keys.sorted().map { request(command, group: $0) }
+        return outcomes.first { $0 != .accepted } ?? (outcomes.isEmpty ? .refused("no display") : .accepted)
     }
 
     /// Run a command as an IPC request and return the engine's answer.
-    public func request(_ command: Command) -> CommandOutcome {
+    public func request(_ command: Command, group: UInt32? = nil) -> CommandOutcome {
         lastRequest += 1
         let id = lastRequest
-        send(.ipc(id: id, command: command))
+        send(.ipc(id: id, command: command), group: group)
         guard case .command(let outcome)? = replies.removeValue(forKey: id) else { return .refused("no display") }
         return outcome
     }
@@ -238,7 +250,8 @@ public final class Loop {
         case .toggleFullWidth: focusedTile.map(Command.toggleFullWidth)
         case .toggleFloating: focusedTile.map(Command.toggleFloating)
         case .closeWindow: focusedTile.map(Command.close)
-        case .focusUp, .focusDown: nil
+        case .focusUp: .focusUp
+        case .focusDown: .focusDown
         }
         if let command { send(.command(command, .keyboard)) }
     }
@@ -246,7 +259,7 @@ public final class Loop {
     /// Pausing hands every window back as quitting does, so none waits out the pause as an off-screen sliver.
     public func setPaused(_ value: Bool) {
         guard value != paused else { return }
-        if value { send(.command(.release, .ipc)) }
+        if value { everyGroup(.release) }
         paused = value
         logLine("loop: paused=\(value)")
         if value {
@@ -257,10 +270,13 @@ public final class Loop {
             observer.healthCheck()
             recover()
             // Focus reports were dropped while paused; read the real focus again so commands act on it.
-            NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?
-                .reportFocus(activation: false, space: SpaceObserver.observedSpace())
+            reportFrontmostFocus()
         }
         onChange?()
+    }
+
+    private func reportFrontmostFocus() {
+        NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: false, space: nil)
     }
 
     /// Load the config file. On any error the previous config stays active and the error is kept for the menu bar.
@@ -325,6 +341,7 @@ public final class Loop {
         quitting = true
         hotkeys.stop()
         spaces.stop()
+        displays.stop()
         store.flush()
         var finished = false
         let finish = { @MainActor in
@@ -348,7 +365,7 @@ public final class Loop {
     private func updateIndicator() {
         guard config.indicator.style == .ring || config.indicator.style == .flash else { return }
         guard !paused, let tile = focusedTile, let frame = world.frames[tile]?.frame,
-              let area = world.topology.groups.first(where: { $0.id == group })?.frame,
+              let area = world.owner(of: tile).flatMap(world.topology.group(id:))?.frame,
               frame.rect.intersection(area).width >= 10 else {
             indicator.hide()
             indicatorTile = nil

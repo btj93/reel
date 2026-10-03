@@ -191,9 +191,19 @@ public struct GroupState: Sendable {
 
     private var hiddenPlaces: [Int] { hidden.values.filter { $0.column != nil }.map(\.place).sorted() }
 
+    /// One region per display, in the group's viewport coordinates, so widths resolve against the display a column
+    /// centers on.
     static func area(for display: DisplayGroup) -> GroupWorkingArea {
-        let rect = CGRect(origin: .zero, size: display.frame.size)
-        return GroupWorkingArea(regions: [DisplayRegion(displayID: 0, rect: rect)], referenceMidX: rect.midX)
+        let origin = display.frame.origin
+        let regions = display.displays.map { DisplayRegion(displayID: $0.id, rect: $0.area.offsetBy(dx: -origin.x, dy: -origin.y)) }
+        return GroupWorkingArea(regions: regions, referenceMidX: regions[0].rect.midX)
+    }
+
+    var isAnimating: Bool {
+        if case .static = strip.viewOffset {
+            return strip.columnData.contains { $0.widthAnimation != nil || $0.raiseAnimation != nil }
+        }
+        return true
     }
 }
 
@@ -217,6 +227,10 @@ public struct HiddenTile: Codable, Sendable {
         self.frame = frame
     }
 
+    func placed(at place: Int) -> HiddenTile {
+        HiddenTile(window: window, column: column, place: place, frame: frame)
+    }
+
     var column: Column? {
         width.map { Column(tiles: [window.id], width: $0, presetIndex: presetIndex, isFullWidth: isFullWidth) }
     }
@@ -237,6 +251,21 @@ public struct ScheduledWork: Sendable {
     public let action: ScheduledAction
 }
 
+public struct Stamp: Equatable, Sendable {
+    public let revision: UInt64
+    public let epochs: [UInt32: UInt64]
+
+    public init(revision: UInt64, epochs: [UInt32: UInt64]) {
+        self.revision = revision
+        self.epochs = epochs
+    }
+
+    /// The stamp of work done for one group, such as a frame write: it is stale once that group's scope moves on.
+    public init(_ scope: EventScope) {
+        self.init(revision: scope.topologyRevision, epochs: [scope.group: scope.spaceEpoch])
+    }
+}
+
 public struct World: Sendable {
     public internal(set) var topology: Topology
     public internal(set) var groups: [UInt32: GroupState]
@@ -249,8 +278,9 @@ public struct World: Sendable {
     public internal(set) var time: Double = 0
     var serial: UInt64 = 0
 
-    public init(topology: Topology = Topology(revision: 0, groups: [], primaryScreenHeight: 0), config: EngineConfig = EngineConfig()) {
-        let topology = topology.isValid ? topology : Topology(revision: topology.revision, groups: [], primaryScreenHeight: 0)
+    public init(topology: Topology = Topology(revision: 0, displays: [], separateSpaces: true, primaryScreenHeight: 0),
+                config: EngineConfig = EngineConfig()) {
+        let topology = topology.isValid ? topology : Topology(revision: topology.revision, displays: [], separateSpaces: true, primaryScreenHeight: 0)
         self.topology = topology
         self.config = config
         groups = Dictionary(uniqueKeysWithValues: topology.groups.map { ($0.id, GroupState(display: $0, config: config)) })
@@ -271,19 +301,75 @@ public struct World: Sendable {
             + spaces.live.values.flatMap { $0.fingerprint.union($0.hidden.map(\.window.id.rawValue)) })
     }
 
-    /// The frame loop runs while any strip still animates.
-    public var needsTicks: Bool {
-        groups.values.contains { group in
-            if case .static = group.strip.viewOffset {
-                return group.strip.columnData.contains { $0.widthAnimation != nil || $0.raiseAnimation != nil }
-            }
-            return true
+    /// What an observation is stamped with: the revision and every group's epoch, so the event takes the scope of the
+    /// group it routes to as that group stood when it was observed.
+    public var stamp: Stamp { Stamp(revision: topology.revision, epochs: groups.mapValues(\.epoch)) }
+
+    public func scope(for group: UInt32, stamp: Stamp) -> EventScope {
+        EventScope(topologyRevision: stamp.revision, group: group, spaceEpoch: stamp.epochs[group] ?? .max)
+    }
+
+    /// The group commands act on: the one holding the newest focus decision, else the leftmost.
+    public var activeGroup: UInt32? {
+        let decided = groups.compactMap { id, group in group.focus.decision.map { (id: id, time: $0.time) } }
+        return decided.max { $0.time != $1.time ? $0.time < $1.time : $0.id > $1.id }?.id ?? topology.groups.first?.id
+    }
+
+    public func owner(of tile: TileID) -> UInt32? { groups.first { $0.value.windows[tile] != nil }?.key }
+
+    /// The group an event goes to: the group holding the window it names, else the active group. A new window goes to
+    /// the group its frame is nearest, an activation that names no window to a group holding one of the app's.
+    public func route(_ kind: Event.Kind) -> UInt32? {
+        let tile: TileID?
+        switch kind {
+        case .windowAdded(let window): return owner(of: window.id) ?? home(window) ?? activeGroup
+        case .windowRemoved(let id), .windowMoved(let id, _), .frameCompleted(let id, _, _): tile = id
+        case .windowsHidden(let ids): tile = ids.first { owner(of: $0) != nil }
+        case .focus(let intent) where intent.tile == nil:
+            return groups.keys.sorted().first { id in groups[id]!.windows.values.contains { $0.pid == intent.pid } } ?? activeGroup
+        case .focus(let intent): tile = intent.tile
+        case .command(let command, _), .ipc(_, let command): tile = command.tile
+        case .pointer(let input, _): return input.tile.flatMap(owner) ?? pointer.scope?.group ?? activeGroup
+        default: tile = nil
+        }
+        return tile.flatMap { tile in owner(of: tile) ?? groups.first { $0.value.hidden[tile] != nil }?.key } ?? activeGroup
+    }
+
+    /// The windows of a census that `group` takes: its own, and each one no group holds whose frame is nearest it or
+    /// that has no frame.
+    public func routed(_ windows: [ObservedWindow], to group: UInt32) -> [ObservedWindow] {
+        guard topology.groups.count > 1 else { return windows }
+        return windows.filter { (owner(of: $0.id) ?? home($0) ?? group) == group }
+    }
+
+    private func home(_ window: ObservedWindow) -> UInt32? {
+        window.initialFrame.flatMap { topology.nearestGroup(to: CGPoint(x: $0.rect.midX, y: $0.rect.midY))?.id }
+    }
+
+    /// The groups a Space notification concerns: each whose display now shows another Space than the one it settled
+    /// on, or that has not settled. `reads` holds what each display shows; a display missing from it (SkyLight cannot
+    /// tell) concerns its group.
+    public func groupsOnAnotherSpace(_ reads: [UInt32: SpaceKey]) -> [UInt32] {
+        groups.keys.sorted().filter { id in
+            guard case .settled(let key) = groups[id]!.phase, key.isAuthoritative, let read = reads[id] else { return true }
+            return read != key
         }
     }
+
+    /// The frame loop runs while any strip still animates.
+    public var needsTicks: Bool { groups.values.contains(where: \.isAnimating) }
 
     public func check() -> [String] {
         var errors: [String] = []
         var allTiles = Set<TileID>()
+        errors += topology.groupingErrors
+        if Set(groups.keys) != Set(topology.groups.map(\.id)) { errors.append("groups differ from the topology") }
+        for display in topology.groups where groups[display.id].map({ $0.strip.groupArea != GroupState.area(for: display) }) == true {
+            errors.append("group \(display.id): area differs from its displays")
+        }
+        let hidden = groups.values.flatMap(\.hidden.keys)
+        if Set(hidden).count != hidden.count { errors.append("window hidden in two groups") }
+        if !topology.groups.isEmpty, spaces.live.keys.contains(where: { groups[$0.group] == nil }) { errors.append("stash of a group that is gone") }
         for (id, group) in groups {
             let strip = group.strip
             if strip.columns.count != strip.columnData.count || strip.columns.count != strip.snapIndices.count {
@@ -310,7 +396,7 @@ public struct World: Sendable {
             if strip.snapIndices.contains(where: { !strip.snapPoints.indices.contains($0) }) { errors.append("invalid snap index") }
             if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
             if group.space == nil, !group.windows.isEmpty { errors.append("windows without a Space") }
-            if group.hidden.keys.contains(where: { group.windows[$0] != nil }) { errors.append("hidden window managed") }
+            if group.hidden.keys.contains(where: { tile in groups.values.contains { $0.windows[tile] != nil } }) { errors.append("hidden window managed") }
             if let deferred = group.phase.deferred, !deferred.key.isAuthoritative, deferred.settledReads >= EngineConfig.censusReads {
                 errors.append("group \(id): fingerprint census deferred past \(EngineConfig.censusReads) settled reads")
             }
@@ -335,12 +421,4 @@ public struct World: Sendable {
 
 extension CGRect {
     var isFinite: Bool { [minX, minY, width, height].allSatisfy(\.isFinite) && width > 0 && height > 0 }
-}
-
-extension Topology {
-    var isValid: Bool {
-        primaryScreenHeight.isFinite && primaryScreenHeight >= 0
-            && Set(groups.map(\.id)).count == groups.count && groups.allSatisfy { $0.frame.isFinite && !$0.displays.isEmpty }
-            && Set(groups.flatMap(\.displays)).count == groups.flatMap(\.displays).count
-    }
 }
