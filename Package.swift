@@ -70,7 +70,7 @@ let package = Package(
         // Tests (executable — no Xcode required)
         .executableTarget(
             name: "RunTests",
-            dependencies: ["Core", "Config", "IPC", "WindowManager", "Platform"],
+            dependencies: ["Core", "Config", "IPC", "WindowManager", "Platform", "Engine", "Runtime"],
             path: "Tests/CoreTests"
         ),
 

@@ -1647,6 +1647,11 @@ struct FuzzStream {
         scheduler.schedule(.census(group: 1), deadline: clock() + 0.05, owner: live, job: .census(group: 1))
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         check(delivered == 1 && scheduler.pendingCount == 0, "the timer delivered the job once")
+        delivered = 0
+        scheduler.schedule(.census(group: 1), deadline: clock() + 0.05, owner: live, job: .census(group: 1))
+        scheduler.schedule(.census(group: 2), deadline: clock() + 0.15, owner: live, job: .census(group: 2))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        check(delivered == 2, "the timer re-arms for the later job after the first fires")
     }
     section("R3 echo: the written revision decides echo, never a clock") {
         var ledger = EchoLedger()
@@ -1665,6 +1670,7 @@ struct FuzzStream {
               "a height the app chose is still our write")
         let clamped = CGRect(x: 80, y: 30, width: 560, height: 800)
         check(ledger.classify(tile, observed: clamped) == .foreign, "the same origin at another width is the user")
+        check(ledger.classify(tile, observed: second.offsetBy(dx: 0, dy: 50)) == .foreign, "a pure vertical move is the user")
         ledger.record(tile, revision: 5, requested: second, landed: clamped, result: .applied)
         check(ledger.classify(tile, observed: clamped) == .echo(revision: 5), "the width an app clamped our write to is our echo")
         let moved = CGRect(x: 300, y: 30, width: 500, height: 800)
@@ -1875,6 +1881,45 @@ struct FuzzStream {
         swiping.send(.command(.focusLeft, .keyboard))
         let viewSwipes = if case .gesture = swiping.world.groups[1]!.strip.viewOffset { true } else { false }
         check(viewSwipes == (swiping.gesture != nil), "edge focus during a swipe never leaves a swipe without its view")
+    }
+    section("R3 bounce: edge focus from a floating window brings focus back to the strip, then bounces") {
+        for animate in [false, true] {
+            var h = Harness(animate: animate)
+            h.census(10, [window(1), window(2, floating: true)])
+            for _ in 0..<200 { h.send(.tick, advance: 0.02) }
+            let rest = h.offset
+            h.send(.command(.focus(TileID(2)), .keyboard))
+            h.send(.command(.focusLeft, .keyboard))
+            let focused = h.effects.contains { if case .focus(let tile, _) = $0 { tile == TileID(1) } else { false } }
+            check(focused && h.world.groups[1]!.focus.decision?.tile == TileID(1), "animate=\(animate): focusLeft focuses tile 1")
+            guard animate else { continue }
+            h.send(.tick, advance: 0.03)
+            check(h.offset < rest - 1, "and the view still stretches past the edge")
+            for _ in 0..<200 { h.send(.tick, advance: 0.02) }
+            check(abs(h.offset - rest) < 1, "then settles back")
+        }
+    }
+    section("R3 config: a census after a config load builds its group with that config") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(widthPresets: [0.25, 0.75], stiffness: 300)))
+        h.census(10, [window(1), window(2)])
+        check(h.world.groups[1]!.strip.widthPresets == [.proportion(0.25), .proportion(0.75)], "the census group uses the loaded presets")
+    }
+    section("R3 frame loop: a settled raise lets the frame loop pause") {
+        var h = Harness(animate: true)
+        h.send(.configChanged(EngineConfig(animate: true, raiseHeight: 20)))
+        h.census(10, [window(1), window(2)])
+        for _ in 0..<300 { h.send(.tick, advance: 0.02) }
+        check(!h.world.needsTicks, "no ticks once the raise settled")
+    }
+    section("R3 release: quitting levels a column the raise style lowered") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
+        h.census(10, [window(1), window(2)])
+        guard let active = h.world.frames[TileID(1)]?.frame.rect else { return check(false, "the active column is written") }
+        h.send(.command(.release, .ipc))
+        let lowered = h.requests.first { $0.tile == TileID(2) }?.frame.rect
+        check(lowered?.minY == active.minY && lowered?.height == active.height, "the lowered column comes back up at full height")
     }
     section("R3 lane 8: cycle, toggle full width, toggle back, toggle, cycle") {
         var h = Harness()
