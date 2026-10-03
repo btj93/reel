@@ -339,6 +339,7 @@ public final class Observer {
         for pid in Set(unknown.map(\.ownerPID)).sorted() {
             // An app can turn regular after its launch notification; its first on-screen window registers it. One that
             // was busy when it registered lists its windows now.
+            // ponytail: a window AX never lists costs its app one kAXWindows read per pass; remember misses if perf shows it.
             if let worker = workers[pid] { worker.rediscover() } else { NSRunningApplication(processIdentifier: pid).map(register) }
         }
         for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window), nil) }
