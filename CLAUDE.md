@@ -124,7 +124,7 @@ Why it was worth it: Reel previously identified a Space by fingerprinting the on
 
 `Tests/CoreTests/main.swift` — standalone executable. Uses `check()`, `assertEq()`, `assertClose()`. Add tests as `section("name") do { ... }` blocks. Run: `swift run RunTests`.
 
-`Tests/EngineTests/main.swift` — the same style for Engine: one replay per historical bug class, `World.check()` after every event of a seeded fuzz stream, and a release-mode `reduce` budget. Run: `swift run RunEngineTests`.
+`Tests/EngineTests/main.swift` — the same style for Engine: one replay per historical bug class, `World.check()` after every event of a seeded fuzz stream, and a release-mode `reduce` budget. It also covers the Runtime pieces that need no window: config schema, `Scheduler`, `EchoLedger` and `Loop.bindingError`. Run: `swift run RunEngineTests`. Runtime's `SizeCache` is tested in `RunTests` against `FakeAXWindow`.
 
 **Smoke suite (Layer 3, opt-in)**: `Tests/Smoke/smoke.sh` (+ `lib.sh`) drives a REAL `.build/debug/Reel` against `TestWindowHost` NSWindows over `reel-msg`/`jq`. It STOPS your live Reel and opens real windows, so it is gated behind `REEL_E2E_CONFIRM=1` and never runs in `swift run RunTests`.
 - `make smoke` — build + run the suite (requires `REEL_E2E_CONFIRM=1` in the env; the developer command is `REEL_E2E_CONFIRM=1 make smoke`).

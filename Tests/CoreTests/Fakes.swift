@@ -93,7 +93,7 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
 
     override func raise() -> AXResult<Void> { raiseCount += 1; return .success(()) }
     override func close() -> AXResult<Void> { closed = true; return .success(()) }
-    override func focus() { focusCount += 1 }
+    override func focus(timeout: Float?) { focusCount += 1 }
 }
 
 /// Fake app. Overrides observation to no-ops so no CFRunLoop thread spawns.

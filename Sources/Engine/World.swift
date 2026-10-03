@@ -20,6 +20,12 @@ public struct EngineConfig: Sendable {
     public static let flickVelocity = 50.0
     public static let defaultGap = 8.0
     public static let defaultColumnWidth = 0.5
+    public static let defaultWidthPresets = [0.33, 0.5, 0.67]
+    public static let defaultSnapPoints: [SnapPoint] = [.middle]
+    public static let defaultStiffness = 800.0
+    public static let defaultDampingRatio = 1.0
+    public static let defaultBounceDistance = 40.0
+    public static let defaultBounceDampingRatio = 0.6
     /// A user resize within this many points of the column width is the app rounding, not a new width.
     public static let userResizeSlop = 2.0
 
@@ -38,9 +44,10 @@ public struct EngineConfig: Sendable {
     public let raiseHeight: Double
 
     public init(gap: Double = defaultGap, defaultWidth: Double = defaultColumnWidth, animate: Bool = true,
-                gestureSnap: Bool = true, rules: [Rule] = [], widthPresets: [Double] = [0.33, 0.5, 0.67],
-                snapPoints: [SnapPoint] = [.middle], stiffness: Double = 800, dampingRatio: Double = 1,
-                bounceDistance: Double = 40, bounceDampingRatio: Double = 0.6, raiseHeight: Double = 0) {
+                gestureSnap: Bool = true, rules: [Rule] = [], widthPresets: [Double] = defaultWidthPresets,
+                snapPoints: [SnapPoint] = defaultSnapPoints, stiffness: Double = defaultStiffness,
+                dampingRatio: Double = defaultDampingRatio, bounceDistance: Double = defaultBounceDistance,
+                bounceDampingRatio: Double = defaultBounceDampingRatio, raiseHeight: Double = 0) {
         func valid(_ value: Double, _ fallback: Double) -> Double { value.isFinite && value > 0 ? value : fallback }
         self.gap = gap.isFinite && gap >= 0 ? gap : Self.defaultGap
         self.defaultWidth = valid(defaultWidth, Self.defaultColumnWidth)
@@ -48,12 +55,12 @@ public struct EngineConfig: Sendable {
         self.gestureSnap = gestureSnap
         self.rules = rules
         let presets = widthPresets.filter { $0.isFinite && $0 > 0 && $0 <= 1 }
-        self.widthPresets = presets.isEmpty ? [0.33, 0.5, 0.67] : presets
-        self.snapPoints = snapPoints.isEmpty ? [.middle] : Array(Set(snapPoints)).sorted()
-        self.dampingRatio = valid(dampingRatio, 1)
-        scroll = SpringParams(dampingRatio: self.dampingRatio, stiffness: valid(stiffness, 800), epsilon: 0.5)
-        self.bounceDistance = bounceDistance.isFinite && bounceDistance >= 0 ? bounceDistance : 40
-        self.bounceDampingRatio = valid(bounceDampingRatio, 0.6)
+        self.widthPresets = presets.isEmpty ? Self.defaultWidthPresets : presets
+        self.snapPoints = snapPoints.isEmpty ? Self.defaultSnapPoints : Array(Set(snapPoints)).sorted()
+        self.dampingRatio = valid(dampingRatio, Self.defaultDampingRatio)
+        scroll = SpringParams(dampingRatio: self.dampingRatio, stiffness: valid(stiffness, Self.defaultStiffness), epsilon: 0.5)
+        self.bounceDistance = bounceDistance.isFinite && bounceDistance >= 0 ? bounceDistance : Self.defaultBounceDistance
+        self.bounceDampingRatio = valid(bounceDampingRatio, Self.defaultBounceDampingRatio)
         self.raiseHeight = raiseHeight.isFinite && raiseHeight > 0 ? raiseHeight : 0
     }
 

@@ -273,7 +273,7 @@ open class AXWindow: @unchecked Sendable {
 
     /// `timeout` bounds how long a hung app can hold the calling thread on the app element; nil keeps the system's
     /// 6 s default.
-    public func focus(timeout: Float?) {
+    open func focus(timeout: Float?) {
         // Activate the owning application
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.activate(options: [])

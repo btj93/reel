@@ -15,8 +15,9 @@ public struct EchoLedger: Sendable {
 
     /// Writes kept per window. An animation can queue several before the first echo arrives.
     public static let history = 8
-    /// Apps round frames to whole points.
-    public static let slop = 1.0
+    /// Apps round frames to whole points. The engine's own rounding tolerance, so a frame both call rounding never
+    /// reaches it as the user.
+    public static let slop = EngineConfig.userResizeSlop
 
     private var writes: [TileID: [(revision: UInt64, frame: CGRect)]] = [:]
     private var foreign: [TileID: CGRect] = [:]
