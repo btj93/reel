@@ -265,6 +265,13 @@ extension World {
             guard !group.strip.columns.isEmpty else { return .refused("empty strip") }
             let delta = if case .focusLeft = command { -1 } else { 1 }
             let index = max(0, min(group.strip.columns.count - 1, group.strip.activeColumnIndex + delta))
+            // At the strip's edge the view stretches past it and springs back.
+            if index == group.strip.activeColumnIndex, config.animate, !pointer.isSwiping(group: id) {
+                group.strip.createRubberBandAnimation(direction: Double(delta), at: now)
+                groups[id] = group
+                pass.layout.insert(id)
+                return .accepted
+            }
             focus(FocusIntent(tile: group.strip.columns[index].activeTile, source: source), group: id, &pass)
             return .accepted
         case .moveLeft, .moveRight:

@@ -1691,6 +1691,22 @@ struct FuzzStream {
         check(columns.first?["isFullWidth"] as? Bool == false && columns.first?["active"] as? Bool == true
               && columns.first?["cachedWidth"] is Double, "isFullWidth, active and cachedWidth")
     }
+    section("R3 bounce: focus past the strip's edge stretches the view and springs back") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2)])
+        for _ in 0..<200 { h.send(.tick, advance: 0.02) }
+        let rest = h.offset
+        check(h.active == TileID(1), "the first column is active")
+        h.send(.command(.focusLeft, .keyboard))
+        h.send(.tick, advance: 0.03)
+        check(h.active == TileID(1) && h.offset < rest - 1, "the view stretches past the left edge")
+        for _ in 0..<200 { h.send(.tick, advance: 0.02) }
+        check(abs(h.offset - rest) < 1 && !h.world.needsTicks, "and settles back where it was")
+        var still = Harness()
+        still.census(10, [window(1)])
+        still.send(.command(.focusLeft, .keyboard))
+        check(!still.world.needsTicks, "without animation there is no bounce")
+    }
     section("R3 lane 8: full width keeps the logical width, a preset cycle replaces it") {
         var h = Harness()
         h.census(10, [window(1)])
