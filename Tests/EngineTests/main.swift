@@ -2044,6 +2044,8 @@ struct FuzzStream {
         func hidden() -> Harness {
             var h = Harness()
             h.census(10, [window(1, app: 5), window(2, app: 7), window(3, app: 7), window(4, app: 9)])
+            h.send(.command(.focus(TileID(2)), .keyboard))
+            h.send(.command(.cycleWidthPreset, .keyboard))
             h.send(.command(.toggleFullWidth(TileID(2)), .keyboard))
             h.send(.command(.toggleFloating(TileID(3)), .keyboard))
             h.send(.command(.setWidth(TileID(4), 200), .keyboard))
@@ -2070,7 +2072,7 @@ struct FuzzStream {
         check(shown.world.frames[TileID(1)]?.frame == frame, "the view does not move")
         check(shown.world.groups[1]!.floating == [TileID(3)], "the floated window floats again")
         let columns = shown.world.groups[1]!.strip.columns
-        check(columns[1].isFullWidth && columns[2].width == .fixed(200), "full width and widths survive")
+        check(columns[1].isFullWidth && columns[1].presetIndex == 0 && columns[2].width == .fixed(200), "full width, presets and widths survive")
         check(shown.world.check().isEmpty, "unhide invariants")
         var activated = hidden()
         let crossing = activated.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .appActivation)))
@@ -2084,15 +2086,32 @@ struct FuzzStream {
         late.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .appActivation)))
         late.advance(1)
         check(late.world.groups[1]!.focus.decision?.tile == TileID(2), "an activation after the windows return decides focus too")
+        var clicked = hidden()
+        clicked.send(.focus(FocusIntent(tile: TileID(4), pid: 9, source: .axFocus)))
+        clicked.send(.windowAdded(window(2, app: 7)))
+        clicked.advance(1)
+        check(clicked.world.groups[1]!.focus.decision?.tile == TileID(4), "a click still pending when the windows return lands")
+        var reused = hidden()
+        reused.send(.windowAdded(window(2, app: 8)))
+        check(reused.world.groups[1]!.focus.decision?.tile == TileID(2) && !reused.world.groups[1]!.strip.columns[1].isFullWidth,
+              "another app's window under a hidden id is new: it takes focus and the default width")
         for order: [UInt32] in [[2, 3, 4], [4, 3, 2], [3, 2, 4]] {
             var others = Harness()
             others.census(10, (1...5).map { window($0) })
-            others.send(.command(.focus(TileID(1)), .keyboard), advance: 1)
+            others.send(.command(.focus(TileID(5)), .keyboard), advance: 1)
             for tile: UInt32 in [2, 3, 4] { others.send(.windowsHidden([TileID(tile)])) }
             for tile in order { others.send(.windowAdded(window(tile))) }
-            check(others.tiles == (1...5).map { TileID($0) } && others.active == TileID(1),
+            check(others.tiles == (1...5).map { TileID($0) } && others.active == TileID(5),
                   "Hide Others, then Show All in order \(order), puts every column back in its place: \(others.tiles.map(\.rawValue))")
         }
+        var merged = Harness(displays: [display(1), display(2, x: 1000)])
+        merged.census(10, [window(1)], group: 1)
+        merged.census(10, [window(3)], group: 2)
+        merged.send(.windowsHidden([TileID(1)]), group: 1)
+        merged.send(.windowAdded(window(1)), group: 2)
+        merged.send(.topologyChanged(Topology(revision: 2, groups: [display(1)], primaryScreenHeight: 900)))
+        check(merged.world.groups[1]!.windows[TileID(1)] != nil && merged.world.check().isEmpty,
+              "a window hidden on one display and shown on another forgets its hidden place when the displays merge")
     }
     section("R3 bounce: focus between columns moves the view without overshoot") {
         var h = Harness(animate: true)
