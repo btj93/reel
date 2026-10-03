@@ -89,6 +89,9 @@ public struct DeferredCensus: Equatable, Sendable {
     public let since: Double
     /// Set only when a same-Space read deferred a group that had not been torn down.
     public var holds = false
+    /// Fingerprint reads deferred a full settle after the last Space notification, and the last of them.
+    public var settledReads = 0
+    public var lastSettled: SpaceKey?
 
     /// A fingerprint is built from the read, so every fingerprint read answers the one pending change; a Space id
     /// answers only its own.
@@ -136,7 +139,7 @@ public enum SpacePhase: Equatable, Sendable {
         }
     }
 
-    var deferred: DeferredCensus? {
+    public var deferred: DeferredCensus? {
         switch self {
         case .unknown(let deferred), .changing(_, let deferred): deferred
         case .settled: nil
@@ -308,6 +311,9 @@ public struct World: Sendable {
             if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
             if group.space == nil, !group.windows.isEmpty { errors.append("windows without a Space") }
             if group.hidden.keys.contains(where: { group.windows[$0] != nil }) { errors.append("hidden window managed") }
+            if let deferred = group.phase.deferred, !deferred.key.isAuthoritative, deferred.settledReads >= EngineConfig.censusReads {
+                errors.append("group \(id): fingerprint census deferred past \(EngineConfig.censusReads) settled reads")
+            }
         }
         if let owner = pointer.scope,
            scope(for: owner.group) != owner || pointer.tile.map({ groups[owner.group]?.windows[$0] == nil }) == true {

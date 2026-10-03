@@ -372,11 +372,11 @@ public final class Observer {
         worker.reportFocus(activation: true, space: space)
     }
 
-    /// A hidden app's windows leave the strip but stay known, so the health check adds them back, to the place they
-    /// left, once they are on screen again.
+    /// A hidden app's windows leave the strip, or the saved strip of the Space they are on, but stay known, so the
+    /// health check adds them back, to the place they left, once they are on screen again.
     private func hide(_ pid: Int32) {
-        let managed = managed()
-        let hidden = known.values.filter { $0.pid == pid && managed.contains($0.id) }.map(\.id).sorted().map(TileID.init)
+        let tracked = managed().union(elsewhere())
+        let hidden = known.values.filter { $0.pid == pid && tracked.contains($0.id) }.map(\.id).sorted().map(TileID.init)
         if !hidden.isEmpty { emit(.windowsHidden(hidden), nil) }
     }
 

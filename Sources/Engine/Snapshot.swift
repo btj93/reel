@@ -159,7 +159,7 @@ func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
                     hidden: saved.hidden)
 }
 
-/// With `hidesMissing`, a saved column window absent from the read keeps its place as hidden: an app hidden on another
+/// With `hidesMissing`, a saved window absent from the read keeps its place as hidden: an app hidden on another
 /// Space hid here too. Only for a Space of this session; after a reboot an absent id is dead or another window's.
 func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, epoch: UInt64, windows: [ObservedWindow],
                    saved: Snapshot?, hidesMissing: Bool, time: Double) -> GroupState {
@@ -204,7 +204,10 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
             group.strip.snapIndices[group.strip.columns.count - 1] = min(column.snapIndex, max(0, group.strip.snapPoints.count - 1))
         }
         for old in saved.floating {
-            guard let live = mappedIDs[old.id].flatMap({ group.windows[$0] }) else { continue }
+            guard let live = mappedIDs[old.id].flatMap({ group.windows[$0] }) else {
+                if hidesMissing { group.hidden[old.id] = HiddenTile(window: old, column: nil, place: 0, frame: nil) }
+                continue
+            }
             if joinsStrip(was: old, now: live, config: config) { joined.append(live) } else { group.floating.insert(live.id) }
         }
     }

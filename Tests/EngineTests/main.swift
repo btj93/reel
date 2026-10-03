@@ -1228,10 +1228,12 @@ struct Harness {
         fingerprint([3, 4], [window(3), window(4)])
         h.send(.spaceWillChange)
         fingerprint([1, 2, 3], [window(1), window(2), window(3)])
-        h.advance(EngineConfig.censusSettle + margin)
-        fingerprint([1, 2, 3], [window(1), window(2), window(3)])
+        for _ in 0..<2 {
+            h.advance(EngineConfig.censusSettle + margin)
+            fingerprint([1, 2, 3], [window(1), window(2), window(3)])
+        }
         check(h.world.groups[1]!.space == .fingerprint([1, 2, 3]) && h.tiles == [TileID(1), TileID(2), TileID(3)],
-              "a settled read commits: Space [1, 2] comes back with the moved window")
+              "a stable settled read commits: Space [1, 2] comes back with the moved window")
         check(h.world.spaces.live.values.contains { $0.fingerprint == [4] } && !h.world.spaces.live.values.contains { $0.fingerprint == [3, 4] },
               "and the Space it left no longer lists it, so that stash still matches its own windows")
         fingerprint([4], [window(4)])
@@ -1249,7 +1251,7 @@ struct Harness {
         check(drifting.world.groups[1]!.space == .fingerprint([3, 4]), "a read that changes on every retry is still deferred inside the settle")
         drifting.advance(EngineConfig.censusSettle * 0.6)
         drift([1, 2, 3])
-        check(drifting.world.groups[1]!.space == .fingerprint([1, 2, 3]), "and settles on the first read's clock, not each new read's")
+        check(drifting.world.groups[1]!.phase.deferred?.settledReads == 1, "and settles on the first read's clock, not each new read's")
     }
     section("Moved windows: another display's stash counts as another Space") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
@@ -2598,8 +2600,10 @@ struct FuzzStream {
         h.send(.command(.setWidth(TileID(1), 377), .ipc))
         h.send(.spaceWillChange)
         fingerprint([2, 3])
-        h.advance(EngineConfig.censusSettle + margin)
-        fingerprint([2, 3])
+        for _ in 0..<2 {
+            h.advance(EngineConfig.censusSettle + margin)
+            fingerprint([2, 3])
+        }
         check(!h.world.groups[1]!.phase.isChanging && h.tiles == [TileID(3), TileID(2)] && h.widths.first == .fixed(411),
               "Space [3] comes back with window 2 after it")
         h.send(.spaceWillChange)
@@ -2616,8 +2620,10 @@ struct FuzzStream {
         h.send(.command(.setWidth(TileID(3), 411), .ipc))
         h.send(.spaceWillChange)
         fingerprint([3, 4, 7])
-        h.advance(EngineConfig.censusSettle + margin)
-        fingerprint([3, 4, 7])
+        for _ in 0..<2 {
+            h.advance(EngineConfig.censusSettle + margin)
+            fingerprint([3, 4, 7])
+        }
         check(!h.world.groups[1]!.phase.isChanging && h.tiles == [TileID(3), TileID(4), TileID(7)] && h.widths.first == .fixed(411),
               "the strip settles with the moved window")
         check(h.world.spaces.live.values.contains { $0.fingerprint == [1, 2] }, "and the Space it came from lets it go")
