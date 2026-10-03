@@ -1469,16 +1469,20 @@ struct FuzzStream {
             }
         case 39:
             // A fingerprint read touching a saved strip: one of its windows dragged here (P2), a window swapped each way
-            // (P1), or all of it but one window whose app hid there unheard (PROBE-A). Kept at, it commits within the bound.
+            // (P1), or all of it but one window whose app hid there unheard (PROBE-A). Steady or changing on every read, it
+            // commits within the bound.
             let saved = h.world.spaces.live.values.filter { $0.group == id && $0.space != group.space && !$0.windows.isEmpty }
                 .sorted { $0.space.debugDescription < $1.space.debugDescription }
             let mine = group.windows.values.sorted { $0.id.rawValue < $1.id.rawValue }
             guard let other = pick(saved), let kept = pick(mine), let taken = pick(other.windows) else { h.send(.tick, group: id); break }
             let shapes = [mine + [taken], [kept, taken], [kept] + other.windows.filter { $0.id != taken.id }]
-            let read = Dictionary(pick(shapes)!.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }).values.sorted { $0.id.rawValue < $1.id.rawValue }
             h.send(.spaceWillChange, group: id)
+            let steady = rng.next(2) == 0
+            var read = pick(shapes)!
             for _ in 0...EngineConfig.censusReads where h.world.groups[id]?.phase.isChanging != false {
-                h.send(.spaceChanged(key: .fingerprint(Set(read.map(\.id.rawValue))), epoch: h.world.groups[id]!.epoch + 1, windows: read),
+                if !steady { read = pick(shapes)! }
+                let unique = Dictionary(read.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }).values.sorted { $0.id.rawValue < $1.id.rawValue }
+                h.send(.spaceChanged(key: .fingerprint(Set(unique.map(\.id.rawValue))), epoch: h.world.groups[id]!.epoch + 1, windows: unique),
                        group: id, advance: EngineConfig.censusSettle + 0.05)
             }
             reached[h.world.groups[id]!.phase.isChanging ? "mixed read frozen" : "mixed read committed", default: 0] += 1
@@ -2652,6 +2656,22 @@ struct FuzzStream {
         check(!swap.world.groups[1]!.phase.isChanging && swap.world.groups[1]!.space == .fingerprint([1, 3]),
               "P1 and PROBE-A: a stable read listing no Space whole commits a fresh strip")
         check(Set(swap.world.spaces.live.values.map(\.fingerprint)).isSuperset(of: [[1, 2], [3, 4]]), "and keeps both saved strips")
+        var overlap = Harness()
+        overlap.read([3, 4, 5, 6])
+        overlap.read([1, 2])
+        overlap.send(.spaceWillChange)
+        for settle in [false, true, true] { overlap.read([1, 3, 4, 5], settle: settle) }
+        check(overlap.world.groups[1]!.space == .fingerprint([1, 3, 4, 5]) && overlap.world.spaces.live.values.contains { $0.fingerprint == [3, 4, 5, 6] },
+              "the fresh strip takes no saved strip by overlap")
+        var largest = Harness()
+        largest.read([3])
+        largest.read([5, 6])
+        largest.send(.command(.setWidth(TileID(5), 411), .ipc))
+        largest.read([1, 2])
+        largest.send(.spaceWillChange)
+        for settle in [false, true, true] { largest.read([1, 3, 5, 6], settle: settle) }
+        check(largest.widths.first == .fixed(411) && largest.world.spaces.live.values.contains { $0.fingerprint == [3] },
+              "of two saved strips listed whole, the larger is restored and the other kept")
         var drift = Harness()
         drift.read([1, 2])
         drift.read([3, 4])
