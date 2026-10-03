@@ -32,7 +32,8 @@ enum Observation: Sendable {
     /// `space` is the Space the focus was observed on, read where it happened; nil without SkyLight.
     case focused(pid: Int32, CGWindowID?, activation: Bool, space: SpaceKey?)
     /// `landed` is the frame the app kept, when known: an app may clamp the size we asked for.
-    case wrote(TileID, revision: UInt64, frame: CGRect, landed: CGRect?, FrameResult)
+    /// `scope` is the one the write was made for, so a completion from before a topology change is dropped as stale.
+    case wrote(TileID, revision: UInt64, frame: CGRect, landed: CGRect?, FrameResult, scope: EventScope)
 }
 
 /// The loop's scope, readable from app threads: an observation is stamped when it happens, so one made before a
@@ -92,7 +93,7 @@ final class AppWorker: @unchecked Sendable {
     private var windows: [CGWindowID: AXWindow] = [:]
     private var sizes = SizeCache()
     private let lock = NSLock()
-    private var queuedFrames: [TileID: (revision: UInt64, frame: CGRect)] = [:]
+    private var queuedFrames: [TileID: (revision: UInt64, frame: CGRect, scope: EventScope)] = [:]
     private var drainQueued = false
     private var forgetSizesQueued = false
     private var rediscoveryQueued = false
@@ -140,9 +141,9 @@ final class AppWorker: @unchecked Sendable {
     }
 
     /// Coalesced per window: a write still queued when the next one arrives is replaced, never run late.
-    func write(_ tile: TileID, revision: UInt64, frame: CGRect) {
+    func write(_ tile: TileID, revision: UInt64, frame: CGRect, scope: EventScope) {
         lock.lock()
-        queuedFrames[tile] = (revision, frame)
+        queuedFrames[tile] = (revision, frame, scope)
         let schedule = !drainQueued
         drainQueued = true
         lock.unlock()
@@ -191,11 +192,11 @@ final class AppWorker: @unchecked Sendable {
         for (tile, write) in batch {
             let id = CGWindowID(tile.rawValue)
             guard let window = windows[id] else {
-                post(.wrote(tile, revision: write.revision, frame: write.frame, landed: nil, .failed))
+                post(.wrote(tile, revision: write.revision, frame: write.frame, landed: nil, .failed, scope: write.scope))
                 continue
             }
             let (result, landed) = sizes.write(write.frame, to: window)
-            post(.wrote(tile, revision: write.revision, frame: write.frame, landed: landed, result))
+            post(.wrote(tile, revision: write.revision, frame: write.frame, landed: landed, result, scope: write.scope))
         }
     }
 
@@ -431,9 +432,9 @@ public final class Observer {
         }
     }
 
-    /// Facts that hold whatever the epoch (a window died, a write finished) go out under the current scope; what an
-    /// app saw (a new window, a move, focus) keeps the scope it was observed under, and is dropped when it was seen
-    /// with no scope at all (the health check and the next census pick the window up).
+    /// Facts that hold whatever the epoch (a window died) go out under the current scope, a finished write under the
+    /// scope it was written for; what an app saw (a new window, a move, focus) keeps the scope it was observed under,
+    /// and is dropped when it was seen with no scope at all (the health check and the next census pick the window up).
     func receive(_ observation: Observation, stamp: Stamp?) {
         func emitObserved(_ kind: Event.Kind) { if let stamp { emit(kind, stamp) } }
         switch observation {
@@ -467,9 +468,9 @@ public final class Observer {
             guard !paused() else { return }
             emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus,
                                             observedSpace: space)))
-        case .wrote(let tile, let revision, let frame, let landed, let result):
-            let scope = executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
-            emit(.frameCompleted(tile: tile, revision: revision, result: result), scope.map(Stamp.init))
+        case .wrote(let tile, let revision, let frame, let landed, let result, let scope):
+            executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
+            emit(.frameCompleted(tile: tile, revision: revision, result: result), Stamp(scope))
         }
     }
 }

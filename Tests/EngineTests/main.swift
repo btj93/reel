@@ -1816,6 +1816,15 @@ struct FuzzStream {
         check(h.world.topology.group(of: 2) == nil && Set(h.tiles) == [TileID(1), TileID(2)], "unplug drops the display, not its windows")
         h.send(.windowRemoved(TileID(1)), scope: merged)
         check(h.logged("stale topology revision dropped") && h.tiles.contains(TileID(1)), "work stamped before the change is dropped and logged")
+        var resized = Harness(animate: true)
+        resized.census(10, [window(1), window(2)])
+        let before = resized.requests.first { $0.tile == TileID(1) }!
+        resized.send(.topologyChanged(topology(2, [display(width: 800)])))
+        let after = resized.requests.first { $0.tile == TileID(1) }!
+        resized.send(.frameCompleted(tile: before.tile, revision: before.revision, result: .applied),
+                     scope: resized.world.scope(for: before.scope.group, stamp: Stamp(before.scope)))
+        check(after.scope != before.scope && resized.logged("stale topology revision dropped rev=1 current=2"),
+              "a write's completion stamped with its own scope is dropped and logged after the flush that replaced it")
         var config = Harness(displays: [display(), display(2, x: 1000)])
         config.census(10, [window(1), window(2)])
         config.census(20, [window(3), window(4)], group: 2)

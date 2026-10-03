@@ -66,8 +66,6 @@ public struct EchoLedger: Sendable {
 public final class Executor {
     public private(set) var ledger = EchoLedger()
     private var owners: [TileID: Int32] = [:]
-    /// The scope of each window's newest write, so its completion is judged against the scope it was written for.
-    private var scopes: [TileID: (revision: UInt64, scope: EventScope)] = [:]
     private let worker: (Int32) -> AppWorker?
     private let log: (String) -> Void
 
@@ -81,8 +79,7 @@ public final class Executor {
             return log("executor: no app thread pid=\(request.pid) tile=\(request.tile.rawValue) rev=\(request.revision)")
         }
         owners[request.tile] = request.pid
-        scopes[request.tile] = (request.revision, request.scope)
-        worker.write(request.tile, revision: request.revision, frame: request.frame.rect)
+        worker.write(request.tile, revision: request.revision, frame: request.frame.rect, scope: request.scope)
     }
 
     /// The engine dropped the window or its frame: a write still queued for it must not run. The ledger keeps what was
@@ -96,20 +93,15 @@ public final class Executor {
         invalidate(tile)
         ledger.forget(tile)
         owners.removeValue(forKey: tile)
-        scopes.removeValue(forKey: tile)
     }
 
-    /// Returns the scope the write was made for, when it is the window's newest.
-    func wrote(_ tile: TileID, revision: UInt64, frame: CGRect, landed: CGRect?, result: FrameResult) -> EventScope? {
-        let scope = scopes[tile].flatMap { $0.revision == revision ? $0.scope : nil }
+    func wrote(_ tile: TileID, revision: UInt64, frame: CGRect, landed: CGRect?, result: FrameResult) {
         guard owners[tile] != nil else {
-            log("executor: write skipped, window gone tile=\(tile.rawValue) rev=\(revision)")
-            return scope
+            return log("executor: write skipped, window gone tile=\(tile.rawValue) rev=\(revision)")
         }
         ledger.record(tile, revision: revision, requested: frame, landed: landed, result: result)
         if case .applied = result { log("executor: wrote tile=\(tile.rawValue) rev=\(revision)") }
         else { log("executor: write failed tile=\(tile.rawValue) rev=\(revision) result=\(result)") }
-        return scope
     }
 
     /// True when a move or resize came from the user; echoes and repeats are dropped here with a log line.
