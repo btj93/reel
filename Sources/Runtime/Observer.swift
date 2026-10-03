@@ -64,7 +64,7 @@ final class AppWorker: @unchecked Sendable {
         app = AXApp(pid: pid, bundleIdentifier: bundleID)
         self.send = send
         self.clock = clock
-        app.onThreadNotification = { [unowned self] name, element in handle(name, element) }
+        app.onThreadNotification = { [weak self] name, element in self?.handle(name, element) }
         app.startObserving()
         app.perform { [self] in post(.discovered(pid: pid, getAppWindows(pid: pid).compactMap(register))) }
     }
@@ -179,8 +179,9 @@ extension AXCallError {
     }
 }
 
-/// Turns AX notifications, NSWorkspace notifications and the health check into engine events. It keeps the runtime's
-/// registry of windows but never touches the world; the loop stamps every event with the current scope.
+/// Turns AX notifications, NSWorkspace notifications and the health check into engine events, each stamped with the
+/// epoch and topology revision it was observed under. It keeps the runtime's registry of windows but never touches the
+/// world.
 @MainActor
 public final class Observer {
     public private(set) var known: [CGWindowID: WindowFacts] = [:]

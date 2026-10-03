@@ -73,20 +73,23 @@ public final class Executor {
         worker.write(request.tile, revision: request.revision, frame: request.frame.rect)
     }
 
-    /// The engine dropped the window or its frame: a write still queued for it must not run.
+    /// The engine dropped the window or its frame: a write still queued for it must not run. The ledger keeps what was
+    /// already written, so a late echo of it is still recognized as ours.
     func invalidate(_ tile: TileID) {
         if let pid = owners[tile] { worker(pid)?.cancelWrite(tile) }
-        ledger.forget(tile)
     }
 
+    /// The window is gone.
     func forget(_ tile: TileID) {
         invalidate(tile)
+        ledger.forget(tile)
         owners.removeValue(forKey: tile)
     }
 
     func wrote(_ tile: TileID, revision: UInt64, frame: CGRect, result: FrameResult) {
-        log("executor: wrote tile=\(tile.rawValue) rev=\(revision) result=\(result)")
-        if case .applied = result { ledger.wrote(tile, revision: revision, frame: frame) }
+        guard case .applied = result else { return log("executor: write failed tile=\(tile.rawValue) rev=\(revision) result=\(result)") }
+        log("executor: wrote tile=\(tile.rawValue) rev=\(revision)")
+        ledger.wrote(tile, revision: revision, frame: frame)
     }
 
     /// True when a move or resize came from the user; echoes and repeats are dropped here with a log line.
