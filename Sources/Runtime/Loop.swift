@@ -175,13 +175,16 @@ public final class Loop {
     }
 
     /// Only strips whose display now shows another Space are torn down and read again, so a switch on one display
-    /// leaves the others alone.
+    /// leaves the others alone. A display showing a system Space (a full-screen app) is left as it is.
     private func spaceChanged(after delay: Double) {
         let shared = !world.topology.separateSpaces
-        let reads = world.groups.keys.reduce(into: [UInt32: SpaceKey]()) { reads, id in
-            reads[id] = SpaceObserver.space(display: id, shared: shared).flatMap { $0.isUserSpace ? $0.key : nil }
+        var reads: [UInt32: SpaceKey] = [:]
+        var system = Set<UInt32>()
+        for id in world.groups.keys {
+            guard let space = SpaceObserver.space(display: id, shared: shared) else { continue }
+            if space.isUserSpace { reads[id] = space.key } else { system.insert(id) }
         }
-        for id in world.groupsOnAnotherSpace(reads) {
+        for id in world.groupsOnAnotherSpace(reads) where !system.contains(id) {
             send(.spaceWillChange, group: id)
             census(group: id, after: delay)
         }
