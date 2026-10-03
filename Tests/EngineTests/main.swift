@@ -1876,18 +1876,21 @@ struct FuzzStream {
         let viewSwipes = if case .gesture = swiping.world.groups[1]!.strip.viewOffset { true } else { false }
         check(viewSwipes == (swiping.gesture != nil), "edge focus during a swipe never leaves a swipe without its view")
     }
-    section("R3 lane 8: full width keeps the logical width, a preset cycle replaces it") {
+    section("R3 lane 8: cycle, toggle full width, toggle back, toggle, cycle") {
         var h = Harness()
         h.census(10, [window(1)])
-        let before = h.world.groups[1]!.strip.columns[0].width
+        h.send(.command(.cycleWidthPreset, .ipc))
+        let preset = h.world.groups[1]!.strip.columns[0]
+        check(preset.width == .proportion(0.33) && preset.presetIndex == 0, "the cycle lands on the first preset")
         h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
-        check(h.world.groups[1]!.strip.columns[0].width == before, "full width keeps the logical width")
+        check(h.world.groups[1]!.strip.columns[0].width == preset.width, "full width keeps the logical width")
         h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
-        check(h.world.groups[1]!.strip.columnData[0].cachedWidth == 500, "toggling back restores it")
+        let back = h.world.groups[1]!.strip
+        check(!back.columns[0].isFullWidth && back.columnData[0].cachedWidth == 330, "toggling back restores the preset width")
         h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
         h.send(.command(.cycleWidthPreset, .ipc))
         let column = h.world.groups[1]!.strip.columns[0]
-        check(!column.isFullWidth && column.width == .proportion(0.33), "a cycle leaves full width for the next preset")
+        check(!column.isFullWidth && column.width == .proportion(0.5), "a cycle leaves full width for the next preset")
     }
 }
 
