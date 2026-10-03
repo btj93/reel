@@ -1768,6 +1768,36 @@ struct FuzzStream {
         check(h.world.groups[2]!.hidden[TileID(3)] != nil && h.world.trackedElsewhere.contains(3),
               "a hide reaches the owning group, and the Observer keeps hearing the hidden window")
     }
+    section("R5 focus: only one group's restore takes OS focus on a Space change") {
+        func focused(_ effects: [Effect]) -> [String] {
+            effects.compactMap { if case .focus(let tile, let source) = $0 { "\(tile.rawValue) \(source)" } else { nil } }
+        }
+        var dock = Harness(displays: [display(), display(2, x: 1000)])
+        dock.census(10, [window(1)])
+        dock.census(22, [window(5), window(6, app: 60)], group: 2)
+        dock.send(.command(.focus(TileID(5)), .keyboard), group: 2)
+        dock.census(20, [window(3)], group: 2)
+        dock.send(.command(.focus(TileID(1)), .keyboard))
+        for intent in [FocusIntent(tile: nil, pid: 60, source: .appActivation), FocusIntent(tile: TileID(6), pid: 60, source: .appActivation)] {
+            dock.send(.focus(intent), group: dock.world.route(.focus(intent))!)
+        }
+        dock.send(.spaceWillChange, group: 2)
+        dock.census(22, [window(5), window(6, app: 60)], group: 2)
+        check(focused(dock.effects) == ["6 appActivation"], "a Dock click to an app on display 2's other Space lands on it: \(focused(dock.effects))")
+        var stacked = Harness(displays: [display(), display(2, y: 830)], separateSpaces: false)
+        stacked.census(10, [window(1)])
+        stacked.census(10, [window(2)], group: 2)
+        stacked.send(.command(.focus(TileID(1)), .keyboard))
+        for (space, tiles) in [(20 as UInt64, [3, 4] as [UInt32]), (10, [1, 2])] {
+            stacked.send(.spaceWillChange)
+            stacked.send(.spaceWillChange, group: 2)
+            stacked.census(space, [window(tiles[0])])
+            check(focused(stacked.effects) == ["\(tiles[0]) restore"], "the display with focus restores it on Space \(space)")
+            stacked.census(space, [window(tiles[1])], group: 2)
+            check(focused(stacked.effects).isEmpty, "the display without focus restores quietly on Space \(space)")
+            check(stacked.world.activeGroup == 1, "a Space switch leaves commands on the focused display")
+        }
+    }
     section("5753fc0: merge and split keep every display routed to its live group; config reaches every strip") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(10, [window(1)])
