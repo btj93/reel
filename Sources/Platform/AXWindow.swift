@@ -269,7 +269,11 @@ open class AXWindow: @unchecked Sendable {
 
     /// Give this window keyboard focus: activate the owning app, set it as the
     /// focused window, and raise it.
-    open func focus() {
+    open func focus() { focus(timeout: nil) }
+
+    /// `timeout` bounds how long a hung app can hold the calling thread on the app element; nil keeps the system's
+    /// 6 s default.
+    public func focus(timeout: Float?) {
         // Activate the owning application
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.activate(options: [])
@@ -277,8 +281,7 @@ open class AXWindow: @unchecked Sendable {
 
         // Set this window as the app's focused/main window
         let appElement = AXUIElementCreateApplication(pid)
-        // A fresh element has the 6 s default timeout, and a hung app would hold this thread for all of it.
-        AXUIElementSetMessagingTimeout(appElement, 0.1)
+        if let timeout { AXUIElementSetMessagingTimeout(appElement, timeout) }
         AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, element)
         AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
 

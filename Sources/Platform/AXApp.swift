@@ -78,20 +78,22 @@ open class AXApp: @unchecked Sendable {
         guard err == .success, let observer = obs else {
             print("[AXApp] AXObserverCreate failed pid=\(pid) err=\(err.rawValue)")
             fflush(stdout)
+            // No thread will run, so `perform` must refuse work instead of queueing it forever.
+            lock.lock()
+            stopRequested = true
+            lock.unlock()
             return
         }
         lock.lock()
         self.observer = observer
         lock.unlock()
 
-        // Subscribe to app-level notifications now (thread-agnostic).
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        for notification in Self.appNotifications {
-            let addErr = AXObserverAddNotification(observer, appElement, notification as CFString, refcon)
-            if addErr != .success {
-                print("[AXApp] app AXObserverAddNotification failed pid=\(pid) note=\(notification) err=\(addErr.rawValue)")
-                fflush(stdout)
-            }
+        // Subscribing messages the app, so with an on-thread handler it runs on the app's thread, where a hung app
+        // stalls only that thread.
+        if onThreadNotification == nil {
+            subscribeToApp(observer)
+        } else {
+            perform { [self] in subscribeToApp(observer) }
         }
 
         let t = Thread { [weak self] in
@@ -101,6 +103,17 @@ open class AXApp: @unchecked Sendable {
         t.qualityOfService = .userInteractive
         thread = t
         t.start()
+    }
+
+    private func subscribeToApp(_ observer: AXObserver) {
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        for notification in Self.appNotifications {
+            let addErr = AXObserverAddNotification(observer, appElement, notification as CFString, refcon)
+            if addErr != .success {
+                print("[AXApp] app AXObserverAddNotification failed pid=\(pid) note=\(notification) err=\(addErr.rawValue)")
+                fflush(stdout)
+            }
+        }
     }
 
     /// Stop observing and tear down the thread.
@@ -237,17 +250,24 @@ open class AXApp: @unchecked Sendable {
 
     // MARK: - Internal Event Handling
 
-    /// Run `work` on this app's thread, after any work queued before it. Never blocks the caller.
-    public func perform(_ work: @escaping @Sendable () -> Void) {
+    /// Run `work` on this app's thread, after any work queued before it. Never blocks the caller. False when the
+    /// thread is stopped or never started, so `work` will never run.
+    @discardableResult
+    public func perform(_ work: @escaping @Sendable () -> Void) -> Bool {
         lock.lock()
-        guard !stopRequested else { return lock.unlock() }
+        guard !stopRequested else {
+            lock.unlock()
+            return false
+        }
         guard let rl = runLoop else {
             pendingWork.append(work)
-            return lock.unlock()
+            lock.unlock()
+            return true
         }
         lock.unlock()
         CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode.rawValue, work)
         CFRunLoopWakeUp(rl)
+        return true
     }
 
     fileprivate func handleNotification(_ notification: String, element: AXUIElement) {

@@ -244,6 +244,16 @@ extension World {
     }
 
     fileprivate mutating func run(_ command: Command, source: FocusSource, group id: UInt32, _ pass: inout Pass) -> CommandOutcome {
+        switch command {
+        case .release:
+            // Quitting must never strand a window off screen, even mid Space change.
+            release(group: id, &pass)
+            return .accepted
+        case .recover:
+            return recover(group: id, &pass)
+        default:
+            break
+        }
         let outcome = execute(command, source: source, group: id, &pass)
         if outcome == .accepted { cancelTimers(group: id, &pass, focusOnly: true) }
         return outcome
@@ -307,13 +317,7 @@ extension World {
             guard group.windows[tile] != nil else { return .unknownWindow(tile) }
             pass.effects.append(.close(tile))
             return .accepted
-        case .recover:
-            for tile in group.windows.keys.ordered() {
-                frames.removeValue(forKey: tile)
-                appliedFrames.removeValue(forKey: tile)
-            }
-        case .release:
-            release(group: id, &pass)
+        case .recover, .release:
             return .accepted
         }
         if recenter, !group.strip.columns.isEmpty {
@@ -626,6 +630,17 @@ extension World {
             }
         }
         pass.persist = true
+    }
+
+    /// Forget what was written so the flush writes every frame again. Pending focus is left alone.
+    private mutating func recover(group id: UInt32, _ pass: inout Pass) -> CommandOutcome {
+        guard let group = groups[id], !group.phase.isChanging else { return .refused("space change in progress") }
+        for tile in group.windows.keys.ordered() {
+            frames.removeValue(forKey: tile)
+            appliedFrames.removeValue(forKey: tile)
+        }
+        pass.layout.insert(id)
+        return .accepted
     }
 
     /// Off-screen tiles come back on screen at their own size, cascaded so none hides another completely.

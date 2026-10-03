@@ -28,10 +28,12 @@ public struct EchoLedger: Sendable {
         if writes[tile]!.count > Self.history { writes[tile]!.removeFirst() }
     }
 
-    /// What a finished write leaves in the ledger.
-    public mutating func record(_ tile: TileID, revision: UInt64, requested: CGRect, result: FrameResult) {
-        guard case .applied = result else { return }
+    /// A write that timed out may still land, so only a hard failure is left out. `landed` is the frame the app kept:
+    /// one that clamps our width echoes that, not what we asked for, and is not the user resizing.
+    public mutating func record(_ tile: TileID, revision: UInt64, requested: CGRect, landed: CGRect? = nil, result: FrameResult) {
+        if case .failed = result { return }
         wrote(tile, revision: revision, frame: requested)
+        if let landed, !Self.matches(landed, requested) { wrote(tile, revision: revision, frame: landed) }
     }
 
     public mutating func forget(_ tile: TileID) {
@@ -92,8 +94,9 @@ public final class Executor {
         owners.removeValue(forKey: tile)
     }
 
-    func wrote(_ tile: TileID, revision: UInt64, frame: CGRect, result: FrameResult) {
-        ledger.record(tile, revision: revision, requested: frame, result: result)
+    func wrote(_ tile: TileID, revision: UInt64, frame: CGRect, landed: CGRect?, result: FrameResult) {
+        guard owners[tile] != nil else { return log("executor: write skipped, window gone tile=\(tile.rawValue) rev=\(revision)") }
+        ledger.record(tile, revision: revision, requested: frame, landed: landed, result: result)
         guard case .applied = result else { return log("executor: write failed tile=\(tile.rawValue) rev=\(revision) result=\(result)") }
         log("executor: wrote tile=\(tile.rawValue) rev=\(revision)")
     }
@@ -113,7 +116,7 @@ public final class Executor {
     }
 
     func focus(_ tile: TileID, pid: Int32) {
-        worker(pid)?.run(tile) { $0.focus() }
+        worker(pid)?.run(tile) { $0.focus(timeout: 0.1) }
     }
 
     func raise(_ tile: TileID, pid: Int32) {

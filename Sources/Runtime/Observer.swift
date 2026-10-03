@@ -26,13 +26,14 @@ public struct WindowFacts: Equatable, Sendable {
 enum Observation: Sendable {
     case discovered(pid: Int32, [WindowFacts])
     case created(WindowFacts)
-    case destroyed(pid: Int32, CGWindowID)
+    case destroyed(CGWindowID)
     case minimized(CGWindowID)
     case restored(WindowFacts)
     case retitled(WindowFacts)
     case moved(CGWindowID, CGRect)
     case focused(pid: Int32, CGWindowID?, activation: Bool)
-    case wrote(TileID, revision: UInt64, frame: CGRect, FrameResult)
+    /// `landed` is the frame the app kept, when known: an app may clamp the size we asked for.
+    case wrote(TileID, revision: UInt64, frame: CGRect, landed: CGRect?, FrameResult)
 }
 
 /// The loop's scope, readable from app threads: an observation is stamped when it happens, so one made before a
@@ -53,7 +54,8 @@ final class AppWorker: @unchecked Sendable {
     private let send: @Sendable (Observation, EventScope?) -> Void
     private let clock: ScopeClock
     private var windows: [CGWindowID: AXWindow] = [:]
-    private var lastSize: [CGWindowID: CGSize] = [:]
+    /// The size last asked for and the size the app kept. While a write asks for the same size, only the position is set.
+    private var sizes: [CGWindowID: (asked: CGSize, kept: CGSize)] = [:]
     private let lock = NSLock()
     private var queuedFrames: [TileID: (revision: UInt64, frame: CGRect)] = [:]
     private var drainQueued = false
@@ -66,7 +68,9 @@ final class AppWorker: @unchecked Sendable {
         self.clock = clock
         app.onThreadNotification = { [weak self] name, element in self?.handle(name, element) }
         app.startObserving()
-        app.perform { [self] in post(.discovered(pid: pid, getAppWindows(pid: pid).compactMap(register))) }
+        if !app.perform({ [self] in post(.discovered(pid: pid, getAppWindows(pid: pid).compactMap(register))) }) {
+            post(.discovered(pid: pid, []))
+        }
     }
 
     func stop() { app.stopObserving() }
@@ -99,8 +103,8 @@ final class AppWorker: @unchecked Sendable {
         app.perform { [self] in
             guard let window = windows[id], case .failure(.elementInvalid) = window.getPosition() else { return }
             windows.removeValue(forKey: id)
-            lastSize.removeValue(forKey: id)
-            post(.destroyed(pid: pid, id))
+            sizes.removeValue(forKey: id)
+            post(.destroyed(id))
         }
     }
 
@@ -117,18 +121,20 @@ final class AppWorker: @unchecked Sendable {
         for (tile, write) in batch {
             let id = CGWindowID(tile.rawValue)
             guard let window = windows[id] else {
-                post(.wrote(tile, revision: write.revision, frame: write.frame, .failed))
+                post(.wrote(tile, revision: write.revision, frame: write.frame, landed: nil, .failed))
                 continue
             }
             // A scroll keeps the size, and one position write is a third of the AX traffic of a full frame.
-            let result = lastSize[id] == write.frame.size ? window.setPosition(write.frame.origin) : window.setFrame(write.frame)
+            let kept = sizes[id].flatMap { $0.asked == write.frame.size ? $0.kept : nil }
+            let result = kept == nil ? window.setFrame(write.frame) : window.setPosition(write.frame.origin)
             switch result {
             case .success:
-                lastSize[id] = write.frame.size
-                post(.wrote(tile, revision: write.revision, frame: write.frame, .applied))
+                let landed = if let kept { CGRect(origin: write.frame.origin, size: kept) } else { try? window.getFrame().get() }
+                sizes[id] = (write.frame.size, landed?.size ?? write.frame.size)
+                post(.wrote(tile, revision: write.revision, frame: write.frame, landed: landed, .applied))
             case .failure(let error):
-                lastSize[id] = nil
-                post(.wrote(tile, revision: write.revision, frame: write.frame, error.isTimeout ? .timedOut : .failed))
+                sizes[id] = nil
+                post(.wrote(tile, revision: write.revision, frame: write.frame, landed: nil, error.isTimeout ? .timedOut : .failed))
             }
         }
     }
@@ -141,16 +147,17 @@ final class AppWorker: @unchecked Sendable {
             guard let id = windows.first(where: { CFEqual($0.value.element, element) })?.key else { return }
             app.unobserveWindow(element)
             windows.removeValue(forKey: id)
-            lastSize.removeValue(forKey: id)
-            post(.destroyed(pid: pid, id))
+            sizes.removeValue(forKey: id)
+            post(.destroyed(id))
         case kAXWindowMiniaturizedNotification:
             if let id = windowID(for: element) { post(.minimized(id)) }
         case kAXWindowDeminiaturizedNotification:
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.restored(facts(window))) }
         case kAXMovedNotification, kAXResizedNotification:
             guard let id = windowID(for: element), let window = windows[id], case .success(let frame) = window.getFrame() else { return }
-            // Someone else sized the window, so the next write must set the size again, not just the position.
-            if lastSize[id] != frame.size { lastSize[id] = nil }
+            // Someone else sized the window, so the next write must set the size again, not just the position. Height
+            // is the app's, and a width within the ledger's slop is rounding.
+            if let size = sizes[id], abs(size.kept.width - frame.width) > EchoLedger.slop { sizes[id] = nil }
             post(.moved(id, frame))
         case kAXTitleChangedNotification:
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.retitled(facts(window))) }
@@ -331,7 +338,7 @@ public final class Observer {
             learn(facts)
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
             if !paused, facts.classification != .ignore, isWindowOnScreen(facts.id) { emit(.windowAdded(facts.observed), stamp) }
-        case .destroyed(_, let id):
+        case .destroyed(let id):
             let wasManaged = managed().contains(id)
             forget(id)
             if wasManaged { emit(.windowRemoved(TileID(id)), nil) }
@@ -350,8 +357,8 @@ public final class Observer {
         case .focused(let pid, let id, let activation):
             guard !paused else { return }
             emit(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus)), stamp)
-        case .wrote(let tile, let revision, let frame, let result):
-            executor.wrote(tile, revision: revision, frame: frame, result: result)
+        case .wrote(let tile, let revision, let frame, let landed, let result):
+            executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
             emit(.frameCompleted(tile: tile, revision: revision, result: result), nil)
         }
     }

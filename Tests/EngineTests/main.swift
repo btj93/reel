@@ -1605,11 +1605,15 @@ struct FuzzStream {
         check(ledger.classify(tile, observed: first) == .echo(revision: 3), "a late echo of an earlier write in flight is still an echo")
         check(ledger.classify(tile, observed: CGRect(x: 80, y: 30, width: 500, height: 620)) == .echo(revision: 4),
               "a height the app chose is still our write")
+        let clamped = CGRect(x: 80, y: 30, width: 560, height: 800)
+        check(ledger.classify(tile, observed: clamped) == .foreign, "the same origin at another width is the user")
+        ledger.record(tile, revision: 5, requested: second, landed: clamped, result: .applied)
+        check(ledger.classify(tile, observed: clamped) == .echo(revision: 5), "the width an app clamped our write to is our echo")
         let moved = CGRect(x: 300, y: 30, width: 500, height: 800)
         check(ledger.classify(tile, observed: moved) == .foreign, "a frame we never wrote is the user")
-        ledger.wrote(tile, revision: 5, frame: second)
+        ledger.wrote(tile, revision: 6, frame: second)
         check(ledger.classify(tile, observed: moved) == .repeated, "an app that keeps refusing our frame is heard once")
-        check(ledger.classify(tile, observed: second) == .echo(revision: 5), "an accepted write clears the refusal")
+        check(ledger.classify(tile, observed: second) == .echo(revision: 6), "an accepted write clears the refusal")
         check(ledger.classify(tile, observed: moved) == .foreign, "the same user frame later is heard again")
         ledger.forget(tile)
         check(ledger.classify(tile, observed: second) == .foreign, "a forgotten window has no echoes")
@@ -1617,6 +1621,39 @@ struct FuzzStream {
             ledger.wrote(tile, revision: revision, frame: first.offsetBy(dx: Double(revision) * 10, dy: 0))
         }
         check(ledger.classify(tile, observed: first.offsetBy(dx: 100, dy: 0)) == .foreign, "history is bounded")
+    }
+    section("R3 echo: an app that refuses our width cannot loop write, refuse, rewrite") {
+        // Plays the app thread and the Observer: every write lands at least `minimum` wide.
+        @MainActor func heard(minimum: Double, readBack: Bool) -> (heard: Int, settled: Bool, preset: Int?) {
+            var h = Harness()
+            h.census(10, [window(1)])
+            var ledger = EchoLedger()
+            var heard = 0
+            var pending = h.requests
+            h.send(.command(.cycleWidthPreset, .keyboard))
+            pending += h.requests
+            for _ in 0..<50 where !pending.isEmpty {
+                let request = pending.removeFirst()
+                var landed = request.frame.rect
+                landed.size.width = max(landed.width, minimum)
+                ledger.record(request.tile, revision: request.revision, requested: request.frame.rect,
+                              landed: readBack ? landed : nil, result: .applied)
+                h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: .applied))
+                pending += h.requests
+                if ledger.classify(request.tile, observed: landed) == .foreign {
+                    heard += 1
+                    h.send(.windowMoved(request.tile, AXRect(landed)))
+                    pending += h.requests
+                }
+            }
+            return (heard, pending.isEmpty, h.world.groups[1]!.strip.columns[0].presetIndex)
+        }
+        let readBack = heard(minimum: 400, readBack: true)
+        check(readBack.heard == 0 && readBack.settled && readBack.preset == 0, "a read-back clamp is an echo and the preset stays")
+        let late = heard(minimum: 400, readBack: false)
+        check(late.heard == 1 && late.settled, "a clamp seen only in the echo is heard once, then the rewrite settles")
+        let wider = heard(minimum: 1200, readBack: false)
+        check(wider.heard <= 2 && wider.settled, "an app wider than any width we can give it is heard a bounded number of times")
     }
     section("R3 echo: a write that timed out mid-animation and lands late is still ours") {
         var h = Harness(animate: true)

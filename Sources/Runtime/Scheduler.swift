@@ -54,9 +54,10 @@ public final class Scheduler {
     /// Deliver every due job whose owner is still current, earliest first. Stale jobs are dropped with a log line.
     public func fire(now: Double) {
         let due = entries.filter { $0.value.deadline <= now }.sorted { $0.value.deadline < $1.value.deadline }
-        for (key, entry) in due {
-            // An earlier job in this batch may have cancelled this one.
-            guard entries.removeValue(forKey: key) != nil else { continue }
+        for key in due.map(\.key) {
+            // An earlier job in this batch may have cancelled or rescheduled this one.
+            guard let entry = entries[key], entry.deadline <= now else { continue }
+            entries.removeValue(forKey: key)
             guard isCurrent(entry.owner) else {
                 log("scheduler: dropped \(key) for a stale owner epoch=\(entry.owner.spaceEpoch) rev=\(entry.owner.topologyRevision)")
                 continue
