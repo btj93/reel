@@ -308,13 +308,15 @@ public struct World: Sendable {
     public func owner(of tile: TileID) -> UInt32? { groups.first { $0.value.windows[tile] != nil }?.key }
 
     /// The group an event goes to: the group holding the window it names, else the active group. A new window goes to
-    /// the group its frame is nearest.
+    /// the group its frame is nearest, an activation that names no window to a group holding one of the app's.
     public func route(_ kind: Event.Kind) -> UInt32? {
         let tile: TileID?
         switch kind {
         case .windowAdded(let window): return owner(of: window.id) ?? home(window) ?? activeGroup
         case .windowRemoved(let id), .windowMoved(let id, _), .frameCompleted(let id, _, _): tile = id
         case .windowsHidden(let ids): tile = ids.first { owner(of: $0) != nil }
+        case .focus(let intent) where intent.tile == nil:
+            return groups.keys.sorted().first { id in groups[id]!.windows.values.contains { $0.pid == intent.pid } } ?? activeGroup
         case .focus(let intent): tile = intent.tile
         case .command(let command, _), .ipc(_, let command): tile = command.tile
         case .pointer(let input, _): return input.tile.flatMap(owner) ?? pointer.scope?.group ?? activeGroup

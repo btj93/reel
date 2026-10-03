@@ -1708,6 +1708,7 @@ struct FuzzStream {
         h.census(10, [window(1)])
         h.census(20, [window(3)], group: 2)
         check(h.world.route(.focus(FocusIntent(tile: TileID(3), source: .axFocus))) == 2, "focus routes to the window's group")
+        check(h.world.route(.focus(FocusIntent(tile: nil, pid: 3, source: .appActivation))) == 2, "an activation routes to a group with the app's window")
         check(h.world.route(.windowAdded(window(7, x: 1200))) == 2 && h.world.route(.windowAdded(window(8, x: 100))) == 1,
               "a new window routes to the display under it")
         check(h.world.routed([window(7, x: 1200), window(8, x: 100), window(9), window(1)], to: 2).map(\.id.rawValue) == [7, 9],
