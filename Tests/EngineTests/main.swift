@@ -1325,7 +1325,7 @@ struct FuzzStream {
         case 7:
             let actions: [Command] = [.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile)]
             h.send(.pointer(.menu(pick(actions)!)), group: id)
-        case 8: h.send(.windowRemoved(tile), group: id)
+        case 8: h.send(tile.rawValue % 2 == 0 ? .windowHidden(tile) : .windowRemoved(tile), group: id)
         case 9:
             let stashed = pick(h.world.spaces.live.values.flatMap(\.windows).sorted { $0.id.rawValue < $1.id.rawValue })
             if rng.next(4) == 0, let known = rng.next(2) == 0 ? group.windows[tile] : stashed {
@@ -1944,6 +1944,59 @@ struct FuzzStream {
         check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minY == raised.minY && released[$0]?.height == raised.height + 20 },
               "every column comes back up at full height")
         check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minX == before[$0]?.minX }, "in its own column, not cascaded")
+    }
+    section("R3 release: a window hidden or minimized while off screen still comes back on screen") {
+        var h = Harness()
+        h.census(10, (1...6).map { window($0) })
+        let area = h.world.topology.groups[0].frame
+        let offScreen = h.world.frames.values.filter { $0.frame.rect.intersection(area).width < 2 }.map(\.tile)
+        guard let parked = offScreen.max(by: { $0.rawValue < $1.rawValue }) else { return check(false, "six columns hide some") }
+        var effects = h.send(.windowHidden(parked))
+        check(!h.tiles.contains(parked), "the hidden window leaves the strip")
+        effects += h.send(.command(.release, .ipc))
+        let last = effects.lastIndex { if case .setFrame(let request) = $0 { request.tile == parked } else { false } }
+        let cancelled = last.map { index in
+            effects[index...].contains { if case .invalidateFrame(let tile, _) = $0 { tile == parked } else { false } }
+        }
+        guard let last, case .setFrame(let request) = effects[last] else { return check(false, "the hidden window is written") }
+        check(area.contains(request.frame.rect) && cancelled == false, "it lands inside the working area, and nothing cancels it")
+        check(h.world.check().isEmpty, "hide invariants")
+    }
+    section("R3 floating: a window that registered with no title joins the strip once its title arrives") {
+        var h = Harness()
+        h.census(10, [window(1), window(2, floating: true)])
+        h.send(.windowChanged(window(2)))
+        check(Set(h.tiles) == [TileID(1), TileID(2)] && h.world.groups[1]!.floating.isEmpty, "the titled window tiles")
+        check(h.world.check().isEmpty, "late title invariants")
+        var toggled = Harness()
+        toggled.census(10, [window(1), window(2)])
+        toggled.send(.command(.toggleFloating(TileID(2)), .keyboard))
+        toggled.send(.windowChanged(window(2)))
+        check(toggled.world.groups[1]!.floating == [TileID(2)], "a window the user floated stays floating")
+        var ruled = Harness(rules: [Rule(bundleID: "test.app", floating: true)])
+        ruled.census(10, [window(1), window(2, floating: true)])
+        ruled.send(.windowChanged(window(2)))
+        check(ruled.world.groups[1]!.floating.contains(TileID(2)), "a floating rule still floats it")
+    }
+    section("R3 bounce: focus between columns moves the view without overshoot") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2), window(3)])
+        for _ in 0..<200 { h.send(.tick, advance: 0.02) }
+        let start = h.world.groups[1]!.strip.viewPos(at: h.world.time)
+        h.send(.command(.focusRight, .keyboard))
+        var samples: [Double] = []
+        for _ in 0..<200 { h.send(.tick, advance: 0.01); samples.append(h.world.groups[1]!.strip.viewPos(at: h.world.time)) }
+        let end = samples.last!
+        let low = min(start, end) - 1, high = max(start, end) + 1
+        check(h.active == TileID(2) && end != start && samples.allSatisfy { $0 >= low && $0 <= high },
+              "an interior focus never overshoots (\(start)->\(end), range \(samples.min()!)...\(samples.max()!))")
+    }
+    section("R3 config: invalid presets, snap points, stiffness and bounce fall back to the defaults") {
+        let config = EngineConfig(widthPresets: [-1, .nan], snapPoints: [], stiffness: -5, bounceDistance: .nan)
+        check(config.widthPresets == EngineConfig.defaultWidthPresets, "presets")
+        check(config.snapPoints == EngineConfig.defaultSnapPoints, "snap points")
+        check(config.scroll.stiffness == EngineConfig.defaultStiffness, "stiffness")
+        check(config.bounceDistance == EngineConfig.defaultBounceDistance, "bounce distance")
     }
     section("R3 lane 8: cycle, toggle full width, toggle back, toggle, cycle") {
         var h = Harness()

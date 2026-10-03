@@ -34,6 +34,8 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
 
     /// One-shot transient failure on the next set → exercises `dirtyTileIDs` retry.
     var failNextSet = false
+    /// One-shot: the next set times out, as a busy app's does.
+    var timeoutNextSet = false
     /// Models an app that refuses off-screen positioning. In instant `applyLayout`,
     /// `setPosition` is only ever called for OFF-SCREEN tiles (on-screen tiles use
     /// `setFrame`), so failing every `setPosition` fails exactly the off-screen
@@ -71,6 +73,10 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
     override func getSize() -> AXResult<CGSize> { .success(currentFrame.size) }
 
     private func apply(_ frame: CGRect) -> AXResult<Void> {
+        if timeoutNextSet {
+            timeoutNextSet = false
+            return .failure(.appUnresponsive)
+        }
         if failNextSet {
             failNextSet = false
             return .failure(.transientFailure(.failure))

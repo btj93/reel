@@ -29,7 +29,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .loadSnapshots(let snapshots): world.spaces.disk = snapshots.filter(\.isValid)
     case .windowAdded(let window): world.onWindowAdded(window, group: id, &pass)
     case .windowChanged(let window): world.onWindowChanged(window, &pass)
-    case .windowRemoved(let tile):
+    case .windowRemoved(let tile), .windowHidden(let tile):
         world.remove(tile, from: id, &pass)
         pass.persist = true
     case .windowMoved(let tile, let frame): world.onWindowMoved(tile, frame: frame, group: id, &pass)

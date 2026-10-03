@@ -107,4 +107,12 @@ func runRuntimeWriteTests() {
         _ = cache.write(tiled, to: w)
         assertEq(w.currentFrame, tiled, "a full write follows the failure")
     }
+
+    section("a timed-out write reports timedOut, so its late echo stays ours")
+    do {
+        let w = FakeAXWindow(windowID: 7, pid: 99001, frame: .zero)
+        var cache = SizeCache()
+        w.timeoutNextSet = true
+        check(cache.write(tiled, to: w).result == .timedOut, "a timeout is not a failure")
+    }
 }
