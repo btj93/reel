@@ -1093,6 +1093,18 @@ struct Harness {
         h.census(10, [window(1), window(2), window(9)])
         check(h.world.groups[1]!.space == .skylight(10) && h.censusRequest == nil, "the next switch is not deferred")
     }
+    section("Moved windows: a same-Space read of windows already here is not held") {
+        var h = Harness()
+        h.census(20, [window(5), window(9)])
+        h.census(30, [window(6), window(8)])
+        let here = [window(1), window(2), window(8), window(9)]
+        h.census(10, here)
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(10, here)
+        check(h.world.groups[1]!.space == .skylight(10), "the settled read commits")
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: here))
+        check(h.censusRequest == nil && !h.world.groups[1]!.phase.isChanging, "nothing can move, so nothing is held")
+    }
     section("Moved windows: a same-Space deferral keeps the swipe and pending focus") {
         var h = Harness()
         h.census(20, [window(3), window(4)])
