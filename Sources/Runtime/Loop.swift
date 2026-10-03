@@ -257,7 +257,8 @@ public final class Loop {
             observer.healthCheck()
             recover()
             // Focus reports were dropped while paused; read the real focus again so commands act on it.
-            NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: false, space: SpaceObserver.observedSpace())
+            NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?
+                .reportFocus(activation: false, space: SpaceObserver.observedSpace())
         }
         onChange?()
     }

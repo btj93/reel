@@ -244,7 +244,8 @@ extension World {
     }
 
     private mutating func prune(_ ids: Set<UInt32>, from stashes: [GroupSpace: Snapshot]) {
-        for (key, saved) in stashes where !saved.fingerprint.isDisjoint(with: ids) || saved.hidden.contains(where: { ids.contains($0.window.id.rawValue) }) {
+        for (key, saved) in stashes
+        where !saved.fingerprint.isDisjoint(with: ids) || saved.hidden.contains(where: { ids.contains($0.window.id.rawValue) }) {
             let pruned = removing(ids, from: saved)
             spaces.live[key] = pruned.isEmpty ? nil : pruned
         }
