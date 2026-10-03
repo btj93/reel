@@ -57,11 +57,11 @@ public struct SpaceBook: Sendable {
 
     private func tolerantMatch(group: UInt32, windows: [ObservedWindow]) -> SpaceMatch? {
         let identities = Set(windows.map(WindowIdentity.init))
-        let bundles = Set(windows.compactMap(\.knownBundleID))
-        let bundleByID = Dictionary(windows.map { ($0.id, $0.bundleID) }, uniquingKeysWith: { first, _ in first })
+        let bundles = appBundles(windows)
+        let bundleByID = Dictionary(windows.map { ($0.id, $0.knownBundleID) }, uniquingKeysWith: { first, _ in first })
         let indexed = disk.indices.filter { disk[$0].group == group }
         let winner = bestMatch(indexed.map { disk[$0] }) { saved in
-            let sameWindows = saved.windows.reduce(0) { bundleByID[$1.id] == .some($1.bundleID) ? $0 + 1 : $0 }
+            let sameWindows = saved.windows.reduce(0) { bundleByID[$1.id] == .some($1.knownBundleID) ? $0 + 1 : $0 }
             let union = saved.windows.count + windows.count - sameWindows
             return MatchScore(gate: similarity(saved.bundles, bundles), windowIDs: union == 0 ? 0 : Double(sameWindows) / Double(union),
                               titles: similarity(saved.identities, identities))
@@ -96,7 +96,7 @@ struct WindowIdentity: Hashable {
     let title: String
 
     init(_ window: ObservedWindow) {
-        bundleID = window.bundleID ?? ""
+        bundleID = window.knownBundleID ?? ""
         title = window.title
     }
 }
@@ -108,7 +108,8 @@ private func similarity<T: Hashable>(_ lhs: Set<T>, _ rhs: Set<T>) -> Double {
     return union == 0 ? 0 : Double(shared) / Double(union)
 }
 
-/// `gate` must clear the threshold; window ids above the threshold then outrank it, because ids survive a restart.
+/// `gate` or `windowIDs` must clear the threshold; window ids above it outrank the gate, because ids survive a restart
+/// and windows without a bundle have no app set to gate on.
 private struct MatchScore: Comparable {
     let gate: Double
     var windowIDs = 0.0
@@ -122,7 +123,7 @@ private struct MatchScore: Comparable {
 }
 
 private func bestMatch(_ candidates: [Snapshot], score: (Snapshot) -> MatchScore) -> Int? {
-    let scored = candidates.indices.map { (index: $0, score: score(candidates[$0])) }.filter { $0.score.gate > SpaceBook.matchThreshold }
+    let scored = candidates.indices.map { (index: $0, score: score(candidates[$0])) }.filter { max($0.score.gate, $0.score.windowIDs) > SpaceBook.matchThreshold }
     return scored.min {
         if $0.score != $1.score { return $0.score > $1.score }
         let lhs = candidates[$0.index], rhs = candidates[$1.index]

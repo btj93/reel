@@ -34,7 +34,11 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
 
     /// Bundle-less windows share no app identity, so they never match each other by app alone.
     var knownBundleID: String? { bundleID?.isEmpty == false ? bundleID : nil }
+
+    func hasSameOwner(as other: ObservedWindow) -> Bool { pid == other.pid && knownBundleID == other.knownBundleID }
 }
+
+func appBundles(_ windows: [ObservedWindow]) -> Set<String> { Set(windows.compactMap(\.knownBundleID)) }
 
 public enum Command: Sendable {
     case focusLeft, focusRight
@@ -85,7 +89,7 @@ public struct Event: Sendable {
 
         var isGlobal: Bool {
             switch self {
-            case .topologyChanged, .configChanged, .loadSnapshots, .query: true
+            case .topologyChanged, .configChanged, .loadSnapshots, .query, .windowChanged: true
             default: false
             }
         }

@@ -933,12 +933,13 @@ struct Harness {
         check(h.widths.first == .fixed(300), "the bundled window still restores")
         check(!h.widths.contains(.fixed(377)), "an unrelated bundle-less window does not inherit a slot")
     }
-    section("Snapshot identity: a title change for a stashed window does not adopt it") {
+    section("Snapshot identity: a title change for a stashed window does not adopt it, even from an old scope") {
         var h = Harness()
         h.census(20, [window(3), window(4)])
+        let old = h.world.scope(for: 1)!
         h.census(10, [window(1), window(2)])
         let focused = h.world.groups[1]!.focus.decision?.tile
-        let effects = h.send(.windowChanged(ObservedWindow(id: TileID(3), pid: 3, bundleID: "test.app", title: "renamed")))
+        let effects = h.send(.windowChanged(ObservedWindow(id: TileID(3), pid: 3, bundleID: "test.app", title: "renamed")), scope: old)
         check(h.tiles == [TileID(1), TileID(2)] && h.world.groups[1]!.focus.decision?.tile == focused, "stashed window stays on its Space")
         check(!effects.contains { if case .focus = $0 { return true }; if case .raise = $0 { return true }; return false },
               "stashed window is neither focused nor raised")
@@ -1065,8 +1066,11 @@ struct Harness {
             SnapshotColumn(windows: [window(8, bundle: nil)], width: .fixed(188)),
             SnapshotColumn(windows: [window(7, bundle: nil)], width: .fixed(177)),
         ])]))
+        var empty = h
         h.census(5, [window(7, bundle: nil), window(8, bundle: nil)])
         check(h.tiles == [TileID(8), TileID(7)] && h.widths == [.fixed(188), .fixed(177)], "the entry restores")
+        empty.census(5, [7, 8].map { ObservedWindow(id: TileID($0), pid: Int32($0), bundleID: "", title: "renamed") })
+        check(empty.widths == [.fixed(188), .fixed(177)], "an empty bundle id is the same as none")
     }
     section("IPC: a stale scope still gets a reply") {
         var h = Harness()
@@ -1140,8 +1144,13 @@ struct FuzzStream {
             h.send(.pointer(.menu(pick(actions)!)), group: id)
         case 8: h.send(.windowRemoved(tile), group: id)
         case 9:
-            if rng.next(4) == 0, let known = group.windows[tile] {
-                h.send(.windowAdded(ObservedWindow(id: known.id, pid: known.pid, bundleID: known.bundleID, title: "retitled-\(rng.next(9))")), group: id)
+            let stashed = pick(h.world.spaces.live.values.flatMap(\.windows).sorted { $0.id.rawValue < $1.id.rawValue })
+            if rng.next(4) == 0, let known = rng.next(2) == 0 ? group.windows[tile] : stashed {
+                h.send(.windowChanged(ObservedWindow(id: known.id, pid: known.pid, bundleID: known.bundleID, title: "retitled-\(rng.next(9))")), group: id)
+                break
+            }
+            if rng.next(4) == 0, let stashed {
+                h.send(.windowAdded(stashed), group: id)
                 break
             }
             nextID += 1

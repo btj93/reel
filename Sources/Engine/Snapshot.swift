@@ -54,7 +54,7 @@ public struct Snapshot: Codable, Sendable {
         windows = columns.flatMap(\.windows) + floating
         fingerprint = Set(windows.map { $0.id.rawValue })
         identities = Set(windows.map(WindowIdentity.init))
-        bundles = Set(windows.compactMap(\.knownBundleID))
+        bundles = appBundles(windows)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -136,22 +136,20 @@ func snapshot(_ group: GroupState, id: UInt32, time: Double) -> Snapshot? {
         focusedTile: group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile)
 }
 
-func removing(_ tile: TileID, from saved: Snapshot) -> Snapshot {
+func removing(_ ids: Set<UInt32>, from saved: Snapshot) -> Snapshot {
     let columns = saved.columns.compactMap { column -> SnapshotColumn? in
-        let windows = column.windows.filter { $0.id != tile }
+        let windows = column.windows.filter { !ids.contains($0.id.rawValue) }
         guard !windows.isEmpty else { return nil }
         return SnapshotColumn(windows: windows, width: column.width, activeTileIndex: min(column.activeTileIndex, windows.count - 1),
                               snapIndex: column.snapIndex, presetIndex: column.presetIndex, isFullWidth: column.isFullWidth)
     }
-    return Snapshot(group: saved.group, space: saved.space, columns: columns, floating: saved.floating.filter { $0.id != tile },
+    return Snapshot(group: saved.group, space: saved.space, columns: columns, floating: saved.floating.filter { !ids.contains($0.id.rawValue) },
                     activeColumnIndex: min(saved.activeColumnIndex, max(0, columns.count - 1)), offset: saved.offset,
-                    focusedTile: saved.focusedTile == tile ? nil : saved.focusedTile)
+                    focusedTile: saved.focusedTile.flatMap { ids.contains($0.rawValue) ? nil : $0 })
 }
 
 func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
-    func fresh(_ old: ObservedWindow) -> ObservedWindow {
-        old.id == window.id && old.pid == window.pid && old.bundleID == window.bundleID ? window : old
-    }
+    func fresh(_ old: ObservedWindow) -> ObservedWindow { old.id == window.id ? window : old }
     let columns = saved.columns.map {
         SnapshotColumn(windows: $0.windows.map(fresh), width: $0.width, activeTileIndex: $0.activeTileIndex,
                        snapIndex: $0.snapIndex, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
@@ -169,7 +167,7 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     var unused = windows.sorted { $0.id.rawValue < $1.id.rawValue }
     var mappedIDs: [TileID: TileID] = [:]
     let tiers: [(_ saved: ObservedWindow, _ live: ObservedWindow) -> Bool] = [
-        { $0.id == $1.id && $0.bundleID == $1.bundleID },
+        { $0.id == $1.id && $0.knownBundleID == $1.knownBundleID },
         { WindowIdentity($0) == WindowIdentity($1) },
         { $0.knownBundleID != nil && $0.knownBundleID == $1.knownBundleID },
     ]
