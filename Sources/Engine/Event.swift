@@ -77,8 +77,8 @@ public struct Event: Sendable {
         case windowAdded(ObservedWindow)
         case windowChanged(ObservedWindow)
         case windowRemoved(TileID)
-        /// The window left the strip but lives on: its app hid, or it minimized.
-        case windowHidden(TileID)
+        /// The windows left the strip but live on: their app hid, or one minimized.
+        case windowsHidden([TileID])
         /// The user moved or resized a window: the runtime already dropped the engine's own writes as echoes.
         case windowMoved(TileID, AXRect)
         case focus(FocusIntent)

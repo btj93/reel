@@ -354,9 +354,8 @@ public final class Observer {
     /// whether it is on another Space.
     private func hide(_ pid: Int32) {
         let managed = managed()
-        for id in known.values.filter({ $0.pid == pid }).map(\.id).sorted() where managed.contains(id) {
-            emit(.windowHidden(TileID(id)), nil)
-        }
+        let hidden = known.values.filter { $0.pid == pid && managed.contains($0.id) }.map(\.id).sorted().map(TileID.init)
+        if !hidden.isEmpty { emit(.windowsHidden(hidden), nil) }
     }
 
     private func register(_ app: NSRunningApplication) {
@@ -427,7 +426,7 @@ public final class Observer {
             if wasManaged { emit(.windowRemoved(TileID(id)), nil) }
         case .minimized(let id):
             known.removeValue(forKey: id)
-            if managed().contains(id) { emit(.windowHidden(TileID(id)), nil) }
+            if managed().contains(id) { emit(.windowsHidden([TileID(id)]), nil) }
         case .restored(let facts):
             learn(facts)
             if !paused(), facts.classification != .ignore { emitObserved(.windowAdded(facts.observed)) }

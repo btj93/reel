@@ -32,8 +32,8 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .windowRemoved(let tile):
         world.remove(tile, from: id, &pass)
         pass.persist = true
-    case .windowHidden(let tile):
-        world.hide(tile, from: id, &pass)
+    case .windowsHidden(let tiles):
+        world.hide(tiles, from: id, &pass)
         pass.persist = true
     case .windowMoved(let tile, let frame): world.onWindowMoved(tile, frame: frame, group: id, &pass)
     case .focus(let intent): world.onFocusObserved(intent, group: id, &pass)
@@ -187,7 +187,7 @@ extension World {
 
     /// An id can be reused by another app's window, so only a holder with the same owner takes the update. A window
     /// that floated only because it registered untitled joins the strip once its app says it tiles; one the user
-    /// floated is no longer floating by its own facts, so it stays.
+    /// floated never had floating facts, so it stays.
     private mutating func refreshIfSameOwner(_ window: ObservedWindow, _ pass: inout Pass) {
         var mismatched = false
         for id in groups.keys.sorted() {
@@ -659,13 +659,15 @@ extension World {
         }
     }
 
-    /// Release only walks the strip, so a window that leaves it alive (its app hid, or it minimized) gets its release
-    /// frame now. Written after the removal, whose invalidation would cancel it.
-    fileprivate mutating func hide(_ tile: TileID, from id: UInt32, _ pass: inout Pass) {
-        let pid = groups[id]?.windows[tile]?.pid
-        let frame = releaseFrames(group: id, at: pass.now).first { $0.tile == tile }?.frame
-        remove(tile, from: id, &pass)
-        if let pid, let frame, let scope = scope(for: id) { write(tile, pid: pid, frame: frame, scope: scope, &pass) }
+    /// Release only walks the strip, so windows that leave it alive (their app hid, or one minimized) get their release
+    /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them.
+    fileprivate mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
+        let writes = releaseFrames(group: id, at: pass.now).compactMap { tile, frame in
+            tiles.contains(tile) ? groups[id]?.windows[tile].map { (tile, $0.pid, frame) } : nil
+        }
+        for tile in tiles { remove(tile, from: id, &pass) }
+        guard let scope = scope(for: id) else { return }
+        for (tile, pid, frame) in writes { write(tile, pid: pid, frame: frame, scope: scope, &pass) }
     }
 
     /// Where quitting leaves each tile: off-screen ones come back on screen at their own size, cascaded so none hides

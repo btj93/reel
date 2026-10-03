@@ -1325,7 +1325,7 @@ struct FuzzStream {
         case 7:
             let actions: [Command] = [.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile)]
             h.send(.pointer(.menu(pick(actions)!)), group: id)
-        case 8: h.send(tile.rawValue % 2 == 0 ? .windowHidden(tile) : .windowRemoved(tile), group: id)
+        case 8: h.send(tile.rawValue % 2 == 0 ? .windowsHidden([tile]) : .windowRemoved(tile), group: id)
         case 9:
             let stashed = pick(h.world.spaces.live.values.flatMap(\.windows).sorted { $0.id.rawValue < $1.id.rawValue })
             if rng.next(4) == 0, let known = rng.next(2) == 0 ? group.windows[tile] : stashed {
@@ -1947,19 +1947,23 @@ struct FuzzStream {
     }
     section("R3 release: a window hidden or minimized while off screen still comes back on screen") {
         var h = Harness()
-        h.census(10, (1...6).map { window($0) })
+        h.census(10, (1...6).map { window($0, app: 7) })
         let area = h.world.topology.groups[0].frame
         let offScreen = h.world.frames.values.filter { $0.frame.rect.intersection(area).width < 2 }.map(\.tile)
-        guard let parked = offScreen.max(by: { $0.rawValue < $1.rawValue }) else { return check(false, "six columns hide some") }
-        var effects = h.send(.windowHidden(parked))
-        check(!h.tiles.contains(parked), "the hidden window leaves the strip")
+        let parked = Array(offScreen.sorted { $0.rawValue < $1.rawValue }.suffix(2))
+        guard parked.count == 2 else { return check(false, "six columns hide at least two") }
+        var effects = h.send(.windowsHidden(parked))
+        check(Set(h.tiles).isDisjoint(with: parked), "the hidden windows leave the strip")
         effects += h.send(.command(.release, .ipc))
-        let last = effects.lastIndex { if case .setFrame(let request) = $0 { request.tile == parked } else { false } }
-        let cancelled = last.map { index in
-            effects[index...].contains { if case .invalidateFrame(let tile, _) = $0 { tile == parked } else { false } }
+        var landed: [CGRect] = []
+        for tile in parked {
+            let last = effects.lastIndex { if case .setFrame(let request) = $0 { request.tile == tile } else { false } }
+            guard let last, case .setFrame(let request) = effects[last] else { return check(false, "hidden \(tile) is written") }
+            let cancelled = effects[last...].contains { if case .invalidateFrame(let other, _) = $0 { other == tile } else { false } }
+            check(area.contains(request.frame.rect) && !cancelled, "hidden \(tile) lands inside the working area, uncancelled")
+            landed.append(request.frame.rect)
         }
-        guard let last, case .setFrame(let request) = effects[last] else { return check(false, "the hidden window is written") }
-        check(area.contains(request.frame.rect) && cancelled == false, "it lands inside the working area, and nothing cancels it")
+        check(landed[0].origin != landed[1].origin, "cascaded, so neither hides the other exactly")
         check(h.world.check().isEmpty, "hide invariants")
     }
     section("R3 floating: a window that registered with no title joins the strip once its title arrives") {
