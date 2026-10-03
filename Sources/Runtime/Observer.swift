@@ -113,9 +113,10 @@ final class AppWorker: @unchecked Sendable {
 
     private func post(_ observation: Observation) { send(observation, clock.current) }
 
-    /// Look again for windows the app did not list at registration (it was busy), and retry an app-level subscription
-    /// that failed then. At most one request waits on the app thread, so a hung app does not pile them up.
-    func rediscover() {
+    /// Look again for windows the app did not list at registration (it was busy), report `ids` it already holds afresh
+    /// (one ignored once may tile now), and retry an app-level subscription that failed. At most one request waits on
+    /// the app thread, so a hung app does not pile them up.
+    func rediscover(_ ids: [CGWindowID]) {
         let first = lock.withLock { () -> Bool in
             defer { rediscoveryQueued = true }
             return !rediscoveryQueued
@@ -124,8 +125,9 @@ final class AppWorker: @unchecked Sendable {
         let queued = app.perform { [self] in
             lock.withLock { rediscoveryQueued = false }
             app.retryAppSubscriptions()
+            let held = ids.compactMap { windows[$0].map(facts) }
             let fresh = getAppWindows(pid: pid).filter { windowID(for: $0).map { windows[$0] == nil } ?? false }
-            post(.discovered(pid: pid, fresh.compactMap(register)))
+            post(.discovered(pid: pid, held + fresh.compactMap(register)))
         }
         if !queued { lock.withLock { rediscoveryQueued = false } }
     }
@@ -254,6 +256,7 @@ extension AXCallError {
 /// world.
 @MainActor
 public final class Observer {
+    /// Windows to manage; the ones their app classified `.ignore` are in `ignored` instead.
     public private(set) var known: [CGWindowID: WindowFacts] = [:]
     private(set) var workers: [Int32: AppWorker] = [:]
     let allowedPids: Set<Int32>?
@@ -318,7 +321,7 @@ public final class Observer {
     /// Fresh from the window server, never cached: the managed-candidate windows on screen right now.
     func census(_ onScreen: [CGWindowInfo] = getAllWindowInfo()) -> [ObservedWindow] {
         let onScreen = Set(onScreen.map(\.windowID))
-        return known.values.filter { $0.classification != .ignore && onScreen.contains($0.id) }
+        return known.values.filter { onScreen.contains($0.id) }
             .sorted { $0.id < $1.id }.map(\.observed)
     }
 
@@ -336,11 +339,12 @@ public final class Observer {
         ignored.formIntersection(visible)
         guard !paused() else { return }
         let unknown = onScreen.filter { $0.layer == 0 && known[$0.windowID] == nil && !ignored.contains($0.windowID) }
-        for pid in Set(unknown.map(\.ownerPID)).sorted() {
+        for (pid, windows) in Dictionary(grouping: unknown, by: \.ownerPID).sorted(by: { $0.key < $1.key }) {
             // An app can turn regular after its launch notification; its first on-screen window registers it. One that
             // was busy when it registered lists its windows now.
             // ponytail: a window AX never lists costs its app one kAXWindows read per pass; remember misses if perf shows it.
-            if let worker = workers[pid] { worker.rediscover() } else { NSRunningApplication(processIdentifier: pid).map(register) }
+            if let worker = workers[pid] { worker.rediscover(windows.map(\.windowID)) }
+            else { NSRunningApplication(processIdentifier: pid).map(register) }
         }
         for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window), nil) }
     }
