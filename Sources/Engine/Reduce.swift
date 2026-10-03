@@ -211,7 +211,8 @@ extension World {
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
-            guard known != window, !joinsStrip(was: known, now: window, config: config) else { continue }
+            let floated = saved.floating.contains { $0.id == window.id }
+            guard known != window, !(floated && joinsStrip(was: known, now: window, config: config)) else { continue }
             spaces.live[key] = refreshing(window, in: saved)
             pass.persist = true
         }
