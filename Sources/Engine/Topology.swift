@@ -12,6 +12,10 @@ public struct Display: Equatable, Sendable {
         self.frame = frame
         self.area = area
     }
+
+    func distance(to point: CGPoint) -> Double {
+        hypot(max(frame.minX - point.x, 0, point.x - frame.maxX), max(frame.minY - point.y, 0, point.y - frame.maxY))
+    }
 }
 
 /// Displays that share one strip.
@@ -74,13 +78,17 @@ public struct Topology: Sendable {
 
     /// The group whose displays come nearest `point`; a point on a display is on its group.
     public func nearestGroup(to point: CGPoint) -> DisplayGroup? {
-        func distance(_ group: DisplayGroup) -> Double {
-            group.displays.map { display in
-                hypot(max(display.frame.minX - point.x, 0, point.x - display.frame.maxX),
-                      max(display.frame.minY - point.y, 0, point.y - display.frame.maxY))
-            }.min()!
-        }
+        func distance(_ group: DisplayGroup) -> Double { group.displays.map { $0.distance(to: point) }.min()! }
         return groups.min { distance($0) < distance($1) }
+    }
+
+    /// A frame kept for a window off the strip moves with the display it is on, and is dropped with that display.
+    func carried(_ frame: AXRect?, to next: Topology) -> AXRect? {
+        guard let rect = frame?.rect else { return nil }
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        guard let old = displays.min(by: { $0.distance(to: center) < $1.distance(to: center) }),
+              let new = next.displays.first(where: { $0.id == old.id }) else { return nil }
+        return AXRect(rect.offsetBy(dx: new.frame.minX - old.frame.minX, dy: new.frame.minY - old.frame.minY))
     }
 
     /// Each group is one touching run of displays, or a single display under separate Spaces, and no two groups touch.
@@ -185,6 +193,11 @@ extension World {
                 let target = GroupSpace(group: destination(key.group) ?? fallback, space: key.space)
                 if groups[target.group]!.space == key.space { join(saved, into: target.group, at: pass.now) }
                 else { spaces.live[target] = saved.moved(to: target.group, after: spaces.live[target]) }
+            }
+        }
+        for id in groups.keys {
+            groups[id]!.hidden = groups[id]!.hidden.mapValues {
+                HiddenTile(window: $0.window, column: $0.column, place: $0.place, frame: before.carried($0.frame, to: next))
             }
         }
         pass.persist = true
