@@ -468,8 +468,8 @@ public final class Observer {
             emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus,
                                             observedSpace: space)))
         case .wrote(let tile, let revision, let frame, let landed, let result):
-            executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
-            emit(.frameCompleted(tile: tile, revision: revision, result: result), nil)
+            let scope = executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
+            emit(.frameCompleted(tile: tile, revision: revision, result: result), scope.map(Stamp.init))
         }
     }
 }

@@ -254,6 +254,16 @@ public struct ScheduledWork: Sendable {
 public struct Stamp: Equatable, Sendable {
     public let revision: UInt64
     public let epochs: [UInt32: UInt64]
+
+    public init(revision: UInt64, epochs: [UInt32: UInt64]) {
+        self.revision = revision
+        self.epochs = epochs
+    }
+
+    /// The stamp of work done for one group, such as a frame write: it is stale once that group's scope moves on.
+    public init(_ scope: EventScope) {
+        self.init(revision: scope.topologyRevision, epochs: [scope.group: scope.spaceEpoch])
+    }
 }
 
 public struct World: Sendable {
