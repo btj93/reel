@@ -30,22 +30,28 @@ public struct SpaceBook: Sendable {
     }
 
     public func lookupTolerant(group: DisplayGroup, windows: [ObservedWindow]) -> Snapshot? {
-        tolerantMatch(group: group, windows: windows)?.snapshot
+        tolerantMatch(group: group, windows: windows, anyGroup: false)?.snapshot
     }
 
-    func lookup(group: DisplayGroup, space: SpaceKey, windows: [ObservedWindow]) -> SpaceMatch? {
+    /// With `separateSpaces` a Space belongs to one display, so a strip saved under another group (its display was
+    /// unplugged) is found by its Space id, or on disk by its windows.
+    func lookup(group: DisplayGroup, space: SpaceKey, windows: [ObservedWindow], separateSpaces: Bool) -> SpaceMatch? {
         if let exact = lookupExact(group: group.id, space: space) { return SpaceMatch(snapshot: exact, source: .live(space)) }
+        if separateSpaces, space.isAuthoritative, let moved = live.first(where: { $0.key.space == space })?.value {
+            return SpaceMatch(snapshot: moved, source: .live(space))
+        }
         let fingerprint = Set(windows.map { $0.id.rawValue })
         let candidates = live.filter { $0.key.group == group.id && (!space.isAuthoritative || !$0.key.space.isAuthoritative) }.map(\.value)
         if let winner = bestMatch(candidates, score: { MatchScore(gate: similarity($0.fingerprint.union($0.hidden.map(\.window.id.rawValue).filter(fingerprint.contains)), fingerprint)) }) {
             return SpaceMatch(snapshot: candidates[winner], source: .live(candidates[winner].space))
         }
-        return tolerantMatch(group: group, windows: windows)
+        return tolerantMatch(group: group, windows: windows, anyGroup: separateSpaces)
     }
 
-    mutating func adopt(_ match: SpaceMatch, as key: SpaceKey) {
+    mutating func adopt(_ match: SpaceMatch, as key: SpaceKey, group: UInt32) {
         switch match.source {
-        case .live(let matched) where matched != key: live[GroupSpace(group: match.snapshot.group, space: matched)] = nil
+        case .live(let matched) where matched != key || match.snapshot.group != group:
+            live[GroupSpace(group: match.snapshot.group, space: matched)] = nil
         case .live: break
         case .disk(let index): disk.remove(at: index)
         }
@@ -59,12 +65,13 @@ public struct SpaceBook: Sendable {
     }
 
     /// A saved strip of any of the group's displays is a candidate, so a merged group finds the strips its displays
-    /// saved alone. A merged group saves under its smallest display, which finds the strip after a split.
-    private func tolerantMatch(group: DisplayGroup, windows: [ObservedWindow]) -> SpaceMatch? {
+    /// saved alone. A merged group saves under its smallest display, which finds the strip after a split. With
+    /// `anyGroup` every saved strip is.
+    private func tolerantMatch(group: DisplayGroup, windows: [ObservedWindow], anyGroup: Bool) -> SpaceMatch? {
         let identities = Set(windows.map(WindowIdentity.init))
         let bundles = appBundles(windows)
         let bundleByID = Dictionary(windows.map { ($0.id, $0.knownBundleID) }, uniquingKeysWith: { first, _ in first })
-        let indexed = disk.indices.filter { index in group.displays.contains { $0.id == disk[index].group } }
+        let indexed = disk.indices.filter { index in anyGroup || group.displays.contains { $0.id == disk[index].group } }
         let winner = bestMatch(indexed.map { disk[$0] }) { saved in
             let sameWindows = saved.windows.reduce(0) { bundleByID[$1.id] == .some($1.knownBundleID) ? $0 + 1 : $0 }
             let union = saved.windows.count + windows.count - sameWindows

@@ -578,8 +578,8 @@ extension World {
         let departing = groups[id]!
         stash(departing, id: id, time: pass.now)
         let display = topology.group(id: id)!
-        let match = onto.flatMap { spaces.lookup(group: display, space: $0, windows: windows) }
-        if let match { spaces.adopt(match, as: key) }
+        let match = onto.flatMap { spaces.lookup(group: display, space: $0, windows: windows, separateSpaces: topology.separateSpaces) }
+        if let match { spaces.adopt(match, as: key, group: id) }
         let live = if case .live? = match?.source { true } else { false }
         var group = restoredGroup(display: display, config: config, key: key, epoch: epoch, windows: windows,
                                   saved: match?.snapshot, hidesMissing: live, time: pass.now)
