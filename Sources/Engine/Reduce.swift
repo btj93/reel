@@ -102,7 +102,7 @@ extension World {
 
     fileprivate mutating func onFocusObserved(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
         let group = groups[id]!
-        guard !group.phase.isChanging || group.phase.isSameSpaceHold || intent.source == .appActivation else { return }
+        guard group.phase.acceptsFocus || intent.source == .appActivation else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
         let local = intent.source == .appActivation && group.windows.values.contains { $0.pid == intent.pid }
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
@@ -119,7 +119,7 @@ extension World {
             groups[id] = group
             return
         }
-        guard !group.phase.isChanging || group.phase.isSameSpaceHold, let tile = intent.tile, group.windows[tile] != nil else { return }
+        guard group.phase.acceptsFocus, let tile = intent.tile, group.windows[tile] != nil else { return }
         if pointer.isSwiping(group: id), intent.source.centers {
             cancelPointer(&pass)
             group = groups[id]!
@@ -169,11 +169,13 @@ extension World {
         var mismatched = false
         for id in groups.keys.sorted() {
             guard let known = groups[id]!.windows[window.id] else { continue }
-            if known.hasSameOwner(as: window) { groups[id]!.windows[window.id] = window; pass.persist = true } else { mismatched = true }
+            guard known.hasSameOwner(as: window) else { mismatched = true; continue }
+            if known != window { groups[id]!.windows[window.id] = window; pass.persist = true }
         }
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
-            if known.hasSameOwner(as: window) { spaces.live[key] = refreshing(window, in: saved); pass.persist = true } else { mismatched = true }
+            guard known.hasSameOwner(as: window) else { mismatched = true; continue }
+            if known != window { spaces.live[key] = refreshing(window, in: saved); pass.persist = true }
         }
         if mismatched { pass.effects.append(.log("window identity changed tile=\(window.id.rawValue)")) }
     }
@@ -399,7 +401,7 @@ extension World {
         cancelTimers(group: id, &pass)
         guard var group = groups[id] else { return }
         for tile in group.windows.keys.ordered() { invalidate(tile, &pass) }
-        if case .settled(let key) = group.phase { group.phase = .changing(from: key, deferred: nil) }
+        if group.phase.awaitsTeardown, let key = group.phase.key { group.phase = .changing(from: key, deferred: nil) }
         groups[id] = group
     }
 
@@ -423,13 +425,14 @@ extension World {
         let ids = Set(windows.map { $0.id.rawValue })
         if key == group.space {
             let moved = stashedElsewhere(ids, group: id)
-            // Nothing has left the screen, so the hold keeps swipes, timers and focus; only frames wait for the re-read.
+            // Nothing has left the screen, so the hold skips the teardown: swipes, timers and focus survive. Like any
+            // deferral it still holds frames, refuses commands and new gestures, and drops windowAdded until the re-read.
             if key.isAuthoritative, !settled, !moved.isEmpty {
                 return deferCensus(key, since: deferred?.since, reason: "same-Space census lists windows stashed elsewhere", group: id, &pass)
             }
             groups[id]!.phase = .settled(key)
             if case .crossing(_, _, let previous) = group.focus { groups[id]!.focus = previous.map(FocusState.resolved) ?? .none }
-            if verdict == .trusted || (confirmed && verdict == .mixed) {
+            if verdict == .trusted || (verdict == .mixed && (confirmed || moved.isEmpty)) {
                 let skipped = confirmed ? [] : moved
                 for window in visualOrder(windows) where !skipped.contains(window.id.rawValue) { add(window, to: id, &pass) }
                 if !skipped.isEmpty { pass.effects.append(.log("same-Space census skipped windows stashed elsewhere")) }
@@ -451,7 +454,7 @@ extension World {
             pass.layout.insert(id)
             return
         case .empty, .mixed, .invalid:
-            if case .settled = group.phase { beginSpaceChange(group: id, &pass) }
+            if group.phase.awaitsTeardown { beginSpaceChange(group: id, &pass) }
             return deferCensus(key, since: deferred?.since, reason: "\(verdict) space census", group: id, &pass)
         }
         commitSpace(key, epoch: epoch, windows: windows, group: id, &pass)

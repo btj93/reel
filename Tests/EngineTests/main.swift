@@ -845,6 +845,8 @@ struct Harness {
         check(h.world.groups[1]!.windows[TileID(1)]?.pid == 1, "a known id with a different owner is not refreshed")
         h.send(.windowChanged(window(1, app: 77)))
         check(h.world.groups[1]!.windows[TileID(1)]?.pid == 1, "windowChanged with a different owner does not refresh the live window")
+        h.send(.windowChanged(h.world.groups[1]!.windows[TileID(1)]!))
+        check(!h.persisted, "an unchanged window is not persisted")
     }
     section("Space census: in fingerprint mode an empty Space commits after its settle re-read") {
         var h = Harness()
@@ -1104,34 +1106,76 @@ struct Harness {
         check(h.world.groups[1]!.space == .skylight(10), "the settled read commits")
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: here))
         check(h.censusRequest == nil && !h.world.groups[1]!.phase.isChanging, "nothing can move, so nothing is held")
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: here + [window(7)]))
+        check(h.tiles.contains(TileID(7)), "a new window in a mixed same-Space read joins")
     }
-    section("Moved windows: a same-Space deferral keeps the swipe and pending focus") {
+    section("Moved windows: a same-Space hold keeps the swipe") {
         var h = Harness()
         h.census(20, [window(3), window(4)])
         h.census(10, [window(1), window(2)])
         h.advance(EngineConfig.focusDebounce + margin)
-        var queued = h
         h.send(.pointer(.beginGesture(TileID(1))))
         h.send(.pointer(.delta(40)))
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
         check(h.censusRequest != nil && h.gesture != nil, "the deferral keeps the swipe")
-        queued.send(.focus(FocusIntent(tile: TileID(2), source: .axFocus)))
-        queued.send(.spaceChanged(key: .skylight(10), epoch: queued.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
-        queued.advance(EngineConfig.focusDebounce + margin)
-        check(queued.world.groups[1]!.phase.isChanging && queued.world.groups[1]!.focus.decision?.tile == TileID(2),
-              "focus queued before the hold lands inside it")
-        queued.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
-        queued.advance(EngineConfig.focusDebounce + margin)
-        check(queued.world.groups[1]!.phase.isChanging && queued.world.groups[1]!.focus.decision?.tile == TileID(1),
-              "focus observed during the hold lands")
-        queued.advance(EngineConfig.censusSettle)
-        queued.send(.spaceChanged(key: .skylight(10), epoch: queued.world.groups[1]!.epoch + 1, windows: [window(1), window(2)]))
-        check(!queued.world.groups[1]!.phase.isChanging && queued.world.groups[1]!.focus.decision?.tile == TileID(1), "the re-read keeps it")
         h.send(.windowAdded(window(8)))
         check(h.logged("window add dropped during space change tile=8"), "a dropped windowAdded is logged")
         h.advance(EngineConfig.censusSettle + margin)
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2)]))
         check(h.tiles == [TileID(1), TileID(2)] && h.gesture != nil, "a re-read that changes nothing keeps the swipe")
+    }
+    section("Moved windows: focus lands during a same-Space hold") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.focus(FocusIntent(tile: TileID(2), source: .axFocus)))
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.world.groups[1]!.phase.isChanging && h.world.groups[1]!.focus.decision?.tile == TileID(2),
+              "focus queued before the hold lands inside it")
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.world.groups[1]!.phase.isChanging && h.world.groups[1]!.focus.decision?.tile == TileID(1),
+              "focus observed during the hold lands")
+        h.advance(EngineConfig.censusSettle)
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2)]))
+        check(!h.world.groups[1]!.phase.isChanging && h.world.groups[1]!.focus.decision?.tile == TileID(1), "the re-read keeps it")
+    }
+    section("c9d3e80: a real Space change during a same-Space hold still drops focus echoes") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.focus(TileID(2)), .keyboard))
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
+        check(h.censusRequest != nil, "the read opens a same-Space hold")
+        h.send(.spaceWillChange)
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "the echo is dropped once the real change starts")
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        check(h.active == TileID(2), "Space 10 restores its own focus")
+        check(h.world.check().isEmpty, "hold invariants")
+    }
+    section("Moved windows: a cross-Space deferral after a same-Space hold tears down the swipe") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.focus(TileID(2)), .keyboard))
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.pointer(.beginGesture(TileID(1))))
+        h.send(.pointer(.delta(40)))
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
+        check(h.gesture != nil, "the hold keeps the swipe")
+        h.census(30, [window(1), window(3)])
+        check(h.censusRequest != nil && h.world.groups[1]!.space == .skylight(10), "the mixed read for Space 30 is deferred")
+        check(h.gesture == nil && h.world.frames.isEmpty, "the cross-Space deferral cancels the swipe and invalidates frames")
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "a cross-Space deferral drops AX focus")
+        check(h.world.check().isEmpty, "hold invariants")
     }
     section("Moved windows: TODO(R4) fingerprint mode cannot tell a moved window from a stale read") {
         var h = Harness()

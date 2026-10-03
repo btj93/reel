@@ -59,10 +59,18 @@ public enum SpacePhase: Equatable, Sendable {
         return false
     }
 
-    /// Waiting on a re-read of the Space already on screen: focus there is still real.
-    public var isSameSpaceHold: Bool {
+    /// Waiting on a re-read of the Space already on screen. Nothing was torn down, and focus there is still real.
+    var isSameSpaceHold: Bool {
         if case .changing(let from, let deferred?) = self { return deferred.key == from }
         return false
+    }
+
+    var acceptsFocus: Bool { !isChanging || isSameSpaceHold }
+
+    /// A real Space change starting from here still has to cancel the pointer, timers and frames.
+    var awaitsTeardown: Bool {
+        if case .settled = self { return true }
+        return isSameSpaceHold
     }
 
     init(space: SpaceKey?, deferred: DeferredCensus?) {
