@@ -145,8 +145,9 @@ extension World {
 
     fileprivate mutating func onWindowAdded(_ window: ObservedWindow, group id: UInt32, _ pass: inout Pass) {
         let known = groups.values.contains { $0.windows[window.id] != nil }
-        if !known, spaces.live.values.contains(where: { $0.fingerprint.contains(window.id.rawValue) }) {
-            for (key, saved) in spaces.live { spaces.live[key] = refreshing(window, in: saved) }
+        let stashed = spaces.live.filter { $0.value.fingerprint.contains(window.id.rawValue) }
+        if !known, !stashed.isEmpty {
+            for (key, saved) in stashed { spaces.live[key] = refreshing(window, in: saved) }
             pass.persist = true
             return
         }
