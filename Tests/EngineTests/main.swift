@@ -1806,7 +1806,18 @@ struct FuzzStream {
         changing.census(10, (1...6).map { window($0) })
         changing.send(.spaceWillChange)
         changing.send(.command(.release, .ipc))
-        check(Set(changing.requests.map(\.tile)) == Set(offScreen), "quitting during a Space change still releases")
+        check(Set(changing.requests.map(\.tile)) == Set((1...6).map { TileID($0) })
+              && changing.requests.filter { offScreen.contains($0.tile) }.allSatisfy { area.contains($0.frame.rect) },
+              "quitting during a Space change still releases, and rewrites the frames the change cancelled")
+        var failed = Harness()
+        failed.census(10, (1...6).map { window($0) })
+        guard let parked = offScreen.max(by: { $0.rawValue < $1.rawValue }) else { return }
+        failed.send(.command(.focus(parked), .keyboard))
+        guard let request = failed.requests.first(where: { $0.tile == parked }) else { return check(false, "focus writes \(parked)") }
+        failed.send(.frameCompleted(tile: parked, revision: request.revision, result: .failed))
+        failed.send(.command(.release, .ipc))
+        check(failed.requests.contains { $0.tile == parked && $0.frame == request.frame },
+              "a window whose last write failed is written again, though its target is on screen")
     }
     section("R3 raise style: unfocused columns sit lower, derived from the active column") {
         var h = Harness()
@@ -1967,6 +1978,12 @@ struct FuzzStream {
         }
         check(landed[0].origin != landed[1].origin, "cascaded, so neither hides the other exactly")
         check(h.world.check().isEmpty, "hide invariants")
+        var apart = Harness()
+        apart.census(10, (1...6).map { window($0, app: 7) })
+        let origins = parked.compactMap { tile in
+            apart.send(.windowsHidden([tile])).lazy.compactMap { if case .setFrame(let request) = $0, request.tile == tile { request.frame.rect.origin } else { nil } }.first
+        }
+        check(origins.count == 2 && origins[0] != origins[1], "two hides in a row cascade from where the first stopped")
     }
     section("R3 floating: a window that registered with no title joins the strip once its title arrives") {
         var h = Harness()

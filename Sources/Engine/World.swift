@@ -142,6 +142,10 @@ public struct GroupState: Sendable {
     public internal(set) var phase: SpacePhase = .unknown(deferred: nil)
     public internal(set) var epoch: UInt64 = 0
     public internal(set) var focus: FocusState = .none
+    /// Windows whose app hid, or that minimized, with the place they left. Dropped with the group on a Space change.
+    // ponytail: a window that closes while hidden keeps its entry until then (the observer reports no removal for an
+    // unmanaged window); prune on the observer's destroy if hidden-then-closed windows ever pile up.
+    var hidden: [TileID: HiddenTile] = [:]
     public var space: SpaceKey? { phase.key }
 
     init(display: DisplayGroup, config: EngineConfig) {
@@ -149,10 +153,22 @@ public struct GroupState: Sendable {
         config.configure(&strip)
     }
 
+    /// The place `window` left when it hid, if it is the same app's window coming back.
+    func returning(_ window: ObservedWindow) -> HiddenTile? {
+        hidden[window.id].flatMap { $0.window.hasSameOwner(as: window) ? $0 : nil }
+    }
+
     static func area(for display: DisplayGroup) -> GroupWorkingArea {
         let rect = CGRect(origin: .zero, size: display.frame.size)
         return GroupWorkingArea(regions: [DisplayRegion(displayID: 0, rect: rect)], referenceMidX: rect.midX)
     }
+}
+
+/// A hidden window comes back as its own column at `index`, or floating when `column` is nil.
+struct HiddenTile: Sendable {
+    let window: ObservedWindow
+    let column: Column?
+    let index: Int
 }
 
 public enum ScheduledAction: Sendable {
@@ -228,6 +244,7 @@ public struct World: Sendable {
             if strip.snapIndices.contains(where: { !strip.snapPoints.indices.contains($0) }) { errors.append("invalid snap index") }
             if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
             if group.space == nil, !group.windows.isEmpty { errors.append("windows without a Space") }
+            if group.hidden.keys.contains(where: { group.windows[$0] != nil }) { errors.append("hidden window managed") }
         }
         if let owner = pointer.scope,
            scope(for: owner.group) != owner || pointer.tile.map({ groups[owner.group]?.windows[$0] == nil }) == true {

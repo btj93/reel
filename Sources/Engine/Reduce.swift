@@ -155,10 +155,13 @@ extension World {
     fileprivate mutating func onWindowAdded(_ window: ObservedWindow, group id: UInt32, _ pass: inout Pass) {
         guard window.isValid else { return pass.effects.append(.log("invalid window ignored tile=\(window.id.rawValue)")) }
         if groups[id]?.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
+        let returning = groups[id]?.returning(window) != nil
         add(window, to: id, &pass)
-        guard groups[id]?.windows[window.id] != nil else { return }
+        guard let group = groups[id], group.windows[window.id] != nil else { return }
         prune([window.id.rawValue], from: otherSpaces(than: id))
-        focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass)
+        // A window back from a hide is not new: the app's own activation decides focus, even one that came first.
+        if !returning { focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass) }
+        else if case .crossing(let intent, _, _) = group.focus, intent.tile == window.id { focus(intent, group: id, &pass) }
         pass.persist = true
     }
 
@@ -186,19 +189,21 @@ extension World {
     }
 
     /// An id can be reused by another app's window, so only a holder with the same owner takes the update. A window
-    /// that floated only because it registered untitled joins the strip once its app says it tiles; one the user
-    /// floated never had floating facts, so it stays.
+    /// that floated only because it registered untitled joins the strip, focused as a new window is, once its app says
+    /// it tiles; one the user floated never had floating facts, so it stays. A refused join keeps the old facts, so
+    /// the next report of the new ones tries again.
     private mutating func refreshIfSameOwner(_ window: ObservedWindow, _ pass: inout Pass) {
         var mismatched = false
         for id in groups.keys.sorted() {
             guard let known = groups[id]!.windows[window.id] else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
             guard known != window else { continue }
+            if shouldFloat(known, config: config), !shouldFloat(window, config: config), groups[id]!.floating.contains(window.id) {
+                guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
+                focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass)
+            }
             groups[id]!.windows[window.id] = window
             pass.persist = true
-            if shouldFloat(known, config: config), !shouldFloat(window, config: config), groups[id]!.floating.contains(window.id) {
-                _ = run(.toggleFloating(window.id), source: .adoption, group: id, &pass)
-            }
         }
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
@@ -214,12 +219,17 @@ extension World {
         }
         if group.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
         guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
-        cancelTimers(group: id, &pass, focusOnly: true)
+        let returning = group.returning(window)
+        if returning == nil { cancelTimers(group: id, &pass, focusOnly: true) }
         cancelGesture(in: id, &pass)
         group = groups[id]!
         if group.space?.isEmpty == true { group.phase = .settled(.fingerprint([window.id.rawValue])) }
         group.windows[window.id] = window
-        if shouldFloat(window, config: config) { group.floating.insert(window.id) }
+        group.hidden.removeValue(forKey: window.id)
+        if let returning {
+            if let column = returning.column { group.strip.restoreColumn(column, at: returning.index, time: pass.now) }
+            else { group.floating.insert(window.id) }
+        } else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
         groups[id] = group
         pass.layout.insert(id)
@@ -630,6 +640,7 @@ extension World {
             if group.space == old.space {
                 for window in old.windows.values.sorted(by: { $0.id.rawValue < $1.id.rawValue }) where group.windows[window.id] == nil {
                     group.windows[window.id] = window
+                    group.hidden.removeValue(forKey: window.id)
                     if old.floating.contains(window.id) { group.floating.insert(window.id) }
                 }
                 for column in old.strip.columns { group.strip.insertColumn(column, at: pass.now, atIndex: group.strip.columns.count) }
@@ -653,36 +664,50 @@ extension World {
     }
 
     fileprivate mutating func release(group id: UInt32, _ pass: inout Pass) {
-        guard let group = groups[id], let scope = scope(for: id) else { return }
-        for (tile, frame) in releaseFrames(group: id, at: pass.now) {
-            if let pid = group.windows[tile]?.pid { write(tile, pid: pid, frame: frame, scope: scope, &pass) }
-        }
+        write(releaseFrames(group: id, at: pass.now), group: id, &pass)
     }
 
     /// Release only walks the strip, so windows that leave it alive (their app hid, or one minimized) get their release
-    /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them.
+    /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them. Each one's
+    /// column, or its floating, is remembered for when it comes back.
     fileprivate mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
-        let writes = releaseFrames(group: id, at: pass.now).compactMap { tile, frame in
-            tiles.contains(tile) ? groups[id]?.windows[tile].map { (tile, $0.pid, frame) } : nil
+        guard let group = groups[id] else { return }
+        let writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
+        for tile in tiles {
+            guard let window = group.windows[tile] else { continue }
+            let index = group.strip.columnIndex(of: tile)
+            let column = index.map { group.strip.columns[$0] }.map {
+                Column(tiles: [tile], width: $0.width, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
+            }
+            remove(tile, from: id, &pass)
+            groups[id]!.hidden[tile] = HiddenTile(window: window, column: column, index: index ?? 0)
         }
-        for tile in tiles { remove(tile, from: id, &pass) }
+        write(writes, group: id, &pass)
+    }
+
+    private mutating func write(_ writes: [(tile: TileID, pid: Int32, frame: AXRect)], group id: UInt32, _ pass: inout Pass) {
         guard let scope = scope(for: id) else { return }
         for (tile, pid, frame) in writes { write(tile, pid: pid, frame: frame, scope: scope, &pass) }
     }
 
     /// Where quitting leaves each tile: off-screen ones come back on screen at their own size, cascaded so none hides
-    /// another completely, and columns the raise style lowered come back up to full height.
-    private func releaseFrames(group id: UInt32, at time: Double) -> [(tile: TileID, frame: AXRect)] {
+    /// another completely, and columns the raise style lowered, or whose last write failed, go to their full frame.
+    /// The cascade starts past the windows earlier hides already cascaded.
+    private func releaseFrames(group id: UInt32, at time: Double) -> [(tile: TileID, pid: Int32, frame: AXRect)] {
         guard let group = groups[id], let display = topology.groups.first(where: { $0.id == id }) else { return [] }
         let area = display.frame
-        var step = 0.0
-        return computeTargetFrames(strip: group.strip, time: time).filter { $0.isOffScreen || config.raiseHeight > 0 }.map { target in
-            guard target.isOffScreen else { return (target.tileID, axRect(ViewportRect(target.frame), on: display)) }
+        var step = 30 * Double(group.hidden.count)
+        return computeTargetFrames(strip: group.strip, time: time).compactMap { target in
+            guard let pid = group.windows[target.tileID]?.pid else { return nil }
+            let frame = axRect(ViewportRect(target.frame), on: display)
+            guard target.isOffScreen else {
+                return config.raiseHeight > 0 || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
+            }
             let size = target.frame.size
             defer { step += 30 }
-            return (target.tileID, AXRect(CGRect(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
-                                                 y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)),
-                                                 width: size.width, height: size.height)))
+            return (target.tileID, pid, AXRect(CGRect(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
+                                                      y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)),
+                                                      width: size.width, height: size.height)))
         }
     }
 
@@ -738,6 +763,15 @@ extension Strip {
 
     mutating func insertTile(_ tile: TileID, at time: Double) {
         insertColumn(Column(tiles: [tile], width: defaultWidth), at: time)
+    }
+
+    /// Puts a column back at `index` without moving the view: the active column stays active, where it was on screen.
+    mutating func restoreColumn(_ column: Column, at index: Int, time: Double) {
+        guard !columns.isEmpty else { return insertColumn(column, at: time, atIndex: 0) }
+        let index = min(index, columns.count), active = activeColumnIndex, offset = viewOffset
+        insertColumn(column, at: time, atIndex: index)
+        activeColumnIndex = index <= active ? active + 1 : active
+        viewOffset = offset
     }
 
     mutating func removeTile(_ tile: TileID, at time: Double) {
