@@ -401,7 +401,10 @@ extension World {
         cancelTimers(group: id, &pass)
         guard var group = groups[id] else { return }
         for tile in group.windows.keys.ordered() { invalidate(tile, &pass) }
-        if group.phase.awaitsTeardown, let key = group.phase.key { group.phase = .changing(from: key, deferred: nil) }
+        if group.phase.awaitsTeardown, let key = group.phase.key {
+            // A pending re-read keeps its settle clock but no longer holds: focus from here on is an echo.
+            group.phase = .changing(from: key, deferred: group.phase.deferred.map { DeferredCensus(key: $0.key, since: $0.since) })
+        }
         groups[id] = group
     }
 
@@ -428,7 +431,8 @@ extension World {
             // Nothing has left the screen, so the hold skips the teardown: swipes, timers and focus survive. Like any
             // deferral it still holds frames, refuses commands and new gestures, and drops windowAdded until the re-read.
             if key.isAuthoritative, !settled, !moved.isEmpty {
-                return deferCensus(key, since: deferred?.since, reason: "same-Space census lists windows stashed elsewhere", group: id, &pass)
+                return deferCensus(key, since: deferred?.since, holds: group.phase.awaitsTeardown,
+                                   reason: "same-Space census lists windows stashed elsewhere", group: id, &pass)
             }
             groups[id]!.phase = .settled(key)
             if case .crossing(_, _, let previous) = group.focus { groups[id]!.focus = previous.map(FocusState.resolved) ?? .none }
@@ -460,9 +464,10 @@ extension World {
         commitSpace(key, epoch: epoch, windows: windows, group: id, &pass)
     }
 
-    private mutating func deferCensus(_ key: SpaceKey, since: Double?, reason: String, group id: UInt32, _ pass: inout Pass) {
+    private mutating func deferCensus(_ key: SpaceKey, since: Double?, holds: Bool = false, reason: String, group id: UInt32,
+                                      _ pass: inout Pass) {
         let since = since ?? pass.now
-        groups[id]!.phase = SpacePhase(space: groups[id]!.space, deferred: DeferredCensus(key: key, since: since))
+        groups[id]!.phase = SpacePhase(space: groups[id]!.space, deferred: DeferredCensus(key: key, since: since, holds: holds))
         pass.effects.append(.log("\(reason) deferred"))
         pass.effects.append(.requestCensus(group: id, after: since + EngineConfig.censusSettle - pass.now))
     }

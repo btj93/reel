@@ -40,6 +40,8 @@ public struct EngineConfig: Sendable {
 public struct DeferredCensus: Equatable, Sendable {
     public let key: SpaceKey
     public let since: Double
+    /// Set only when a same-Space read deferred a group that had not been torn down.
+    public var holds = false
 }
 
 public enum SpacePhase: Equatable, Sendable {
@@ -59,9 +61,9 @@ public enum SpacePhase: Equatable, Sendable {
         return false
     }
 
-    /// Waiting on a re-read of the Space already on screen. Nothing was torn down, and focus there is still real.
+    /// A same-Space re-read is pending and the group was never torn down, so focus there is still real.
     var isSameSpaceHold: Bool {
-        if case .changing(let from, let deferred?) = self { return deferred.key == from }
+        if case .changing(_, let deferred?) = self { return deferred.holds }
         return false
     }
 

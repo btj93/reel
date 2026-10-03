@@ -1159,6 +1159,35 @@ struct Harness {
         check(h.active == TileID(2), "Space 10 restores its own focus")
         check(h.world.check().isEmpty, "hold invariants")
     }
+    section("c9d3e80: a same-Space read after spaceWillChange does not reopen focus") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.spaceWillChange)
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
+        check(h.censusRequest != nil, "the read is deferred")
+        h.send(.focus(FocusIntent(tile: TileID(2), source: .axFocus)))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.world.groups[1]!.focus.decision?.tile == TileID(1), "a torn-down group drops the echo")
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        check(h.active == TileID(1), "Space 10 restores its own focus")
+    }
+    section("Moved windows: spaceWillChange during a hold keeps the settle clock") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        let moved = [window(1), window(2), window(3)]
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: moved))
+        for _ in 0..<2 {
+            h.advance(EngineConfig.censusSettle * 0.6)
+            h.send(.spaceWillChange)
+            h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: moved))
+        }
+        check(!h.world.groups[1]!.phase.isChanging && h.tiles.contains(TileID(3)), "the re-read settles on the original clock")
+    }
     section("Moved windows: a cross-Space deferral after a same-Space hold tears down the swipe") {
         var h = Harness()
         h.census(20, [window(3), window(4)])
