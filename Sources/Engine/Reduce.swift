@@ -102,7 +102,7 @@ extension World {
 
     fileprivate mutating func onFocusObserved(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
         let group = groups[id]!
-        guard !group.phase.isChanging || intent.source == .appActivation else { return }
+        guard !group.phase.isChanging || group.phase.isSameSpaceHold || intent.source == .appActivation else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
         let local = intent.source == .appActivation && group.windows.values.contains { $0.pid == intent.pid }
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
@@ -119,7 +119,7 @@ extension World {
             groups[id] = group
             return
         }
-        guard !group.phase.isChanging, let tile = intent.tile, group.windows[tile] != nil else { return }
+        guard !group.phase.isChanging || group.phase.isSameSpaceHold, let tile = intent.tile, group.windows[tile] != nil else { return }
         if pointer.isSwiping(group: id), intent.source.centers {
             cancelPointer(&pass)
             group = groups[id]!
@@ -147,44 +147,42 @@ extension World {
         pass.persist = true
     }
 
-    /// The window is on this group's current Space, so it moves here from any stash that still lists it.
+    /// A new window is on this group's current Space, so it moves here from any stash that still lists it.
     fileprivate mutating func onWindowAdded(_ window: ObservedWindow, group id: UInt32, _ pass: inout Pass) {
         guard window.isValid else { return pass.effects.append(.log("invalid window ignored tile=\(window.id.rawValue)")) }
-        let known = groups[id]?.windows[window.id] != nil
+        if groups[id]?.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
         add(window, to: id, &pass)
         guard groups[id]?.windows[window.id] != nil else { return }
         prune([window.id.rawValue], from: otherSpaces(than: id))
-        if !known { focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass) }
+        focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass)
         pass.persist = true
     }
 
     /// Metadata only: whichever group or stash holds the window takes the new title and frame.
     fileprivate mutating func onWindowChanged(_ window: ObservedWindow, _ pass: inout Pass) {
         guard window.isValid else { return pass.effects.append(.log("invalid window ignored tile=\(window.id.rawValue)")) }
-        var held = [ObservedWindow]()
+        refreshIfSameOwner(window, &pass)
+    }
+
+    /// An id can be reused by another app's window, so only a holder with the same owner takes the update.
+    private mutating func refreshIfSameOwner(_ window: ObservedWindow, _ pass: inout Pass) {
+        var mismatched = false
         for id in groups.keys.sorted() {
             guard let known = groups[id]!.windows[window.id] else { continue }
-            held.append(known)
-            if known.hasSameOwner(as: window) { groups[id]!.windows[window.id] = window }
+            if known.hasSameOwner(as: window) { groups[id]!.windows[window.id] = window; pass.persist = true } else { mismatched = true }
         }
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
-            held.append(known)
-            if known.hasSameOwner(as: window) { spaces.live[key] = refreshing(window, in: saved) }
+            if known.hasSameOwner(as: window) { spaces.live[key] = refreshing(window, in: saved); pass.persist = true } else { mismatched = true }
         }
-        if held.contains(where: { !$0.hasSameOwner(as: window) }) {
-            pass.effects.append(.log("window identity changed tile=\(window.id.rawValue)"))
-        }
-        pass.persist = pass.persist || !held.isEmpty
+        if mismatched { pass.effects.append(.log("window identity changed tile=\(window.id.rawValue)")) }
     }
 
     fileprivate mutating func add(_ window: ObservedWindow, to id: UInt32, _ pass: inout Pass) {
-        guard var group = groups[id], case .settled = group.phase else { return }
-        if let known = group.windows[window.id] {
-            if known.hasSameOwner(as: window) { groups[id]!.windows[window.id] = window }
-            else { pass.effects.append(.log("window identity changed tile=\(window.id.rawValue)")) }
-            return
+        guard var group = groups[id], case .settled = group.phase else {
+            return pass.effects.append(.log("window add dropped during space change tile=\(window.id.rawValue)"))
         }
+        if group.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
         guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
         cancelGesture(in: id, &pass)
@@ -418,13 +416,15 @@ extension World {
         let verdict = censusVerdict(windows, group: id)
         let deferred = group.phase.deferred.flatMap { $0.key == key ? $0 : nil }
         let settled = deferred.map { pass.now - $0.since >= EngineConfig.censusSettle } ?? false
-        // A read that lists another Space's windows twice, a settle apart, under a Space id means they moved.
-        // A fingerprint key is built from the read itself, so it cannot vouch for that.
+        // Under a Space id, a read that still lists another Space's windows a settle later commits. A census never
+        // prunes another Space's stash, so a stale one costs gaps that heal on the next visit.
+        // A fingerprint key is built from the read itself, so it cannot vouch for the read.
         let confirmed = settled && key.isAuthoritative
         let ids = Set(windows.map { $0.id.rawValue })
         if key == group.space {
             let moved = stashedElsewhere(ids, group: id)
-            if key.isAuthoritative, !settled, verdict == .mixed || !moved.isEmpty {
+            // Nothing has left the screen, so the hold keeps swipes, timers and focus; only frames wait for the re-read.
+            if key.isAuthoritative, !settled, !moved.isEmpty {
                 return deferCensus(key, since: deferred?.since, reason: "same-Space census lists windows stashed elsewhere", group: id, &pass)
             }
             groups[id]!.phase = .settled(key)
@@ -432,7 +432,6 @@ extension World {
             if verdict == .trusted || (confirmed && verdict == .mixed) {
                 let skipped = confirmed ? [] : moved
                 for window in visualOrder(windows) where !skipped.contains(window.id.rawValue) { add(window, to: id, &pass) }
-                if confirmed { prune(ids, from: otherSpaces(than: id)) }
                 if !skipped.isEmpty { pass.effects.append(.log("same-Space census skipped windows stashed elsewhere")) }
             } else if !windows.isEmpty {
                 pass.effects.append(.log("same-Space census not adopted"))
@@ -452,14 +451,13 @@ extension World {
             pass.layout.insert(id)
             return
         case .empty, .mixed, .invalid:
+            if case .settled = group.phase { beginSpaceChange(group: id, &pass) }
             return deferCensus(key, since: deferred?.since, reason: "\(verdict) space census", group: id, &pass)
         }
         commitSpace(key, epoch: epoch, windows: windows, group: id, &pass)
-        if verdict == .mixed { prune(ids, from: otherSpaces(than: id)) }
     }
 
     private mutating func deferCensus(_ key: SpaceKey, since: Double?, reason: String, group id: UInt32, _ pass: inout Pass) {
-        if case .settled = groups[id]!.phase { beginSpaceChange(group: id, &pass) }
         let since = since ?? pass.now
         groups[id]!.phase = SpacePhase(space: groups[id]!.space, deferred: DeferredCensus(key: key, since: since))
         pass.effects.append(.log("\(reason) deferred"))
@@ -501,7 +499,7 @@ extension World {
         return spansMultipleSpaces(onScreenIDs: Set(windows.map { $0.id.rawValue }), knownFingerprints: fingerprints) ? .mixed : .trusted
     }
 
-    /// Every stash except this group's current Space, on any display: a window id lives on one Space only.
+    /// Every live stash except this group's current Space, on any display.
     private func otherSpaces(than id: UInt32) -> [GroupSpace: Snapshot] {
         let here = groups[id]!.space.map { GroupSpace(group: id, space: $0) }
         return spaces.live.filter { $0.key != here }

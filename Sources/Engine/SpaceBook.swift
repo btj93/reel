@@ -108,12 +108,14 @@ private func similarity<T: Hashable>(_ lhs: Set<T>, _ rhs: Set<T>) -> Double {
     return union == 0 ? 0 : Double(shared) / Double(union)
 }
 
-/// `gate` or `windowIDs` must clear the threshold; window ids above it outrank the gate, because ids survive a restart
-/// and windows without a bundle have no app set to gate on.
+/// `gate` or `windowIDs` must clear the threshold; window ids above it outrank the gate, because ids survive a Reel
+/// restart (not a reboot) and windows without a bundle have no app set to gate on.
 private struct MatchScore: Comparable {
     let gate: Double
     var windowIDs = 0.0
     var titles = 0.0
+
+    var passes: Bool { max(gate, windowIDs) > SpaceBook.matchThreshold }
 
     private var rank: (Double, Double, Double, Double) {
         (windowIDs > SpaceBook.matchThreshold ? windowIDs : 0, gate, windowIDs, titles)
@@ -123,7 +125,7 @@ private struct MatchScore: Comparable {
 }
 
 private func bestMatch(_ candidates: [Snapshot], score: (Snapshot) -> MatchScore) -> Int? {
-    let scored = candidates.indices.map { (index: $0, score: score(candidates[$0])) }.filter { max($0.score.gate, $0.score.windowIDs) > SpaceBook.matchThreshold }
+    let scored = candidates.indices.map { (index: $0, score: score(candidates[$0])) }.filter(\.score.passes)
     return scored.min {
         if $0.score != $1.score { return $0.score > $1.score }
         let lhs = candidates[$0.index], rhs = candidates[$1.index]

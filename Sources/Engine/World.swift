@@ -59,6 +59,12 @@ public enum SpacePhase: Equatable, Sendable {
         return false
     }
 
+    /// Waiting on a re-read of the Space already on screen: focus there is still real.
+    public var isSameSpaceHold: Bool {
+        if case .changing(let from, let deferred?) = self { return deferred.key == from }
+        return false
+    }
+
     init(space: SpaceKey?, deferred: DeferredCensus?) {
         switch (space, deferred) {
         case (nil, _): self = .unknown(deferred: deferred)
