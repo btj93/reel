@@ -906,6 +906,21 @@ do {
     assertClose(strip.columnData[0].currentWidth(at: 2.0), 360, tolerance: 1.0, "converges to target")
 }
 
+section("setWidth resolves a fixed width against the column's own region")
+do {
+    var strip = Strip(gap: 0, groupArea: GroupWorkingArea(
+        regions: [DisplayRegion(displayID: 1, rect: CGRect(x: 0, y: 0, width: 1000, height: 800)),
+                  DisplayRegion(displayID: 2, rect: CGRect(x: 1000, y: 0, width: 2000, height: 800))],
+        referenceMidX: 500))
+    strip.insertColumn(Column(tiles: [TileID(1)]), at: 0)
+    strip.columns[0].presetIndex = 1
+    strip.setWidth(.fixed(1500), column: 0, at: 0, params: nil)
+    assertClose(strip.columnData[0].cachedWidth, 1000, tolerance: 0.01, "clamped to the 1000px region, not the 3000px span")
+    check(strip.columns[0].width == .fixed(1500) && strip.columns[0].presetIndex == nil, "logical width kept, preset cleared")
+    strip.recalculateWidths(at: 0)
+    assertClose(strip.columnData[0].cachedWidth, 1000, tolerance: 0.01, "recalculation agrees with setWidth")
+}
+
 section("cycleWidthPreset animated — rapid retarget preserves velocity")
 do {
     var strip = makeStrip(columnCount: 1)
