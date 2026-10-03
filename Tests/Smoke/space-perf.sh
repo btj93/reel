@@ -38,6 +38,8 @@ REEL_LOG="$NS/reel.log"
 SAMPLES="$NS/samples"
 TEST_REEL_PID=""
 BIN_REEL="${BINS[0]}"
+# Global, so the switches alternate across blocks too: a block never starts by switching past the last Space.
+DIRECTION=right
 
 cleanup() {
     quit_reel
@@ -56,6 +58,12 @@ switch_space() {  # left|right
     [ "$1" = left ] && code=123
     if [ "$DRY" = 1 ]; then dry_echo "osascript: key code $code using control down"; return 0; fi
     osascript -e "tell application \"System Events\" to key code $code using control down" >/dev/null
+}
+
+# No Reel runs during setup to report the new Space, so wait out the switch animation before opening windows.
+setup_switch() {  # left|right
+    switch_space "$1"
+    if [ "$DRY" = 1 ]; then dry_echo "sleep 1 for the switch to settle"; else sleep 1; fi
 }
 
 launch_reel() {  # <binary>
@@ -77,18 +85,18 @@ quit_reel() {
 }
 
 measure() {  # <binary> <count>
-    local bin=$1 count=$2 direction=right before t0 t1
+    local bin=$1 count=$2 before t0 t1
     launch_reel "$bin"
     waitForSettle 10
     for _ in $(seq 1 "$count"); do
         before="$(space_id)"
         t0=$(now_ms)
-        switch_space "$direction"
+        switch_space "$DIRECTION"
         poll_until 5 "[ \"\$(space_id)\" != '$before' ]" || fail "$(basename "$bin") never left Space $before"
         waitForSettle 10
         t1=$(now_ms)
         printf '%s %d\n' "$(basename "$bin")" $((t1 - t0)) >> "$SAMPLES"
-        if [ "$direction" = right ]; then direction=left; else direction=right; fi
+        if [ "$DIRECTION" = right ]; then DIRECTION=left; else DIRECTION=right; fi
     done
     quit_reel
 }
@@ -109,9 +117,9 @@ main() {
     write_fixtures
     host_start MAIN
     host_create MAIN 3 >/dev/null
-    switch_space right
+    setup_switch right
     host_create MAIN 3 >/dev/null
-    switch_space left
+    setup_switch left
     for _ in $(seq 1 "$BLOCKS"); do
         for bin in "${BINS[@]}"; do measure "$bin" "$PER_BLOCK"; done
     done

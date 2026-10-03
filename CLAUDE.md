@@ -46,7 +46,7 @@ ReelNext ──→ Runtime ──→ Engine ──→ Core, TOMLKit   (the rewri
 
 **Engine** — The rewrite's pure reducer: `reduce(&world, event, now:) -> [Effect]` is the only `World` mutator. Depends on Core, plus TOMLKit for parsing the config schema in `Engine/Config.swift` (text in, values out, no I/O); time, windows and Space identity arrive as event data, and every side effect (frames, focus, timers, persistence, census re-reads) leaves as an `Effect` value.
 
-**Runtime** — the rewrite's side-effect shell, run by the `ReelNext` app. `SpaceObserver` turns `activeSpaceDidChange` into `spaceWillChange` plus one census per change (storms coalesced by `SpaceStorm`), and `SnapshotStore` is the only reader and writer of ReelNext's state file (`$REEL_STATE_DIR/next-spaces.json`, versioned by `SpaceBook.encode`). `Observer` turns AX and NSWorkspace notifications into stamped events, `Executor` runs effects on each app's `AXApp` thread and decides echo with `EchoLedger` (frames we wrote, never a time window), `Scheduler` owns timer tokens, and one `@MainActor` `Loop` calls `reduce`.
+**Runtime** — the rewrite's side-effect shell, run by the `ReelNext` app. `Observer` turns AX and NSWorkspace notifications into stamped events, `Executor` runs effects on each app's `AXApp` thread and decides echo with `EchoLedger` (frames we wrote, never a time window), `Scheduler` owns timer tokens, and one `@MainActor` `Loop` calls `reduce`.
 
 **Platform** — macOS API wrappers.
 - `AXApp`: **one Thread + CFRunLoop per app** for AX observers. Prevents hung apps from blocking main thread.
@@ -95,7 +95,7 @@ Identity and census are separate problems, and conflating them is a trap. The si
 **Private API**: Two private surfaces, both read-only, neither requiring SIP disabled or a Dock scripting addition:
 
 1. `_AXUIElementGetWindow` (AXUIElement→CGWindowID). Validated stable across macOS 10.12–15 by AeroSpace/Amethyst.
-2. **SkyLight Space queries** (`Sources/Platform/SpaceIdentity.swift`) — `SLSMainConnectionID`, `SLSGetActiveSpace`, `SLSManagedDisplayGetCurrentSpace`, `SLSSpaceCopyName`, `SLSSpaceGetType`, and `SLSCopySpacesForWindows` (ReelNext only: a managed window on no Space was ordered out). Resolved by `dlsym`, never linked, so a macOS release that removes them degrades to `isAvailable == false` and the legacy fingerprint path resumes. `REEL_DISABLE_SKYLIGHT=1` resolves none of them, to force the fallback in a test lane.
+2. **SkyLight Space queries** (`Sources/Platform/SpaceIdentity.swift`) — `SLSMainConnectionID`, `SLSGetActiveSpace`, `SLSManagedDisplayGetCurrentSpace`, `SLSSpaceCopyName`, `SLSSpaceGetType`. Resolved by `dlsym`, never linked, so a macOS release that removes them degrades to `isAvailable == false` and the legacy fingerprint path resumes.
 
 Every SkyLight call is a QUERY. The SkyLight functions that require SIP disabled are all *mutations* (create/destroy/focus Space, move window to Space, set opacity/level/sticky) and none are used — that boundary is deliberate and must be preserved. Verified on macOS 26.6.1 (25G76) from an unsigned binary with SIP enabled and no Accessibility grant. Caveat: `SLSSetWindowAlpha`/`SLSSetWindowLevel` in this same framework became no-ops on macOS 26, which is why the fallback exists.
 
