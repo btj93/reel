@@ -93,6 +93,17 @@ final class AppWorker: @unchecked Sendable {
         app.perform { [self] in windows[CGWindowID(tile.rawValue)].map(action) }
     }
 
+    /// A closed window can outlive its close in the window server (an app that keeps the object), but its AX element
+    /// is dead at once. Asked only for managed windows that left the screen.
+    func validate(_ id: CGWindowID) {
+        app.perform { [self] in
+            guard let window = windows[id], case .failure(.elementInvalid) = window.getPosition() else { return }
+            windows.removeValue(forKey: id)
+            lastSize.removeValue(forKey: id)
+            post(.destroyed(pid: pid, id))
+        }
+    }
+
     func reportFocus(activation: Bool) {
         app.perform { [self] in post(.focused(pid: pid, app.focusedWindowID(), activation: activation)) }
     }
@@ -253,8 +264,12 @@ public final class Observer {
         guard let alive = existingWindows(managed.union(known.keys)) else { return log("observer: window list unavailable, health check skipped") }
         for id in known.keys where !alive.contains(id) { forget(id) }
         for id in managed.sorted() where !alive.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
-        guard !paused else { return }
         let onScreen = getAllWindowInfo()
+        let visible = Set(onScreen.map(\.windowID))
+        for id in managed.sorted() where alive.contains(id) && !visible.contains(id) {
+            known[id].flatMap { workers[$0.pid] }?.validate(id)
+        }
+        guard !paused else { return }
         // An app can turn regular after its launch notification; its first on-screen window registers it.
         for pid in Set(onScreen.filter { $0.layer == 0 }.map(\.ownerPID)) where workers[pid] == nil {
             NSRunningApplication(processIdentifier: pid).map(register)

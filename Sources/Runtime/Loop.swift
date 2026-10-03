@@ -5,9 +5,15 @@ import Engine
 import Foundation
 import Platform
 
+@MainActor private var flushQueued = false
+
+/// One flush per main run-loop turn, so a scroll that logs every write and echo costs one syscall per turn.
+@MainActor
 public func log(_ line: String) {
     print(line)
-    fflush(stdout)
+    guard !flushQueued else { return }
+    flushQueued = true
+    DispatchQueue.main.async { MainActor.assumeIsolated { flushQueued = false; fflush(stdout) } }
 }
 
 /// Where this instance keeps its socket, config and state. Each has a `REEL_*` override for sandboxed test runs.
