@@ -90,8 +90,14 @@ struct Harness {
     var tiles: [TileID] { world.groups[1]!.strip.columns.flatMap(\.tiles) }
     var offset: Double { world.groups[1]!.strip.viewOffset.current(at: time) }
 
+    var widths: [ColumnWidth] { world.groups[1]!.strip.columns.map(\.width) }
+
     var requests: [FrameRequest] {
         effects.compactMap { if case .setFrame(let request) = $0 { return request }; return nil }
+    }
+
+    var censusRequest: Double? {
+        effects.lazy.compactMap { if case .requestCensus(_, let after) = $0 { return after }; return nil }.first
     }
 }
 
@@ -105,11 +111,11 @@ struct Harness {
         h.census(30, [window(1), window(3)])
         check(h.world.groups[1]!.space == .skylight(20), "mixed census did not commit")
         check(h.world.spaces.live.count == before, "mixed census did not prune")
-        check(h.effects.contains { if case .requestCensus(1, let after) = $0 { return abs(after - EngineConfig.censusSettle) < 1e-9 }; return false },
+        check(h.censusRequest.map { abs($0 - EngineConfig.censusSettle) < 1e-9 } == true,
               "mixed census asks the observer for a settled re-read")
         h.census(30, [])
         check(h.world.groups[1]!.space == .skylight(20), "unconfirmed empty census did not commit")
-        check(h.effects.contains { if case .requestCensus(1, let after) = $0 { return after < EngineConfig.censusSettle }; return false },
+        check(h.censusRequest.map { $0 < EngineConfig.censusSettle } == true,
               "repeat read keeps the original settle deadline")
         h.advance(EngineConfig.censusSettle)
         h.census(30, [])
@@ -611,7 +617,7 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2)])
         h.census(30, [])
-        check(h.effects.contains { if case .requestCensus(1, let after) = $0 { return abs(after - EngineConfig.censusSettle) < 1e-9 }; return false },
+        check(h.censusRequest.map { abs($0 - EngineConfig.censusSettle) < 1e-9 } == true,
               "deferred empty census requests a settled re-read")
         h.advance(EngineConfig.censusSettle + margin)
         h.census(30, [])
@@ -763,10 +769,10 @@ struct Harness {
     section("Space census: a group's first bad read is dropped after one settle") {
         var h = Harness()
         h.census(10, [window(1), window(1)])
-        check(h.effects.contains { if case .requestCensus = $0 { return true }; return false }, "duplicate census deferred")
+        check(h.censusRequest != nil, "duplicate census deferred")
         h.advance(EngineConfig.censusSettle + margin)
         h.census(10, [window(1), window(1)])
-        check(!h.effects.contains { if case .requestCensus = $0 { return true }; return false }, "settled duplicate read is dropped")
+        check(h.censusRequest == nil, "settled duplicate read is dropped")
         h.census(10, [window(1)])
         check(h.world.groups[1]!.space == .skylight(10) && h.tiles == [TileID(1)], "next good read commits")
     }
@@ -807,6 +813,10 @@ struct Harness {
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1,
                              windows: [ObservedWindow(id: TileID(1), pid: 1, bundleID: "test.app", title: "census")]))
         check(h.world.spaces.lookupExact(group: 1, space: .skylight(10))?.windows.first?.title == "census", "same-Space census refreshes the title")
+        let reused = h.send(.windowAdded(window(1, app: 99)))
+        check(reused.contains { if case .log(let line) = $0 { return line.contains("identity changed") }; return false },
+              "a known id with a different owner is logged")
+        check(h.world.groups[1]!.windows[TileID(1)]?.pid == 1, "a known id with a different owner is not refreshed")
     }
     section("Space census: in fingerprint mode an empty Space commits after its settle re-read") {
         var h = Harness()
@@ -816,15 +826,21 @@ struct Harness {
         fingerprint([1, 2], [window(1), window(2)])
         h.send(.spaceWillChange)
         fingerprint([], [])
-        check(h.effects.contains { if case .requestCensus = $0 { return true }; return false }, "empty fingerprint census deferred")
+        check(h.censusRequest != nil, "empty fingerprint census deferred")
         h.advance(EngineConfig.censusSettle + margin)
         fingerprint([], [])
         check(h.world.groups[1]!.space == .fingerprint([]) && !h.world.groups[1]!.phase.isChanging, "settled empty re-read commits")
         h.send(.windowAdded(window(5)))
         check(h.tiles == [TileID(5)], "window opened on the empty Space joins its own strip")
+        h.send(.windowAdded(window(6)))
+        h.send(.command(.moveLeft, .ipc))
+        h.send(.command(.setWidth(TileID(5), 377), .ipc))
+        check(h.tiles == [TileID(6), TileID(5)], "windows rearranged on the formerly empty Space")
         fingerprint([1, 2], [window(1), window(2)])
         check(h.tiles == [TileID(1), TileID(2)], "departing Space keeps its own columns")
         check(!h.world.spaces.live.keys.contains { $0.space.isEmpty }, "never stashed under an empty key")
+        fingerprint([5, 6], [window(5), window(6)])
+        check(h.tiles == [TileID(6), TileID(5)] && h.widths.last == .fixed(377), "the formerly empty Space restores its order and width")
     }
     section("Gesture latch: external focus during a swipe records the decision without scrolling") {
         var h = Harness()
@@ -844,14 +860,110 @@ struct Harness {
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         check(h.active == TileID(3), "dock click during momentum still crosses Spaces")
     }
-    section("Gesture basis: a membership change mid-swipe ends the gesture") {
+    section("Gesture basis: removing a window mid-swipe ends the gesture") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
         h.send(.pointer(.beginGesture(TileID(1))))
         h.send(.pointer(.delta(40)))
         h.send(.windowRemoved(TileID(3)))
-        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(4)]))
-        check(h.tiles.count == 3 && h.gesture == nil, "stale snap basis cannot survive a column change")
+        check(h.tiles.count == 2 && h.gesture == nil, "stale snap basis cannot survive a removed column")
+    }
+    section("Gesture basis: adding a window mid-swipe ends the gesture") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(.beginGesture(TileID(1))))
+        h.send(.pointer(.delta(40)))
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3), window(4)]))
+        check(h.tiles.count == 4 && h.gesture == nil, "stale snap basis cannot survive an added column")
+    }
+    section("Snapshot identity: strong window-id evidence beats a closer app set on disk") {
+        func saved(_ id: UInt32, _ bundle: String) -> ObservedWindow {
+            ObservedWindow(id: TileID(id), pid: 1, bundleID: bundle, title: "t\(id)")
+        }
+        var h = Harness()
+        h.send(.loadSnapshots([
+            Snapshot(group: 1, space: .skylight(1), columns: [
+                SnapshotColumn(windows: [saved(11, "safari")], width: .fixed(111)),
+                SnapshotColumn(windows: [saved(12, "term")], width: .fixed(112)),
+            ]),
+            Snapshot(group: 1, space: .skylight(2), columns: [
+                SnapshotColumn(windows: [saved(23, "mail")], width: .fixed(223)),
+                SnapshotColumn(windows: [saved(22, "term")], width: .fixed(222)),
+                SnapshotColumn(windows: [saved(21, "safari")], width: .fixed(221)),
+            ]),
+        ]))
+        h.census(2, [saved(21, "safari"), saved(22, "term")])
+        check(h.tiles == [TileID(22), TileID(21)] && h.widths == [.fixed(222), .fixed(221)], "a Space missing one window keeps its own layout")
+        h.census(1, [saved(11, "safari"), saved(12, "term")])
+        check(h.tiles == [TileID(11), TileID(12)] && h.widths == [.fixed(111), .fixed(112)], "the other Space keeps its own layout")
+    }
+    section("Snapshot identity: window ids pick between disk entries with the same apps") {
+        func saved(_ id: UInt32) -> ObservedWindow { ObservedWindow(id: TileID(id), pid: 1, bundleID: "term", title: "t\(id)") }
+        var h = Harness()
+        h.send(.loadSnapshots([
+            Snapshot(group: 1, space: .skylight(90), columns: [
+                SnapshotColumn(windows: [saved(1)], width: .fixed(300)), SnapshotColumn(windows: [saved(2)], width: .fixed(500)),
+            ]),
+            Snapshot(group: 1, space: .skylight(91), columns: [
+                SnapshotColumn(windows: [saved(3)], width: .fixed(700)), SnapshotColumn(windows: [saved(4)], width: .fixed(800)),
+            ]),
+        ]))
+        h.census(5, [saved(4), saved(3)])
+        check(h.tiles == [TileID(3), TileID(4)] && h.widths == [.fixed(700), .fixed(800)], "the entry sharing window ids is adopted")
+        check(h.world.spaces.disk.map(\.space) == [.skylight(90)], "the other entry stays on disk")
+    }
+    section("Snapshot identity: windows without a bundle do not take each other's disk slots") {
+        func saved(_ id: UInt32, _ bundle: String?, _ title: String) -> ObservedWindow {
+            ObservedWindow(id: TileID(id), pid: 1, bundleID: bundle, title: title)
+        }
+        var h = Harness()
+        h.send(.loadSnapshots([Snapshot(group: 1, space: .skylight(90), columns: [
+            SnapshotColumn(windows: [saved(1, "safari", "a")], width: .fixed(300)),
+            SnapshotColumn(windows: [saved(2, nil, "x")], width: .fixed(377)),
+        ])]))
+        h.census(91, [saved(10, "safari", "b"), saved(11, nil, "zzz")])
+        check(h.widths.first == .fixed(300), "the bundled window still restores")
+        check(!h.widths.contains(.fixed(377)), "an unrelated bundle-less window does not inherit a slot")
+    }
+    section("Snapshot identity: a title change for a stashed window does not adopt it") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1), window(2)])
+        let focused = h.world.groups[1]!.focus.decision?.tile
+        let effects = h.send(.windowAdded(ObservedWindow(id: TileID(3), pid: 3, bundleID: "test.app", title: "renamed")))
+        check(h.tiles == [TileID(1), TileID(2)] && h.world.groups[1]!.focus.decision?.tile == focused, "stashed window stays on its Space")
+        check(!effects.contains { if case .focus = $0 { return true }; if case .raise = $0 { return true }; return false },
+              "stashed window is neither focused nor raised")
+        check(h.world.spaces.lookupExact(group: 1, space: .skylight(20))?.windows.first?.title == "renamed", "the stash gets the new title")
+    }
+    section("Snapshot identity: closing a stashed window prunes stashes and disk") {
+        var h = Harness()
+        h.send(.loadSnapshots([Snapshot(group: 1, space: .skylight(90), columns: [
+            SnapshotColumn(windows: [window(7, bundle: "other")], width: .fixed(300)),
+            SnapshotColumn(windows: [window(8, bundle: "other")], width: .fixed(300)),
+        ])]))
+        h.census(10, [window(1), window(2)])
+        h.census(20, [window(3)])
+        h.send(.windowRemoved(TileID(2)))
+        h.send(.windowRemoved(TileID(7)))
+        check(h.world.spaces.lookupExact(group: 1, space: .skylight(10))?.windows.map(\.id) == [TileID(1)], "closed window leaves its stash")
+        check(!h.world.spaces.persisted.contains { $0.fingerprint.contains(7) }, "closed window leaves its disk entry")
+    }
+    section("Space census: a deferral for one Space does not settle another") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.census(20, [window(3), window(4)])
+        h.census(30, [window(1), window(3)])
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(40, [window(1), window(3)])
+        check(h.censusRequest.map { abs($0 - EngineConfig.censusSettle) < 1e-9 } == true, "a new Space's first mixed read gets its own settle")
+    }
+    section("Space census: a same-Space read skips only windows stashed on another Space") {
+        var h = Harness()
+        h.census(20, [window(3), window(4)])
+        h.census(10, [window(1)])
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(3), window(5)]))
+        check(h.tiles == [TileID(1), TileID(5)], "the new window joins and the stashed one does not")
     }
     section("IPC: a stale scope still gets a reply") {
         var h = Harness()
@@ -860,6 +972,8 @@ struct Harness {
         h.census(20, [window(2)])
         let effects = h.send(.ipc(id: 5, command: .focusLeft), scope: old)
         check(effects.contains { if case .reply(5, .command(.refused)) = $0 { return true }; return false }, "stale IPC is refused, not dropped")
+        let query = h.send(.query(id: 6), scope: old)
+        check(query.contains { if case .reply(6, .snapshots) = $0 { return true }; return false }, "stale query still gets the snapshots")
     }
     section("Focus authority: a refused command leaves pending focus alone") {
         var h = Harness()
