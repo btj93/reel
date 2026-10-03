@@ -46,14 +46,44 @@ final class ScopeClock: @unchecked Sendable {
     }
 }
 
+/// The size last asked for and the size the app kept, per window. While a write asks for the same size, only the
+/// position is set: a scroll then costs one AX call instead of a full frame's three. Lives on one app thread.
+public struct SizeCache {
+    private var sizes: [CGWindowID: (asked: CGSize, kept: CGSize)] = [:]
+
+    public init() {}
+
+    /// Write `frame` and return the result with the frame the app kept, when known.
+    public mutating func write(_ frame: CGRect, to window: AXWindow) -> (result: FrameResult, landed: CGRect?) {
+        let id = window.windowID
+        let kept = sizes[id].flatMap { $0.asked == frame.size ? $0.kept : nil }
+        switch kept == nil ? window.setFrame(frame) : window.setPosition(frame.origin) {
+        case .success:
+            let landed = if let kept { CGRect(origin: frame.origin, size: kept) } else { try? window.getFrame().get() }
+            sizes[id] = (frame.size, landed?.size ?? frame.size)
+            return (.applied, landed)
+        case .failure(let error):
+            sizes[id] = nil
+            return (error.isTimeout ? .timedOut : .failed, nil)
+        }
+    }
+
+    /// Someone else sized the window, so the next write must set the size again, not just the position. Height
+    /// is the app's, and a width within the ledger's slop is rounding.
+    public mutating func observed(_ id: CGWindowID, frame: CGRect) {
+        if let size = sizes[id], abs(size.kept.width - frame.width) > EchoLedger.slop { sizes[id] = nil }
+    }
+
+    public mutating func forget(_ id: CGWindowID) { sizes[id] = nil }
+}
+
 /// One app's AX state. `windows` and every AX call live on the app's `AXApp` thread; the main loop only queues work.
 final class AppWorker: @unchecked Sendable {
     let app: AXApp
     private let send: @Sendable (Observation, EventScope?) -> Void
     private let clock: ScopeClock
     private var windows: [CGWindowID: AXWindow] = [:]
-    /// The size last asked for and the size the app kept. While a write asks for the same size, only the position is set.
-    private var sizes: [CGWindowID: (asked: CGSize, kept: CGSize)] = [:]
+    private var sizes = SizeCache()
     private let lock = NSLock()
     private var queuedFrames: [TileID: (revision: UInt64, frame: CGRect)] = [:]
     private var drainQueued = false
@@ -101,7 +131,7 @@ final class AppWorker: @unchecked Sendable {
         app.perform { [self] in
             guard let window = windows[id], case .failure(.elementInvalid) = window.getPosition() else { return }
             windows.removeValue(forKey: id)
-            sizes.removeValue(forKey: id)
+            sizes.forget(id)
             post(.destroyed(id))
         }
     }
@@ -122,18 +152,8 @@ final class AppWorker: @unchecked Sendable {
                 post(.wrote(tile, revision: write.revision, frame: write.frame, landed: nil, .failed))
                 continue
             }
-            // A scroll keeps the size, and one position write is a third of the AX traffic of a full frame.
-            let kept = sizes[id].flatMap { $0.asked == write.frame.size ? $0.kept : nil }
-            let result = kept == nil ? window.setFrame(write.frame) : window.setPosition(write.frame.origin)
-            switch result {
-            case .success:
-                let landed = if let kept { CGRect(origin: write.frame.origin, size: kept) } else { try? window.getFrame().get() }
-                sizes[id] = (write.frame.size, landed?.size ?? write.frame.size)
-                post(.wrote(tile, revision: write.revision, frame: write.frame, landed: landed, .applied))
-            case .failure(let error):
-                sizes[id] = nil
-                post(.wrote(tile, revision: write.revision, frame: write.frame, landed: nil, error.isTimeout ? .timedOut : .failed))
-            }
+            let (result, landed) = sizes.write(write.frame, to: window)
+            post(.wrote(tile, revision: write.revision, frame: write.frame, landed: landed, result))
         }
     }
 
@@ -145,7 +165,7 @@ final class AppWorker: @unchecked Sendable {
             guard let id = windows.first(where: { CFEqual($0.value.element, element) })?.key else { return }
             app.unobserveWindow(element)
             windows.removeValue(forKey: id)
-            sizes.removeValue(forKey: id)
+            sizes.forget(id)
             post(.destroyed(id))
         case kAXWindowMiniaturizedNotification:
             if let id = windowID(for: element) { post(.minimized(id)) }
@@ -153,9 +173,7 @@ final class AppWorker: @unchecked Sendable {
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.restored(facts(window))) }
         case kAXMovedNotification, kAXResizedNotification:
             guard let id = windowID(for: element), let window = windows[id], case .success(let frame) = window.getFrame() else { return }
-            // Someone else sized the window, so the next write must set the size again, not just the position. Height
-            // is the app's, and a width within the ledger's slop is rounding.
-            if let size = sizes[id], abs(size.kept.width - frame.width) > EchoLedger.slop { sizes[id] = nil }
+            sizes.observed(id, frame: frame)
             post(.moved(id, frame))
         case kAXTitleChangedNotification:
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.retitled(facts(window))) }
