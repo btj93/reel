@@ -29,6 +29,11 @@ open class AXApp: @unchecked Sendable {
     /// Set when `stopObserving()` runs before the observer thread reaches
     /// `CFRunLoopRun`, so the thread self-terminates instead of blocking forever.
     private var stopRequested = false
+    private var pendingWork: [@Sendable () -> Void] = []
+
+    /// When set, notifications are handled here on the app thread instead of hopping to main with `onEvent`, so the
+    /// handler can read the window's state where a hung app only stalls its own thread. Set before `startObserving`.
+    public var onThreadNotification: (@Sendable (String, AXUIElement) -> Void)?
 
     /// App-level notifications observed for the lifetime of the observer.
     private static let appNotifications: [String] = [
@@ -142,7 +147,10 @@ open class AXApp: @unchecked Sendable {
             return
         }
         runLoop = rl
+        let queued = pendingWork
+        pendingWork = []
         lock.unlock()
+        for work in queued { CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode.rawValue, work) }
 
         // Run the loop — blocks until stopped
         CFRunLoopRun()
@@ -229,7 +237,21 @@ open class AXApp: @unchecked Sendable {
 
     // MARK: - Internal Event Handling
 
+    /// Run `work` on this app's thread, after any work queued before it. Never blocks the caller.
+    public func perform(_ work: @escaping @Sendable () -> Void) {
+        lock.lock()
+        guard !stopRequested else { return lock.unlock() }
+        guard let rl = runLoop else {
+            pendingWork.append(work)
+            return lock.unlock()
+        }
+        lock.unlock()
+        CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode.rawValue, work)
+        CFRunLoopWakeUp(rl)
+    }
+
     fileprivate func handleNotification(_ notification: String, element: AXUIElement) {
+        if let onThreadNotification { return onThreadNotification(notification, element) }
         let wid = windowID(for: element)
         let event = AXAppEvent(
             pid: pid,

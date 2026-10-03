@@ -20,20 +20,55 @@ public struct EngineConfig: Sendable {
     public static let flickVelocity = 50.0
     public static let defaultGap = 8.0
     public static let defaultColumnWidth = 0.5
+    /// A user resize within this many points of the column width is the app rounding, not a new width.
+    public static let userResizeSlop = 2.0
 
     public let gap: Double
     public let defaultWidth: Double
     public let animate: Bool
     public let gestureSnap: Bool
     public let rules: [Rule]
+    public let widthPresets: [Double]
+    public let snapPoints: [SnapPoint]
+    public let scroll: SpringParams
+    public let bounceDistance: Double
+    public let bounceDampingRatio: Double
+    /// Raise-style focus indicator: unfocused columns sit this many points lower. Zero turns raise off.
+    public let raiseHeight: Double
 
     public init(gap: Double = defaultGap, defaultWidth: Double = defaultColumnWidth, animate: Bool = true,
-                gestureSnap: Bool = true, rules: [Rule] = []) {
+                gestureSnap: Bool = true, rules: [Rule] = [], widthPresets: [Double] = [0.33, 0.5, 0.67],
+                snapPoints: [SnapPoint] = [.middle], stiffness: Double = 800, dampingRatio: Double = 1,
+                bounceDistance: Double = 40, bounceDampingRatio: Double = 0.6, raiseHeight: Double = 0) {
+        func valid(_ value: Double, _ fallback: Double) -> Double { value.isFinite && value > 0 ? value : fallback }
         self.gap = gap.isFinite && gap >= 0 ? gap : Self.defaultGap
-        self.defaultWidth = defaultWidth.isFinite && defaultWidth > 0 ? defaultWidth : Self.defaultColumnWidth
+        self.defaultWidth = valid(defaultWidth, Self.defaultColumnWidth)
         self.animate = animate
         self.gestureSnap = gestureSnap
         self.rules = rules
+        let presets = widthPresets.filter { $0.isFinite && $0 > 0 && $0 <= 1 }
+        self.widthPresets = presets.isEmpty ? [0.33, 0.5, 0.67] : presets
+        self.snapPoints = snapPoints.isEmpty ? [.middle] : Array(Set(snapPoints)).sorted()
+        scroll = SpringParams(dampingRatio: valid(dampingRatio, 1), stiffness: valid(stiffness, 800), epsilon: 0.5)
+        self.bounceDistance = bounceDistance.isFinite && bounceDistance >= 0 ? bounceDistance : 40
+        self.bounceDampingRatio = valid(bounceDampingRatio, 0.6)
+        self.raiseHeight = raiseHeight.isFinite && raiseHeight > 0 ? raiseHeight : 0
+    }
+
+    func configure(_ strip: inout Strip) {
+        strip.gap = gap
+        strip.defaultWidth = .proportion(defaultWidth)
+        strip.widthPresets = widthPresets.map(ColumnWidth.proportion)
+        strip.scrollSpringParams = scroll
+        strip.bounceDistance = bounceDistance
+        strip.bounceDampingRatio = bounceDampingRatio
+        if strip.snapPoints != snapPoints {
+            strip.snapPoints = snapPoints
+            strip.snapIndices = strip.snapIndices.map { _ in strip.defaultSnapIndex }
+        }
+        for index in strip.columns.indices where strip.columns[index].presetIndex.map({ !widthPresets.indices.contains($0) }) == true {
+            strip.columns[index].presetIndex = nil
+        }
     }
 }
 
@@ -102,6 +137,7 @@ public struct GroupState: Sendable {
 
     init(display: DisplayGroup, config: EngineConfig) {
         strip = Strip(gap: config.gap, groupArea: Self.area(for: display), defaultWidth: .proportion(config.defaultWidth))
+        config.configure(&strip)
     }
 
     static func area(for display: DisplayGroup) -> GroupWorkingArea {
@@ -142,6 +178,16 @@ public struct World: Sendable {
 
     public func scope(for group: UInt32) -> EventScope? {
         groups[group].map { EventScope(topologyRevision: topology.revision, group: group, spaceEpoch: $0.epoch) }
+    }
+
+    /// The frame loop runs while any strip still animates.
+    public var needsTicks: Bool {
+        groups.values.contains { group in
+            if case .static = group.strip.viewOffset {
+                return group.strip.columnData.contains { $0.widthAnimation != nil || $0.raiseAnimation != nil }
+            }
+            return true
+        }
     }
 
     public func check() -> [String] {

@@ -32,6 +32,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .windowRemoved(let tile):
         world.remove(tile, from: id, &pass)
         pass.persist = true
+    case .windowMoved(let tile, let frame): world.onWindowMoved(tile, frame: frame, group: id, &pass)
     case .focus(let intent): world.onFocusObserved(intent, group: id, &pass)
     case .command(let command, let source): _ = world.run(command, source: source, group: id, &pass)
     case .ipc(let requestID, let command):
@@ -164,6 +165,23 @@ extension World {
         refreshIfSameOwner(window, &pass)
     }
 
+    /// A tiled window keeps its column's place: a new width becomes the column's logical width, and the frame is
+    /// rewritten. A floating window belongs to the user, so its frame is left alone.
+    fileprivate mutating func onWindowMoved(_ tile: TileID, frame: AXRect, group id: UInt32, _ pass: inout Pass) {
+        guard frame.rect.isFinite, var group = groups[id], !group.phase.isChanging,
+              let index = group.strip.columnIndex(of: tile) else { return }
+        let width = min(frame.rect.width, group.strip.workingArea.width)
+        if abs(width - group.strip.columnData[index].cachedWidth) > EngineConfig.userResizeSlop {
+            group.strip.setWidth(.fixed(width), column: index, at: pass.now, params: nil)
+            groups[id] = group
+            pass.persist = true
+            pass.effects.append(.log("user resize tile=\(tile.rawValue) width=\(Int(width))"))
+        }
+        frames.removeValue(forKey: tile)
+        appliedFrames.removeValue(forKey: tile)
+        pass.layout.insert(id)
+    }
+
     /// An id can be reused by another app's window, so only a holder with the same owner takes the update.
     private mutating func refreshIfSameOwner(_ window: ObservedWindow, _ pass: inout Pass) {
         var mismatched = false
@@ -282,6 +300,14 @@ extension World {
             guard group.windows[tile] != nil else { return .unknownWindow(tile) }
             pass.effects.append(.close(tile))
             return .accepted
+        case .recover:
+            for tile in group.windows.keys.ordered() {
+                frames.removeValue(forKey: tile)
+                appliedFrames.removeValue(forKey: tile)
+            }
+        case .release:
+            release(group: id, &pass)
+            return .accepted
         }
         if recenter, !group.strip.columns.isEmpty {
             if case .gesture = group.strip.viewOffset {} else {
@@ -329,7 +355,7 @@ extension World {
             case .toggleFullWidth: targeted = .toggleFullWidth(session.tile)
             case .close: targeted = .close(session.tile)
             case .focus: targeted = .focus(session.tile)
-            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset: return
+            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release: return
             }
             _ = run(targeted, source: .click, group: id, &pass)
         case .dropReorder(let requested):
@@ -595,11 +621,27 @@ extension World {
         pass.persist = true
     }
 
+    /// Off-screen tiles come back on screen at their own size, cascaded so none hides another completely.
+    fileprivate mutating func release(group id: UInt32, _ pass: inout Pass) {
+        guard let group = groups[id], let scope = scope(for: id),
+              let area = topology.groups.first(where: { $0.id == id })?.frame else { return }
+        var step = 0.0
+        for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) where target.isOffScreen {
+            guard let pid = group.windows[target.tileID]?.pid else { continue }
+            let size = CGSize(width: min(target.frame.width, area.width), height: min(target.frame.height, area.height))
+            let offset = step.truncatingRemainder(dividingBy: max(1, min(area.width - size.width, area.height - size.height)))
+            step += 30
+            let frame = AXRect(CGRect(origin: CGPoint(x: area.minX + offset, y: area.minY + offset), size: size))
+            let request = FrameRequest(tile: target.tileID, pid: pid, frame: frame, revision: nextRevision(), scope: scope)
+            frames[target.tileID] = request
+            pass.effects.append(.setFrame(request))
+        }
+    }
+
     fileprivate mutating func onConfig(_ next: EngineConfig, _ pass: inout Pass) {
         config = next
         for id in groups.keys.sorted() {
-            groups[id]!.strip.gap = next.gap
-            groups[id]!.strip.defaultWidth = .proportion(next.defaultWidth)
+            next.configure(&groups[id]!.strip)
             groups[id]!.strip.recalculateWidths(at: pass.now)
             pass.layout.insert(id)
         }
@@ -608,9 +650,13 @@ extension World {
 
     fileprivate mutating func flush(_ pass: inout Pass) {
         for id in pass.layout.sorted() {
-            guard let group = groups[id], !group.phase.isChanging, let scope = scope(for: id),
+            guard var group = groups[id], !group.phase.isChanging, let scope = scope(for: id),
                   let display = topology.groups.first(where: { $0.id == id }) else { continue }
-            for target in computeTargetFrames(strip: group.strip, time: pass.now) {
+            if config.raiseHeight > 0 {
+                group.strip.retargetRaise(height: config.raiseHeight, params: config.animate ? config.scroll : nil, at: pass.now)
+                groups[id] = group
+            }
+            for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) {
                 let frame = axRect(ViewportRect(target.frame), on: display)
                 guard frame.rect.isFinite, let pid = group.windows[target.tileID]?.pid else {
                     pass.effects.append(.log("invalid layout rejected"))
@@ -644,6 +690,17 @@ extension Strip {
         columns[index].tiles.removeAll { $0 == tile }
         if columns[index].tiles.isEmpty { removeColumn(at: index, at: time) }
         else { columns[index].activeTileIndex = min(columns[index].activeTileIndex, columns[index].tiles.count - 1) }
+    }
+
+    /// Raise targets derive from the active column, so no focus path has to remember to start them.
+    mutating func retargetRaise(height: Double, params: SpringParams?, at time: Double) {
+        for index in columnData.indices {
+            let target = index == activeColumnIndex ? 0 : height
+            guard columnData[index].cachedRaiseTarget != target || (params == nil && columnData[index].raiseAnimation != nil) else { continue }
+            let from = columnData[index].currentRaiseOffset(at: time)
+            columnData[index].raiseAnimation = params.map { SpringAnimation(from: from, to: target, startTime: time, params: $0) }
+            columnData[index].cachedRaiseTarget = target
+        }
     }
 
     mutating func recenter(animated: Bool, at time: Double, columnWidth: Double? = nil) {

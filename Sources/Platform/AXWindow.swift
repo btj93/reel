@@ -277,6 +277,8 @@ open class AXWindow: @unchecked Sendable {
 
         // Set this window as the app's focused/main window
         let appElement = AXUIElementCreateApplication(pid)
+        // A fresh element has the 6 s default timeout, and a hung app would hold this thread for all of it.
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
         AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, element)
         AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
 

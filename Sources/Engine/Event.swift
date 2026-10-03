@@ -49,6 +49,10 @@ public enum Command: Sendable {
     case toggleFullWidth(TileID)
     case toggleFloating(TileID)
     case close(TileID)
+    /// Rewrite every frame of the group, whatever the engine last asked for.
+    case recover
+    /// Bring off-screen tiles back on screen before the runtime exits.
+    case release
 }
 
 public enum PointerInput: Sendable {
@@ -73,6 +77,8 @@ public struct Event: Sendable {
         case windowAdded(ObservedWindow)
         case windowChanged(ObservedWindow)
         case windowRemoved(TileID)
+        /// The user moved or resized a window: the runtime already dropped the engine's own writes as echoes.
+        case windowMoved(TileID, AXRect)
         case focus(FocusIntent)
         case command(Command, FocusSource)
         case ipc(id: UInt64, command: Command)
