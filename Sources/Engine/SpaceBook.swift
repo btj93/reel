@@ -34,13 +34,18 @@ public struct SpaceBook: Sendable {
     }
 
     func lookup(group: UInt32, space: SpaceKey, windows: [ObservedWindow]) -> SpaceMatch? {
+        lookupLive(group: group, space: space, windows: windows) ?? tolerantMatch(group: group, windows: windows)
+    }
+
+    /// A Space of this session: disk entries are matched by app, which a read spanning two Spaces can pass.
+    func lookupLive(group: UInt32, space: SpaceKey, windows: [ObservedWindow]) -> SpaceMatch? {
         if let exact = lookupExact(group: group, space: space) { return SpaceMatch(snapshot: exact, source: .live(space)) }
         let fingerprint = Set(windows.map { $0.id.rawValue })
         let candidates = live.filter { $0.key.group == group && (!space.isAuthoritative || !$0.key.space.isAuthoritative) }.map(\.value)
         if let winner = bestMatch(candidates, score: { MatchScore(gate: similarity($0.fingerprint, fingerprint)) }) {
             return SpaceMatch(snapshot: candidates[winner], source: .live(candidates[winner].space))
         }
-        return tolerantMatch(group: group, windows: windows)
+        return nil
     }
 
     mutating func adopt(_ match: SpaceMatch, as key: SpaceKey) {

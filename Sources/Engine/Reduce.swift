@@ -518,7 +518,7 @@ extension World {
         switch verdict {
         case .trusted: break
         case .empty where group.windows.isEmpty || settled: break
-        case .mixed where settled && (key.isAuthoritative || spaces.lookup(group: id, space: key, windows: windows) != nil): break
+        case .mixed where settled && (key.isAuthoritative || spaces.lookupLive(group: id, space: key, windows: windows) != nil): break
         case .mixed where settled, .invalid where settled:
             groups[id]!.phase = SpacePhase(space: group.space, deferred: nil)
             pass.effects.append(.log("\(verdict) space census dropped after settle"))
