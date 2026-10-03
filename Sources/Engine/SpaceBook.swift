@@ -37,7 +37,7 @@ public struct SpaceBook: Sendable {
         if let exact = lookupExact(group: group, space: space) { return SpaceMatch(snapshot: exact, source: .live(space)) }
         let fingerprint = Set(windows.map { $0.id.rawValue })
         let candidates = live.filter { $0.key.group == group && (!space.isAuthoritative || !$0.key.space.isAuthoritative) }.map(\.value)
-        if let winner = bestMatch(candidates, score: { MatchScore(gate: similarity($0.fingerprint, fingerprint)) }) {
+        if let winner = bestMatch(candidates, score: { MatchScore(gate: similarity($0.fingerprint.union($0.hidden.map(\.window.id.rawValue)), fingerprint)) }) {
             return SpaceMatch(snapshot: candidates[winner], source: .live(candidates[winner].space))
         }
         return tolerantMatch(group: group, windows: windows)

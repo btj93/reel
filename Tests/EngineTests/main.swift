@@ -2963,6 +2963,34 @@ struct FuzzStream {
             check(restart.world.check().isEmpty, "and a restart from the rest is sound")
         }
     }
+    func distinct(_ id: UInt32, _ bundle: String? = nil) -> ObservedWindow { window(id, bundle: bundle ?? "b\(id)") }
+    func arrive(_ h: inout Harness, _ ids: [UInt32], _ bundles: [UInt32: String] = [:]) {
+        h.send(.spaceChanged(key: .fingerprint(Set(ids)), epoch: h.world.groups[1]!.epoch + 1, windows: ids.map { distinct($0, bundles[$0]) }))
+    }
+    section("R4 fingerprint: apps hidden from another Space still match their Space when they come back") {
+        var h = Harness()
+        let bundles: [UInt32: String] = [3: "X", 4: "Y", 5: "Y"]
+        arrive(&h, [3], bundles)
+        h.send(.windowAdded(distinct(4, "Y"))); h.send(.windowAdded(distinct(5, "Y")))
+        h.send(.command(.setWidth(TileID(4), 411), .ipc))
+        h.send(.spaceWillChange); arrive(&h, [1, 2])
+        h.send(.windowsHidden([TileID(3), TileID(4), TileID(5)]))
+        h.send(.spaceWillChange); arrive(&h, [4, 5], bundles)
+        h.advance(EngineConfig.censusSettle + 0.01); arrive(&h, [4, 5], bundles)
+        h.advance(EngineConfig.censusSettle + 0.01); arrive(&h, [4, 5], bundles)
+        check(h.widths.contains(.fixed(411)), "Hide Others, then a Dock click on one app: the Space keeps that app's width")
+        check(h.world.check().isEmpty, "and the world is sound")
+
+        var shown = Harness()
+        arrive(&shown, [3])
+        shown.send(.windowAdded(distinct(4))); shown.send(.windowAdded(distinct(5)))
+        shown.send(.command(.setWidth(TileID(3), 411), .ipc))
+        shown.send(.spaceWillChange); arrive(&shown, [1, 2])
+        shown.send(.windowsHidden([TileID(4)])); shown.send(.windowsHidden([TileID(5)]))
+        shown.send(.spaceWillChange); arrive(&shown, [3, 4, 5])
+        check(shown.widths.first == .fixed(411), "an app hidden and shown again from another Space: its Space keeps its widths")
+        check(shown.world.check().isEmpty, "and the world is sound")
+    }
 }
 
 @MainActor func fuzzTests(seeds: [UInt64]) {
