@@ -1329,6 +1329,13 @@ struct Random {
     }
 }
 
+extension World {
+    /// Every window the engine holds: on a strip, hidden, or on a saved strip of this session.
+    var knownWindows: Set<UInt32> {
+        Set(groups.values.flatMap { Array($0.windows.keys) + Array($0.hidden.keys) }.map(\.rawValue)).union(trackedElsewhere)
+    }
+}
+
 struct FuzzStream {
     var rng: Random
     var h: Harness
@@ -1362,7 +1369,9 @@ struct FuzzStream {
             [],
         ]
         let next = topology(h.world.topology.revision + 1, pick(layouts)!, separateSpaces: rng.next(2) == 0)
+        let known = h.world.knownWindows
         h.send(.topologyChanged(next), scope: EventScope(topologyRevision: h.world.topology.revision, group: 0, spaceEpoch: 0))
+        if !h.world.knownWindows.isSuperset(of: known) { reached["window lost on a topology change", default: 0] += 1 }
         if next.groups.contains(where: { $0.displays.count > 1 }) { reached["merged group", default: 0] += 1 }
         if next.groups.isEmpty { reached["no display", default: 0] += 1 }
     }
@@ -1606,6 +1615,32 @@ struct FuzzStream {
         check(tiles(separate, 1) == [1, 4] && separate.stash(20) == [TileID(3)], "unplug with separate Spaces keeps the strip and saved strips")
         separate.census(20, [window(3)])
         check(tiles(separate, 1) == [3], "and its saved strip restores")
+    }
+    section("R5 topology keeps every window: saved strips of the Space shown now, and empty Spaces") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(100, [window(5)])
+        h.send(.windowsHidden([TileID(5)]))
+        h.census(102, [window(6)])
+        h.census(100, [window(7)], group: 2)
+        h.send(.topologyChanged(topology(2, [display(2, x: 1000)])), group: 2)
+        check(tiles(h, 2) == [6, 7] && h.world.groups[2]!.hidden[TileID(5)] != nil,
+              "a vanished display's saved strip of the Space its windows land on joins the strip on screen")
+        var adopted = Harness(displays: [display(), display(2, x: 1000)])
+        adopted.census(100, [window(1)])
+        adopted.send(.windowsHidden([TileID(1)]))
+        adopted.census(101, [window(2)])
+        adopted.census(100, [window(3)], group: 2)
+        adopted.send(.topologyChanged(topology(2, [])))
+        adopted.send(.topologyChanged(topology(3, [display(), display(2, x: 1000)])), scope: EventScope(topologyRevision: 2, group: 0, spaceEpoch: 0))
+        adopted.send(.topologyChanged(topology(4, [display(), display(2, x: 1000)], separateSpaces: false)))
+        check(adopted.world.knownWindows.isSuperset(of: [1, 2, 3]), "a group that takes its Space from another keeps what it saved there")
+        var empty = Harness(displays: [display(), display(2, x: 1000)])
+        empty.send(.spaceChanged(key: .fingerprint([]), epoch: 1, windows: []))
+        empty.census(20, [window(3)], group: 2)
+        empty.send(.topologyChanged(topology(2, [display()])))
+        empty.send(.topologyChanged(topology(3, [])))
+        check(empty.world.spaces.live.values.contains { $0.fingerprint == [3] }, "windows that land on an empty Space are saved with it")
+        check([h, adopted, empty].allSatisfy { $0.world.check().isEmpty }, "invariants")
     }
     section("R5 headless: with no display every strip is saved until one returns") {
         var h = Harness()
@@ -3265,6 +3300,7 @@ struct FuzzStream {
         print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
         check(stream.reached["mixed read frozen", default: 0] == 0, "seed=\(seed) every settled mixed fingerprint read commits within the bound")
+        check(stream.reached["window lost on a topology change", default: 0] == 0, "seed=\(seed) no topology change loses a window")
     }
 }
 

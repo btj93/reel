@@ -164,19 +164,52 @@ extension World {
                 group = rebuilt(display, kept: previous[display.id], from: incoming, at: pass.now)
             }
             if case .changing(let from, _) = group.phase { group.phase = .settled(from) }
+            // As a window added to an empty Space does, arrivals name an empty fingerprint Space, so it can be saved.
+            if group.space?.isEmpty == true, !(group.windows.isEmpty && group.hidden.isEmpty) {
+                group.phase = .settled(.fingerprint(Set(group.windows.keys.map(\.rawValue) + group.hidden.keys.map(\.rawValue))))
+            }
             group.focus = group.focus.decision.flatMap { group.windows[$0.tile] == nil ? nil : FocusState.resolved($0) } ?? .none
             groups[display.id] = group
             pass.layout.insert(display.id)
+        }
+        // A group that took its Space from an arrival keeps what it saved there itself.
+        for id in groups.keys.sorted() where groups[id]!.space != previous[id]?.space {
+            if let space = groups[id]!.space, let saved = spaces.live.removeValue(forKey: GroupSpace(group: id, space: space)) {
+                join(saved, into: id, at: pass.now)
+            }
         }
         if let fallback = next.groups.first?.id {
             for key in spaces.live.keys.sorted(by: { SpaceOrder($0.group, $0.space) < SpaceOrder($1.group, $1.space) })
             where groups[key.group] == nil {
                 let saved = spaces.live.removeValue(forKey: key)!
                 let target = GroupSpace(group: destination(key.group) ?? fallback, space: key.space)
-                spaces.live[target] = saved.moved(to: target.group, after: spaces.live[target])
+                if groups[target.group]!.space == key.space { join(saved, into: target.group, at: pass.now) }
+                else { spaces.live[target] = saved.moved(to: target.group, after: spaces.live[target]) }
             }
         }
         pass.persist = true
+    }
+
+    /// A saved strip of the Space its new group shows now joins the strip on screen, after its columns, as a vanished
+    /// group's strip on screen does. A window some group already holds stays there.
+    private mutating func join(_ saved: Snapshot, into id: UInt32, at time: Double) {
+        let held = Set(groups.values.flatMap { Array($0.windows.keys) + Array($0.hidden.keys) })
+        var group = groups[id]!
+        let base = group.placeAmongHidden(group.strip.columns.count)
+        for column in saved.columns {
+            let windows = column.windows.filter { !held.contains($0.id) }
+            guard !windows.isEmpty else { continue }
+            var restored = Column(tiles: windows.map(\.id), width: column.width, presetIndex: column.presetIndex, isFullWidth: column.isFullWidth)
+            restored.activeTileIndex = min(column.activeTileIndex, windows.count - 1)
+            group.strip.restoreColumn(restored, at: group.strip.columns.count, time: time)
+            for window in windows { group.windows[window.id] = window }
+        }
+        for window in saved.floating where !held.contains(window.id) {
+            group.windows[window.id] = window
+            group.floating.insert(window.id)
+        }
+        for hidden in saved.hidden where !held.contains(hidden.window.id) { group.hidden[hidden.window.id] = hidden.placed(at: hidden.place + base) }
+        groups[id] = group
     }
 
     private func rebuilt(_ display: DisplayGroup, kept: GroupState?, from arrivals: [Arrival], at time: Double) -> GroupState {
