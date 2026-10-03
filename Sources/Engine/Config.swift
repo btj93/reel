@@ -44,8 +44,8 @@ public struct ConfigError: Error, Equatable, CustomStringConvertible {
 public struct AppConfig: Sendable {
     public internal(set) var engine = EngineConfig()
     public internal(set) var keys: [KeyAction: String] = [
-        .focusLeft: "alt-h", .focusRight: "alt-l", .focusUp: "alt-k", .focusDown: "alt-j", .moveLeft: "alt-shift-h", .moveRight: "alt-shift-l",
-        .cycleWidth: "alt-r", .toggleFullWidth: "alt-f", .toggleFloating: "alt-space", .closeWindow: "alt-w",
+        .focusLeft: "alt-h", .focusRight: "alt-l", .focusUp: "alt-k", .focusDown: "alt-j",
+        .moveLeft: "alt-shift-h", .moveRight: "alt-shift-l", .cycleWidth: "alt-r", .toggleFullWidth: "alt-f", .toggleFloating: "alt-space", .closeWindow: "alt-w",
     ]
     public internal(set) var indicator = IndicatorConfig()
 
