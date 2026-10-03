@@ -303,8 +303,8 @@ public final class Loop {
     }
 
     /// Pause, which brings off-screen windows back unless a pause already did, let each app thread finish its writes
-    /// (at most a second), then call `done` once. GCD, not a Timer: AppKit waits for a terminate reply outside the
-    /// default run-loop mode.
+    /// (at most a second), then call `done` once. The fallback timer runs in the common modes, which include the modal
+    /// mode AppKit waits for a terminate reply in.
     public func quit(then done: @escaping @MainActor () -> Void) {
         guard !quitting else { return }
         setPaused(true)
@@ -324,7 +324,7 @@ public final class Loop {
         }
         observer.stop()
         drained.notify(queue: .main) { MainActor.assumeIsolated { finish() } }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { finish() } }
+        RunLoop.main.add(Timer(timeInterval: 1, repeats: false) { _ in MainActor.assumeIsolated { finish() } }, forMode: .common)
     }
 
     // MARK: Focus indicator
