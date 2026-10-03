@@ -35,10 +35,23 @@ enum Observation: Sendable {
     case wrote(TileID, revision: UInt64, frame: CGRect, FrameResult)
 }
 
+/// The loop's scope, readable from app threads: an observation is stamped when it happens, so one made before a
+/// Space or topology change is dropped by `reduce` however late the main loop reads it.
+final class ScopeClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var scope: EventScope?
+
+    var current: EventScope? {
+        get { lock.withLock { scope } }
+        set { lock.withLock { scope = newValue } }
+    }
+}
+
 /// One app's AX state. `windows` and every AX call live on the app's `AXApp` thread; the main loop only queues work.
 final class AppWorker: @unchecked Sendable {
     let app: AXApp
-    private let post: @Sendable (Observation) -> Void
+    private let send: @Sendable (Observation, EventScope?) -> Void
+    private let clock: ScopeClock
     private var windows: [CGWindowID: AXWindow] = [:]
     private var lastSize: [CGWindowID: CGSize] = [:]
     private let lock = NSLock()
@@ -47,15 +60,18 @@ final class AppWorker: @unchecked Sendable {
 
     var pid: Int32 { app.pid }
 
-    init(pid: Int32, bundleID: String?, post: @escaping @Sendable (Observation) -> Void) {
+    init(pid: Int32, bundleID: String?, clock: ScopeClock, send: @escaping @Sendable (Observation, EventScope?) -> Void) {
         app = AXApp(pid: pid, bundleIdentifier: bundleID)
-        self.post = post
+        self.send = send
+        self.clock = clock
         app.onThreadNotification = { [unowned self] name, element in handle(name, element) }
         app.startObserving()
         app.perform { [self] in post(.discovered(pid: pid, getAppWindows(pid: pid).compactMap(register))) }
     }
 
     func stop() { app.stopObserving() }
+
+    private func post(_ observation: Observation) { send(observation, clock.current) }
 
     /// Coalesced per window: a write still queued when the next one arrives is replaced, never run late.
     func write(_ tile: TileID, revision: UInt64, frame: CGRect) {
@@ -171,7 +187,8 @@ public final class Observer {
     private(set) var workers: [Int32: AppWorker] = [:]
     let allowedPids: Set<Int32>?
     private let executor: Executor
-    private let emit: (Event.Kind) -> Void
+    private let emit: (Event.Kind, EventScope?) -> Void
+    let clock = ScopeClock()
     private let managed: () -> Set<CGWindowID>
     private let log: (String) -> Void
     private var tokens: [NSObjectProtocol] = []
@@ -184,7 +201,7 @@ public final class Observer {
     public static let healthInterval = 0.5
 
     init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
-         emit: @escaping (Event.Kind) -> Void, log: @escaping (String) -> Void) {
+         emit: @escaping (Event.Kind, EventScope?) -> Void, log: @escaping (String) -> Void) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
@@ -213,9 +230,6 @@ public final class Observer {
             MainActor.assumeIsolated { self?.finishDiscovery() }
         }
         if awaitingDiscovery.isEmpty { finishDiscovery() }
-        healthTimer = Timer.scheduledTimer(withTimeInterval: Self.healthInterval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.healthCheck() }
-        }
     }
 
     func stop() {
@@ -226,8 +240,8 @@ public final class Observer {
     }
 
     /// Fresh from the window server, never cached: the managed-candidate windows on screen right now.
-    func census() -> [ObservedWindow] {
-        let onScreen = Set(getAllWindowInfo().map(\.windowID))
+    func census(_ onScreen: [CGWindowInfo] = getAllWindowInfo()) -> [ObservedWindow] {
+        let onScreen = Set(onScreen.map(\.windowID))
         return known.values.filter { $0.classification != .ignore && onScreen.contains($0.id) }
             .sorted { $0.id < $1.id }.map(\.observed)
     }
@@ -237,17 +251,22 @@ public final class Observer {
         let managed = managed()
         guard let alive = existingWindows(managed.union(known.keys)) else { return log("observer: window list unavailable, health check skipped") }
         for id in known.keys where !alive.contains(id) { forget(id) }
-        for id in managed.sorted() where !alive.contains(id) { emit(.windowRemoved(TileID(id))) }
+        for id in managed.sorted() where !alive.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         guard !paused else { return }
-        for window in census() where !managed.contains(window.id.rawValue) { emit(.windowAdded(window)) }
+        let onScreen = getAllWindowInfo()
+        // An app can turn regular after its launch notification; its first on-screen window registers it.
+        for pid in Set(onScreen.filter { $0.layer == 0 }.map(\.ownerPID)) where workers[pid] == nil {
+            NSRunningApplication(processIdentifier: pid).map(register)
+        }
+        for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window), nil) }
     }
 
     private func register(_ app: NSRunningApplication) {
         let pid = app.processIdentifier
         guard app.activationPolicy == .regular, pid != getpid(), workers[pid] == nil,
               allowedPids.map({ $0.contains(pid) }) ?? true else { return }
-        workers[pid] = AppWorker(pid: pid, bundleID: app.bundleIdentifier) { observation in
-            DispatchQueue.main.async { MainActor.assumeIsolated { [weak self] in self?.receive(observation) } }
+        workers[pid] = AppWorker(pid: pid, bundleID: app.bundleIdentifier, clock: clock) { observation, stamp in
+            DispatchQueue.main.async { MainActor.assumeIsolated { [weak self] in self?.receive(observation, stamp: stamp) } }
         }
     }
 
@@ -258,7 +277,7 @@ public final class Observer {
         let managed = managed()
         for id in gone.sorted() {
             forget(id)
-            if managed.contains(id) { emit(.windowRemoved(TileID(id))) }
+            if managed.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         }
         log("observer: app exited pid=\(pid) windows=\(gone.count)")
     }
@@ -273,13 +292,19 @@ public final class Observer {
         onDiscovered = nil
         if !awaitingDiscovery.isEmpty { log("observer: discovery timed out for pids \(awaitingDiscovery.sorted())") }
         done()
+        // Only after the first census: until then the group has no Space and would drop every addition.
+        healthTimer = Timer.scheduledTimer(withTimeInterval: Self.healthInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.healthCheck() }
+        }
     }
 
     private func learn(_ facts: WindowFacts) {
         if facts.classification == .ignore { known.removeValue(forKey: facts.id) } else { known[facts.id] = facts }
     }
 
-    func receive(_ observation: Observation) {
+    /// Facts that hold whatever the epoch (a window died, a write finished) go out under the current scope; what an
+    /// app saw (a new window, a move, focus) keeps the scope it was observed under.
+    func receive(_ observation: Observation, stamp: EventScope?) {
         switch observation {
         case .discovered(let pid, let windows):
             guard workers[pid] != nil else { return }
@@ -289,29 +314,29 @@ public final class Observer {
         case .created(let facts):
             learn(facts)
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
-            if !paused, facts.classification != .ignore, isWindowOnScreen(facts.id) { emit(.windowAdded(facts.observed)) }
+            if !paused, facts.classification != .ignore, isWindowOnScreen(facts.id) { emit(.windowAdded(facts.observed), stamp) }
         case .destroyed(_, let id):
             let wasManaged = managed().contains(id)
             forget(id)
-            if wasManaged { emit(.windowRemoved(TileID(id))) }
+            if wasManaged { emit(.windowRemoved(TileID(id)), nil) }
         case .minimized(let id):
             known.removeValue(forKey: id)
-            if managed().contains(id) { emit(.windowRemoved(TileID(id))) }
+            if managed().contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         case .restored(let facts):
             learn(facts)
-            if !paused, facts.classification != .ignore { emit(.windowAdded(facts.observed)) }
+            if !paused, facts.classification != .ignore { emit(.windowAdded(facts.observed), stamp) }
         case .retitled(let facts):
             learn(facts)
-            if !paused, facts.classification != .ignore { emit(.windowChanged(facts.observed)) }
+            if !paused, facts.classification != .ignore { emit(.windowChanged(facts.observed), nil) }
         case .moved(let id, let frame):
             guard !paused, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
-            emit(.windowMoved(TileID(id), AXRect(frame)))
+            emit(.windowMoved(TileID(id), AXRect(frame)), stamp)
         case .focused(let pid, let id, let activation):
             guard !paused else { return }
-            emit(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus)))
+            emit(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus)), stamp)
         case .wrote(let tile, let revision, let frame, let result):
             executor.wrote(tile, revision: revision, frame: frame, result: result)
-            emit(.frameCompleted(tile: tile, revision: revision, result: result))
+            emit(.frameCompleted(tile: tile, revision: revision, result: result), nil)
         }
     }
 }

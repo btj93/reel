@@ -65,7 +65,7 @@ public final class Loop {
         executor = Executor(worker: { [unowned self] in observer.workers[$0] }, log: log)
         observer = Observer(executor: executor, allowedPids: allowedPids,
                             managed: { [unowned self] in Set(world.groups[group]?.windows.keys.map(\.rawValue) ?? []) },
-                            emit: { [unowned self] in send($0) }, log: log)
+                            emit: { [unowned self] in send($0, stamp: $1) }, log: log)
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },
                               deliver: { [unowned self] in run($0) }, log: log)
         frameLoop.onTick = { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
@@ -74,6 +74,7 @@ public final class Loop {
 
     public func start() {
         log("loop: group=\(group) area=\(world.topology.groups.first?.frame ?? .zero) managedPids=\(allowedPids.map { $0.sorted().description } ?? "all")")
+        observer.clock.current = world.scope(for: group)
         reloadConfig()
         frameLoop.start()
         screenToken = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
@@ -85,14 +86,15 @@ public final class Loop {
 
     // MARK: Events
 
-    /// Stamp `kind` with the group's current scope and reduce it.
-    public func send(_ kind: Event.Kind) {
-        guard !quitting, let scope = world.scope(for: group) else { return }
+    /// Reduce `kind` under `stamp`, the scope it was observed under, or else the group's current scope.
+    public func send(_ kind: Event.Kind, stamp: EventScope? = nil) {
+        guard !quitting, let scope = stamp ?? world.scope(for: group) else { return }
         reduceAndRun(Event(scope: scope, kind: kind))
     }
 
     private func reduceAndRun(_ event: Event) {
         let effects = reduce(&world, event, now: max(TimeUtil.now(), world.time))
+        observer.clock.current = world.scope(for: group)
         run(effects)
         if world.needsTicks || indicator.isAnimating { frameLoop.resume() }
         updateIndicator()

@@ -1671,6 +1671,26 @@ struct FuzzStream {
         h.send(.command(.cycleWidthPreset, .keyboard))
         check(h.world.needsTicks, "a width spring asks for ticks")
     }
+    section("R3 get-layout: every field the smoke harness reads") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.cycleWidthPreset, .ipc))
+        let layout = IPCBridge.layout(world: h.world, active: 1, now: h.time)
+        let data = try? JSONSerialization.data(withJSONObject: layout)
+        let decoded = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let group = (decoded?["groups"] as? [[String: Any]])?.first { $0["isActive"] as? Bool == true }
+        let columns = group?["currentColumns"] as? [[String: Any]] ?? []
+        check(decoded?["primaryScreenHeight"] as? Double == 900, "primaryScreenHeight")
+        check(group?["gap"] as? Double == h.world.config.gap && group?["viewPos"] is Double && group?["activeColumnIndex"] as? Int == 0,
+              "gap, viewPos and activeColumnIndex")
+        check(columns.map { $0["windowID"] as? UInt32 } == [1, 2], "windowID per column")
+        let frame = columns.first?["frame"] as? [String: Double]
+        let written = h.world.frames[TileID(1)]!.frame.rect
+        check(frame == ["x": written.minX, "y": written.minY, "w": written.width, "h": written.height], "frame in CG coordinates")
+        check(columns.first?["presetIndex"] as? Int == 0 && columns.last?["presetIndex"] is NSNull, "presetIndex or null")
+        check(columns.first?["isFullWidth"] as? Bool == false && columns.first?["active"] as? Bool == true
+              && columns.first?["cachedWidth"] is Double, "isFullWidth, active and cachedWidth")
+    }
     section("R3 lane 8: full width keeps the logical width, a preset cycle replaces it") {
         var h = Harness()
         h.census(10, [window(1)])

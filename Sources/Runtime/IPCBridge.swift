@@ -41,7 +41,7 @@ public final class IPCBridge {
         case .focusUp, .focusDown: return ReelResponse(success: false, message: "one display until R5")
         case .getLayouts, .listPositions, .clearPositions: return ReelResponse(success: false, message: "saved Spaces arrive with R4")
         case .listWindows: return json(listWindows())
-        case .getLayout: return json(layout())
+        case .getLayout: return json(Self.layout(world: loop.world, active: loop.group, now: TimeUtil.now()))
         case .getStatus: return json(status())
         case .pause:
             loop.setPaused(true)
@@ -96,9 +96,8 @@ public final class IPCBridge {
     }
 
     /// The shape the smoke harness reads: one active group with its columns, frames in CG coordinates.
-    private func layout() -> [String: Any] {
-        let world = loop.world
-        let now = max(TimeUtil.now(), world.time)
+    public static func layout(world: World, active: UInt32, now: Double) -> [String: Any] {
+        let now = max(now, world.time)
         let groups: [[String: Any]] = world.topology.groups.compactMap { display in
             guard let state = world.groups[display.id] else { return nil }
             let strip = state.strip
@@ -124,7 +123,7 @@ public final class IPCBridge {
                 return entry
             }
             return [
-                "groupID": [display.id], "isActive": display.id == loop.group,
+                "groupID": [display.id], "isActive": display.id == active,
                 "regions": [["displayID": display.id, "minX": display.frame.minX, "minY": display.frame.minY,
                              "maxX": display.frame.maxX, "maxY": display.frame.maxY,
                              "width": display.frame.width, "height": display.frame.height]],
@@ -134,6 +133,6 @@ public final class IPCBridge {
                 "floating": state.floating.map(\.rawValue).sorted(), "currentColumns": columns,
             ]
         }
-        return ["activeDisplayID": loop.group, "primaryScreenHeight": world.topology.primaryScreenHeight, "groups": groups]
+        return ["activeDisplayID": active, "primaryScreenHeight": world.topology.primaryScreenHeight, "groups": groups]
     }
 }
