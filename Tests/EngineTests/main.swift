@@ -2619,11 +2619,11 @@ struct FuzzStream {
     section("R4 dock: a Dock click survives a storm of Space notifications") {
         for deferred in [false, true] {
             var h = Harness()
-            h.census(20, [window(3, app: 30), window(4, app: 40)])
+            h.census(20, [window(3, app: 30), window(4, app: 40), window(5, app: 30)])
             h.send(.command(.focus(TileID(4)), .ipc))
             h.census(10, [window(1, app: 10), window(2, app: 20)])
             h.advance(1)
-            h.send(.focus(FocusIntent(tile: nil, pid: 30, source: .appActivation)))
+            h.send(.focus(FocusIntent(tile: TileID(5), pid: 30, source: .appActivation)))
             h.send(.spaceWillChange)
             if deferred { h.census(20, []) }
             for _ in 0..<3 {
@@ -2631,9 +2631,9 @@ struct FuzzStream {
                 h.send(.spaceWillChange)
             }
             h.advance(EngineConfig.censusSettle)
-            h.census(20, [window(3, app: 30), window(4, app: 40)])
-            check(h.active == TileID(3) && h.world.groups[1]!.focus.decision?.source == .appActivation,
-                  "deferred \(deferred): the clicked app's window takes focus")
+            h.census(20, [window(3, app: 30), window(4, app: 40), window(5, app: 30)])
+            check(h.active == TileID(5) && h.world.groups[1]!.focus.decision?.source == .appActivation,
+                  "deferred \(deferred): the window the click activated takes focus")
         }
     }
     section("R4 storm: churn is coalesced into one census after it settles; a quiet switch is read at once") {
@@ -2787,6 +2787,7 @@ struct FuzzStream {
         }
         let cases: [(String, (inout [String: Any]) -> Void)] = [
             ("a hidden id listed twice", { $0["hidden"] = ($0["hidden"] as! [Any]) + ($0["hidden"] as! [Any]) }),
+            ("an active column out of range", { $0["activeColumnIndex"] = -1 }),
             ("a negative hidden place", { var tile = ($0["hidden"] as! [[String: Any]])[0]; tile["place"] = -1; $0["hidden"] = [tile] }),
             ("a hidden window also on screen", {
                 var tile = ($0["hidden"] as! [[String: Any]])[0]
