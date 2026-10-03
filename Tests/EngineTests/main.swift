@@ -2361,6 +2361,46 @@ struct FuzzStream {
         check(changing.effects.contains { if case .reply(8, .command(.refused)) = $0 { return true }; return false }
               && !changing.world.spaces.persisted.isEmpty, "a clear during a Space change is refused, since the commit would save the departing strip")
     }
+    section("R4 dock: each half of the crossing guard, and a held focus against a real Dock click") {
+        func start() -> Harness {
+            var h = Harness()
+            h.census(20, [window(3, app: 30), window(4, app: 40)])
+            h.send(.command(.focus(TileID(4)), .ipc))
+            h.census(10, [window(1, app: 10), window(5, app: 30), window(6, app: 30)])
+            h.advance(1)
+            return h
+        }
+        func cross(_ h: inout Harness) -> (TileID?, FocusSource?) {
+            h.send(.spaceWillChange)
+            h.census(20, [window(3, app: 30), window(4, app: 40)])
+            return (h.active, h.world.groups[1]!.focus.decision?.source)
+        }
+        var dock = start()
+        dock.send(.windowsHidden([TileID(5), TileID(6)]))
+        dock.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation)))
+        dock.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .axFocus)), advance: EngineConfig.focusDebounce + margin)
+        let landed = cross(&dock)
+        check(landed.0 == TileID(3) && landed.1 == .appActivation,
+              "activation, then a focus report for the destination window, then the Space change is still a Dock click")
+        var held = start()
+        held.send(.windowsHidden([TileID(5), TileID(6)]))
+        held.send(.focus(FocusIntent(tile: TileID(5), pid: 30, source: .axFocus)), advance: EngineConfig.focusDebounce + margin)
+        let echo = cross(&held)
+        check(echo.0 == TileID(4) && echo.1 == .restore, "an AX focus held for an app's hidden window here is no Dock click")
+        var local = start()
+        local.send(.windowsHidden([TileID(6)]))
+        local.send(.focus(FocusIntent(tile: TileID(6), pid: 30, source: .appActivation)), advance: EngineConfig.focusDebounce + margin)
+        let stays = cross(&local)
+        check(stays.0 == TileID(4) && stays.1 == .restore,
+              "an activation held for a hidden window, while its app still has a window here, is no Dock click")
+        var unhide = start()
+        unhide.send(.windowsHidden([TileID(5), TileID(6)]))
+        unhide.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation)))
+        unhide.send(.focus(FocusIntent(tile: TileID(5), pid: 30, source: .axFocus)), advance: EngineConfig.focusDebounce + margin)
+        unhide.send(.windowAdded(window(5, app: 30)))
+        check(unhide.active == TileID(5) && unhide.world.groups[1]!.space == .skylight(10),
+              "a focus report for the app's hidden window here after the click means the app unhides here; that window takes focus")
+    }
     try section("R4 codec: one versioned file; another version or shape is refused") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
