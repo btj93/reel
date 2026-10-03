@@ -467,7 +467,7 @@ extension World {
         if group.phase.awaitsTeardown, let key = group.phase.key {
             // A pending re-read no longer holds: focus from here on is an echo.
             group.phase = .changing(from: key, deferred: group.phase.deferred.map { DeferredCensus(key: $0.key, since: $0.since) })
-            // A Dock click is judged when the change begins, however long a storm keeps it going.
+            // A Dock click counts from the first notification of a change, not the last one of a storm.
             if case .crossing(_, let time, let previous) = group.focus, pass.now - time > EngineConfig.crossingTTL {
                 group.focus = previous.map(FocusState.resolved) ?? .none
             }
@@ -530,7 +530,7 @@ extension World {
             if group.phase.awaitsTeardown { beginSpaceChange(group: id, &pass) }
             return deferCensus(key, since: settled ? pass.now : deferred?.since, reason: "\(verdict) space census", group: id, &pass)
         }
-        commitSpace(key, onto: onto ?? key, epoch: epoch, windows: windows, group: id, &pass)
+        commitSpace(key, onto: onto!, epoch: epoch, windows: windows, group: id, &pass)
         // A fingerprint is matched by overlap, so a window that moved here must leave the Space it came from, or that
         // Space's stash stops matching its own windows.
         if !key.isAuthoritative, verdict == .mixed { prune(ids, from: otherSpaces(than: id)) }
