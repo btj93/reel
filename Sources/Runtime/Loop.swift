@@ -100,7 +100,6 @@ public final class Loop {
                                                              object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.screensChanged() }
         }
-        // Space notifications wait for the first census: until then the group has no Space to leave.
         observer.start(timeout: 1.5) { [weak self] in
             guard let self else { return }
             census(group: group)

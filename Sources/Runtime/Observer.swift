@@ -265,7 +265,6 @@ public final class Observer {
     private let emit: (Event.Kind, EventScope?) -> Void
     let clock = ScopeClock()
     private let managed: () -> Set<CGWindowID>
-    /// Windows the engine keeps a hidden place for, here or in a saved strip: not managed, but removed when they die.
     private let hidden: () -> Set<CGWindowID>
     private let log: (String) -> Void
     private var tokens: [NSObjectProtocol] = []

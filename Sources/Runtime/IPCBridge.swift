@@ -154,7 +154,6 @@ public final class IPCBridge {
             "stateDir": loop.paths.stateDir,
             "managedPids": loop.allowedPids.map { $0.sorted() as Any } ?? NSNull(),
             "configError": loop.configError as Any? ?? NSNull(),
-            // Space restore is untested under Stage Manager, so it is reported rather than handled.
             "stageManager": UserDefaults(suiteName: "com.apple.WindowManager")?.bool(forKey: "GloballyEnabled") == true ? "unsupported" : "off",
         ]
     }
