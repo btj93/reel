@@ -1839,7 +1839,17 @@ struct FuzzStream {
         let top = raise.world.topology.groups[0].frame.minY
         raise.send(.tick, advance: 0.02)
         let rising = raise.world.frames[TileID(2)].map { Double($0.frame.rect.minY) } ?? top
-        check(rising > top && rising < top + 20, "the raise animates from where the column is")
+        check(rising > top && rising < top + 20, "the raise animates toward its target")
+        var flip = Harness(animate: true)
+        flip.send(.configChanged(EngineConfig(animate: true, raiseHeight: 20)))
+        flip.census(10, [window(1), window(2)])
+        for _ in 0..<300 { flip.send(.tick, advance: 0.02) }
+        flip.send(.command(.focusRight, .keyboard))
+        flip.send(.tick, advance: 0.02)
+        flip.send(.command(.focusLeft, .keyboard))
+        flip.send(.tick, advance: 0.001)
+        let turned = flip.world.frames[TileID(1)].map { Double($0.frame.rect.minY) } ?? top + 20
+        check(turned < top + 10, "a raise reversed mid-flight turns around where the column is")
         var width = Harness(animate: true)
         width.census(10, [window(1), window(2)])
         for _ in 0..<200 { width.send(.tick, advance: 0.02) }
