@@ -467,6 +467,10 @@ extension World {
         if group.phase.awaitsTeardown, let key = group.phase.key {
             // A pending re-read no longer holds: focus from here on is an echo.
             group.phase = .changing(from: key, deferred: group.phase.deferred.map { DeferredCensus(key: $0.key, since: $0.since) })
+            // A Dock click is judged when the change begins, however long a storm keeps it going.
+            if case .crossing(_, let time, let previous) = group.focus, pass.now - time > EngineConfig.crossingTTL {
+                group.focus = previous.map(FocusState.resolved) ?? .none
+            }
         }
         groups[id] = group
     }
@@ -515,20 +519,18 @@ extension World {
             return
         }
         guard epoch > group.epoch else { return pass.effects.append(.log("stale space census ignored")) }
+        let onto = verdict == .mixed && !key.isAuthoritative ? movedOnto(ids, group: id) : key
         switch verdict {
         case .trusted: break
         case .empty where group.windows.isEmpty || settled: break
-        case .mixed where settled && (key.isAuthoritative || spaces.lookupLive(group: id, space: key, windows: windows) != nil): break
-        case .mixed where settled, .invalid where settled:
-            groups[id]!.phase = SpacePhase(space: group.space, deferred: nil)
-            pass.effects.append(.log("\(verdict) space census dropped after settle"))
-            pass.layout.insert(id)
-            return
+        case .mixed where settled && onto != nil: break
         case .empty, .mixed, .invalid:
+            // A read that cannot commit leaves the group torn down, so nothing the health check adds lands on the
+            // Space it left.
             if group.phase.awaitsTeardown { beginSpaceChange(group: id, &pass) }
-            return deferCensus(key, since: deferred?.since, reason: "\(verdict) space census", group: id, &pass)
+            return deferCensus(key, since: settled ? pass.now : deferred?.since, reason: "\(verdict) space census", group: id, &pass)
         }
-        commitSpace(key, epoch: epoch, windows: windows, changeBegan: deferred?.since ?? pass.now, group: id, &pass)
+        commitSpace(key, onto: onto ?? key, epoch: epoch, windows: windows, group: id, &pass)
         // A fingerprint is matched by overlap, so a window that moved here must leave the Space it came from, or that
         // Space's stash stops matching its own windows.
         if !key.isAuthoritative, verdict == .mixed { prune(ids, from: otherSpaces(than: id)) }
@@ -542,23 +544,24 @@ extension World {
         pass.effects.append(.requestCensus(group: id, after: since + EngineConfig.censusSettle - pass.now))
     }
 
-    private mutating func commitSpace(_ key: SpaceKey, epoch: UInt64, windows: [ObservedWindow], changeBegan: Double,
+    private mutating func commitSpace(_ key: SpaceKey, onto: SpaceKey, epoch: UInt64, windows: [ObservedWindow],
                                       group id: UInt32, _ pass: inout Pass) {
+        beginSpaceChange(group: id, &pass)
         let departing = groups[id]!
         stash(departing, id: id, time: pass.now)
-        beginSpaceChange(group: id, &pass)
-        let match = spaces.lookup(group: id, space: key, windows: windows)
+        let match = spaces.lookup(group: id, space: onto, windows: windows)
         if let match { spaces.adopt(match, as: key) }
         let display = topology.groups.first { $0.id == id }!
+        let live = if case .live? = match?.source { true } else { false }
         let group = restoredGroup(display: display, config: config, key: key, epoch: epoch, windows: windows,
-                                  saved: match?.snapshot, time: pass.now)
+                                  saved: match?.snapshot, hidesMissing: live, time: pass.now)
         groups[id] = group
         var restore = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
         var source: FocusSource = .restore
         // Only an activation of an app with no window here is a Dock click across Spaces; a focus held for a hidden
         // window of an app that is still here is not.
-        if case .crossing(let intent, let time, _) = departing.focus, changeBegan - time <= EngineConfig.crossingTTL,
-           intent.source == .appActivation, let pid = intent.pid, !departing.windows.values.contains(where: { $0.pid == pid }) {
+        if case .crossing(let intent, _, _) = departing.focus, intent.source == .appActivation, let pid = intent.pid,
+           !departing.windows.values.contains(where: { $0.pid == pid }) {
             let appWindows = windows.filter { $0.pid == pid }
             if let tile = intent.tile, appWindows.contains(where: { $0.id == tile }) { restore = tile; source = .appActivation }
             else if let tile = appWindows.map(\.id).ordered().first { restore = tile; source = .appActivation }
@@ -579,6 +582,15 @@ extension World {
         var fingerprints = spaces.live.values.filter { $0.group == id }.map(\.fingerprint)
         fingerprints.append(Set(groups[id]!.windows.keys.map(\.rawValue)))
         return spansMultipleSpaces(onScreenIDs: Set(windows.map { $0.id.rawValue }), knownFingerprints: fingerprints) ? .mixed : .trusted
+    }
+
+    /// Windows that moved between two Spaces leave the one they came from partly listed, so a mixed read commits onto
+    /// the only Space of this session it lists whole. A read still listing two whole Spaces is mid-transition.
+    private func movedOnto(_ ids: Set<UInt32>, group id: UInt32) -> SpaceKey? {
+        var known = otherSpaces(than: id).filter { $0.key.group == id }.map { ($0.key.space, $0.value.fingerprint) }
+        if let here = groups[id]!.space { known.append((here, Set(groups[id]!.windows.keys.map(\.rawValue)))) }
+        let whole = known.filter { !$0.1.isEmpty && $0.1.isSubset(of: ids) }
+        return whole.count == 1 ? whole[0].0 : nil
     }
 
     /// Every live stash except this group's current Space, on any display.

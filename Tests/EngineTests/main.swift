@@ -2534,7 +2534,8 @@ struct FuzzStream {
         fingerprint([1, 2, 3, 4, 5, 6])
         h.advance(EngineConfig.censusSettle + margin)
         fingerprint([1, 2, 3, 4, 5, 6])
-        check(h.world.groups[1]!.phase.isChanging && h.censusRequest != nil, "the settled read is not committed and is read again")
+        check(h.world.groups[1]!.phase.isChanging && h.censusRequest.map { abs($0 - EngineConfig.censusSettle) < 1e-9 } == true,
+              "the settled read is not committed and is read again a full settle later")
         h.send(.spaceWillChange)
         fingerprint([5, 6])
         check(h.tiles == [TileID(5), TileID(6)] && h.widths.first == .fixed(411), "Space [5, 6] keeps width 411")
