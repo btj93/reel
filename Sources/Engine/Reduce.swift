@@ -111,7 +111,9 @@ extension World {
         let local = intent.source == .appActivation && group.windows.values.contains { $0.pid == intent.pid }
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
         if let previous = group.focus.decision, previous.source.protectsFocus, pass.now - previous.time < EngineConfig.focusDebounce { return }
-        if let tile = intent.tile, group.windows[tile] != nil { schedule(.focus(intent), delay: EngineConfig.focusDebounce, &pass) }
+        guard let tile = intent.tile else { return }
+        if group.windows[tile] != nil { schedule(.focus(intent), delay: EngineConfig.focusDebounce, &pass) }
+        else if group.hidden[tile] != nil { groups[id]!.focus = .crossing(intent: intent, time: pass.now, previous: group.focus.decision) }
     }
 
     fileprivate mutating func focus(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
@@ -159,7 +161,7 @@ extension World {
         add(window, to: id, &pass)
         guard let group = groups[id], group.windows[window.id] != nil else { return }
         prune([window.id.rawValue], from: otherSpaces(than: id))
-        // A window back from a hide is not new: the app's own activation decides focus, even one that came first.
+        // A window back from a hide is not new: its app's focus report or activation decides focus, even one that came first.
         if !returning { focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass) }
         else if case .crossing(let intent, _, _) = group.focus, intent.tile == window.id { focus(intent, group: id, &pass) }
         pass.persist = true
@@ -227,7 +229,8 @@ extension World {
         group.windows[window.id] = window
         group.hidden.removeValue(forKey: window.id)
         if let returning {
-            if let column = returning.column { group.strip.restoreColumn(column, at: group.placeInStrip(returning.index), time: pass.now) }
+            if let column = returning.column { group.strip.restoreColumn(column, at: group.placeInStrip(returning.place), time: pass.now) }
+            else if shouldFloat(returning.window, config: config), !shouldFloat(window, config: config) { group.strip.insertTile(window.id, at: pass.now) }
             else { group.floating.insert(window.id) }
         } else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
@@ -663,13 +666,16 @@ extension World {
         return .accepted
     }
 
+    /// Hidden windows get their release frames again: the write at hide time may have failed.
     fileprivate mutating func release(group id: UInt32, _ pass: inout Pass) {
-        write(releaseFrames(group: id, at: pass.now), group: id, &pass)
+        let hidden = (groups[id]?.hidden ?? [:]).sorted { $0.key.rawValue < $1.key.rawValue }
+            .compactMap { tile, hidden in hidden.frame.map { (tile: tile, pid: hidden.window.pid, frame: $0) } }
+        write(releaseFrames(group: id, at: pass.now) + hidden, group: id, &pass)
     }
 
     /// Release only walks the strip, so windows that leave it alive (their app hid, or one minimized) get their release
     /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them. Each one's
-    /// column, or its floating, is remembered for when it comes back.
+    /// column, or its floating, and its release frame are remembered.
     fileprivate mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
         let writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
         for tile in tiles {
@@ -679,7 +685,8 @@ extension World {
                 Column(tiles: [tile], width: $0.width, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
             }
             remove(tile, from: id, &pass)
-            groups[id]!.hidden[tile] = HiddenTile(window: window, column: column, index: index.map(group.placeAmongHidden) ?? 0)
+            groups[id]!.hidden[tile] = HiddenTile(window: window, column: column, place: index.map(group.placeAmongHidden) ?? 0,
+                                                  frame: writes.first { $0.tile == tile }?.frame)
         }
         write(writes, group: id, &pass)
     }
@@ -691,7 +698,7 @@ extension World {
 
     /// Where quitting leaves each tile: off-screen ones come back on screen at their own size, cascaded so none hides
     /// another completely, and columns the raise style lowered, or whose last write failed, go to their full frame.
-    /// The cascade starts past the windows earlier hides already cascaded.
+    /// The cascade starts one step further for each hidden window, so successive hides do not stack exactly.
     private func releaseFrames(group id: UInt32, at time: Double) -> [(tile: TileID, pid: Int32, frame: AXRect)] {
         guard let group = groups[id], let display = topology.groups.first(where: { $0.id == id }) else { return [] }
         let area = display.frame

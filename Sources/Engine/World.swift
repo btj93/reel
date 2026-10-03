@@ -168,7 +168,7 @@ public struct GroupState: Sendable {
         place - hiddenPlaces.filter { $0 < place }.count
     }
 
-    private var hiddenPlaces: [Int] { hidden.values.filter { $0.column != nil }.map(\.index).sorted() }
+    private var hiddenPlaces: [Int] { hidden.values.filter { $0.column != nil }.map(\.place).sorted() }
 
     static func area(for display: DisplayGroup) -> GroupWorkingArea {
         let rect = CGRect(origin: .zero, size: display.frame.size)
@@ -176,12 +176,14 @@ public struct GroupState: Sendable {
     }
 }
 
-/// A hidden window comes back as its own column, or floating when `column` is nil. `index` counts the other hidden
-/// columns too, so windows hidden one app at a time come back in their own order, whichever returns first.
+/// A hidden window comes back as its own column, or floating when `column` is nil. `place` counts the other hidden
+/// columns too, so windows hidden one app at a time come back in their own order, whichever returns first. `frame` is
+/// the release frame written when it hid, if any; release writes it again.
 struct HiddenTile: Sendable {
     let window: ObservedWindow
     let column: Column?
-    let index: Int
+    let place: Int
+    let frame: AXRect?
 }
 
 public enum ScheduledAction: Sendable {
