@@ -2706,7 +2706,7 @@ struct FuzzStream {
         check(Set(empty.world.spaces.live.values.map(\.fingerprint)).isSuperset(of: [[1, 2], [3, 4]]),
               "from an empty Space, a read listing no Space whole prunes no saved strip")
     }
-    section("R4 hidden: an app hidden while its window is on another Space hides on that saved strip") {
+    section("R4 hidden: a window hidden or moved off a saved strip keeps the right place there") {
         var h = Harness()
         h.read([3, 4])
         h.send(.command(.setWidth(TileID(3), 411), .ipc))

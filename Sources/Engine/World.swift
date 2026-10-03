@@ -89,7 +89,7 @@ public struct DeferredCensus: Equatable, Sendable {
     public let since: Double
     /// Set only when a same-Space read deferred a group that had not been torn down.
     public var holds = false
-    /// Fingerprint reads deferred a full settle after the last Space notification, and the last of them.
+    /// Reads deferred a full settle after the last Space notification, and the last of them.
     public var settledReads = 0
     public var lastSettled: SpaceKey?
 

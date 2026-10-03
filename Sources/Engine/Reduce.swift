@@ -526,7 +526,7 @@ extension World {
         case .trusted: break
         case .empty where group.windows.isEmpty || settled: break
         case .mixed where settled && key.isAuthoritative: break
-        // A fingerprint read can be stale, so it commits once it repeats; one that keeps changing still commits.
+        // A stale fingerprint read changes when it is read again.
         case .mixed where settled && (deferred?.lastSettled == key || reads >= EngineConfig.censusReads):
             target = commitTarget(ids, group: id)
         case .empty, .mixed, .invalid:
