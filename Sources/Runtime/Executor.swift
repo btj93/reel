@@ -28,6 +28,12 @@ public struct EchoLedger: Sendable {
         if writes[tile]!.count > Self.history { writes[tile]!.removeFirst() }
     }
 
+    /// What a finished write leaves in the ledger.
+    public mutating func record(_ tile: TileID, revision: UInt64, requested: CGRect, result: FrameResult) {
+        guard case .applied = result else { return }
+        wrote(tile, revision: revision, frame: requested)
+    }
+
     public mutating func forget(_ tile: TileID) {
         writes.removeValue(forKey: tile)
         foreign.removeValue(forKey: tile)
@@ -87,9 +93,9 @@ public final class Executor {
     }
 
     func wrote(_ tile: TileID, revision: UInt64, frame: CGRect, result: FrameResult) {
+        ledger.record(tile, revision: revision, requested: frame, result: result)
         guard case .applied = result else { return log("executor: write failed tile=\(tile.rawValue) rev=\(revision) result=\(result)") }
         log("executor: wrote tile=\(tile.rawValue) rev=\(revision)")
-        ledger.wrote(tile, revision: revision, frame: frame)
     }
 
     /// True when a move or resize came from the user; echoes and repeats are dropped here with a log line.

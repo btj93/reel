@@ -1571,6 +1571,25 @@ struct FuzzStream {
         scheduler.fire(now: 6)
         check(censuses == [1], "the replacement census fires")
     }
+    section("R3 scheduler: a job rescheduled by an earlier job in the same batch runs as rescheduled") {
+        var delivered: [UInt64] = []
+        var onDeliver: (UInt64) -> Void = { _ in }
+        let live = EventScope(topologyRevision: 1, group: 1, spaceEpoch: 1)
+        let scheduler = Scheduler(clock: { 0 }, isCurrent: { _ in true }, deliver: { job in
+            if case .event(let event) = job, case .timer(let token) = event.kind { delivered.append(token.rawValue); onDeliver(token.rawValue) }
+        }, log: { _ in })
+        @MainActor func schedule(_ key: UInt64, _ deadline: Double, payload: UInt64? = nil) {
+            scheduler.schedule(.engine(TimerToken(key)), deadline: deadline, owner: live,
+                               job: .event(Event(scope: live, kind: .timer(TimerToken(payload ?? key)))))
+        }
+        schedule(1, 0.1)
+        schedule(2, 0.2)
+        onDeliver = { if $0 == 1 { schedule(2, 5, payload: 20) } }
+        scheduler.fire(now: 1)
+        check(delivered == [1] && scheduler.pendingCount == 1, "the old job does not run in place of the rescheduled one")
+        scheduler.fire(now: 5)
+        check(delivered == [1, 20], "the rescheduled job runs at its new deadline")
+    }
     section("R3 echo: the written revision decides echo, never a clock") {
         var ledger = EchoLedger()
         let tile = TileID(7)
@@ -1598,6 +1617,25 @@ struct FuzzStream {
             ledger.wrote(tile, revision: revision, frame: first.offsetBy(dx: Double(revision) * 10, dy: 0))
         }
         check(ledger.classify(tile, observed: first.offsetBy(dx: 100, dy: 0)) == .foreign, "history is bounded")
+    }
+    section("R3 echo: a write that timed out mid-animation and lands late is still ours") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2)])
+        for _ in 0..<200 { h.send(.tick, advance: 0.02) }
+        h.send(.command(.cycleWidthPreset, .keyboard))
+        h.send(.tick, advance: 0.02)
+        guard let midway = h.requests.first(where: { $0.tile == TileID(1) }) else { return check(false, "the width animation writes the window") }
+        var ledger = EchoLedger()
+        ledger.record(midway.tile, revision: midway.revision, requested: midway.frame.rect, result: .timedOut)
+        let verdict = ledger.classify(midway.tile, observed: midway.frame.rect)
+        check(verdict == .echo(revision: midway.revision), "the late echo of a timed-out write is an echo")
+        if verdict == .foreign { h.send(.windowMoved(midway.tile, midway.frame)) }
+        for _ in 0..<200 { h.send(.tick, advance: 0.02) }
+        let column = h.world.groups[1]!.strip.columns[0]
+        check(column.presetIndex == 0 && column.width == .proportion(0.33), "the preset cycle finishes")
+        var failed = EchoLedger()
+        failed.record(midway.tile, revision: midway.revision, requested: midway.frame.rect, result: .failed)
+        check(failed.classify(midway.tile, observed: midway.frame.rect) == .foreign, "a write that failed outright is not")
     }
     section("R3 user resize: the column adopts the width and the next layout keeps it") {
         var h = Harness()
@@ -1647,6 +1685,11 @@ struct FuzzStream {
         check(Set(released.keys) == Set(offScreen), "only off-screen windows move")
         check(released.values.allSatisfy { area.contains($0) }, "each lands fully inside the working area")
         check(Set(released.values.map(\.origin)).count == released.count, "cascaded, so none hides another exactly")
+        var changing = Harness()
+        changing.census(10, (1...6).map { window($0) })
+        changing.send(.spaceWillChange)
+        changing.send(.command(.release, .ipc))
+        check(Set(changing.requests.map(\.tile)) == Set(offScreen), "quitting during a Space change still releases")
     }
     section("R3 raise style: unfocused columns sit lower, derived from the active column") {
         var h = Harness()
