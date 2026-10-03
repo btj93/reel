@@ -462,8 +462,10 @@ main() {
         info "SMOKE_DRY_RUN=1 — walking sections, validating jq against fixtures, launching nothing"
     fi
 
+    info "binary under test: $BIN_REEL"
     mkdir -p "$NS" "$CFG" "$STATE"
     write_test_config "$CFG" 16
+    dry_note "config for $(basename "$BIN_REEL"): $(grep -c '^\[' "$CFG/config.toml") sections"
     write_fixtures
 
     require_binaries
