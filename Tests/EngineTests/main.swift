@@ -1629,13 +1629,15 @@ struct FuzzStream {
         h.send(.topologyChanged(topology(2, [display(2, x: 1000)])), group: 2)
         check(tiles(h, 2) == [6, 7] && h.world.groups[2]!.hidden[TileID(5)] != nil,
               "a vanished display's saved strip of the Space its windows land on joins the strip on screen")
-        var adopted = Harness(displays: [display(), display(2, x: 1000)])
+        let stacked = [display(), display(2, y: 830)]
+        var adopted = Harness(displays: stacked, separateSpaces: false)
         adopted.census(100, [window(1)])
         adopted.send(.windowsHidden([TileID(1)]))
         adopted.census(101, [window(2)])
         adopted.census(100, [window(3)], group: 2)
-        adopted.send(.topologyChanged(topology(2, [])))
-        adopted.send(.topologyChanged(topology(3, [display(), display(2, x: 1000)])), scope: EventScope(topologyRevision: 2, group: 0, spaceEpoch: 0))
+        adopted.send(.topologyChanged(topology(2, [], separateSpaces: false)))
+        adopted.send(.topologyChanged(topology(3, stacked, separateSpaces: false)), scope: EventScope(topologyRevision: 2, group: 0, spaceEpoch: 0))
+        adopted.census(100, [window(3)], group: 2)
         adopted.send(.topologyChanged(topology(4, [display(), display(2, x: 1000)], separateSpaces: false)))
         check(adopted.world.knownWindows.isSuperset(of: [1, 2, 3]), "a group that takes its Space from another keeps what it saved there")
         var empty = Harness(displays: [display(), display(2, x: 1000)])
