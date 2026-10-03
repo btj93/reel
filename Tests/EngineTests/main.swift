@@ -1488,7 +1488,7 @@ struct FuzzStream {
         check(error("[indicator]\ncolor = \"#12345\"") == "indicator.color must be \"auto\" or #RGB / #RRGGBB", "bad color")
         check(error("layout = 3") == "layout must be a table", "a section that is not a table")
         check(error("[layout\ngap = 3")?.hasPrefix("syntax:") == true, "a TOML syntax error")
-        check(error("[layout]\ngap = nan") == "layout.gap must be a number >= 0.0", "a gap that is not finite")
+        check(error("[layout]\ngap = inf") == "layout.gap must be a number >= 0.0", "a gap that is not finite")
         check(error("[[rules]]\nbundle_id = \"\"\nfloating = true") == "rules[0] needs bundle_id and floating", "an empty bundle_id")
         check(error("[indicator]\ncolor = \"#f80\"") == nil, "#RGB is a color")
         check(EngineConfig(raiseHeight: -5).raiseHeight == 0 && EngineConfig(raiseHeight: .nan).raiseHeight == 0, "a raise height below zero is off")

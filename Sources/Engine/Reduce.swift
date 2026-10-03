@@ -719,7 +719,7 @@ extension Strip {
     mutating func retargetRaise(height: Double, params: SpringParams?, at time: Double) {
         for index in columnData.indices {
             let target = index == activeColumnIndex ? 0 : height
-            guard columnData[index].cachedRaiseTarget != target || (params == nil && columnData[index].raiseAnimation != nil) else { continue }
+            guard columnData[index].cachedRaiseTarget != target else { continue }
             let from = columnData[index].currentRaiseOffset(at: time)
             columnData[index].raiseAnimation = params.map { SpringAnimation(from: from, to: target, startTime: time, params: $0) }
             columnData[index].cachedRaiseTarget = target
