@@ -9,7 +9,7 @@ import Platform
 
 /// One flush per main run-loop turn, so a scroll that logs every write and echo costs one syscall per turn.
 @MainActor
-public func log(_ line: String) {
+public func logLine(_ line: String) {
     print(line)
     guard !flushQueued else { return }
     flushQueued = true
@@ -68,18 +68,18 @@ public final class Loop {
         let topology = Self.readTopology(revision: 1)
         world = World(topology: topology)
         group = topology.groups.first?.id ?? 0
-        executor = Executor(worker: { [unowned self] in observer.workers[$0] }, log: log)
+        executor = Executor(worker: { [unowned self] in observer.workers[$0] }, log: logLine)
         observer = Observer(executor: executor, allowedPids: allowedPids,
                             managed: { [unowned self] in Set(world.groups[group]?.windows.keys.map(\.rawValue) ?? []) },
-                            emit: { [unowned self] in send($0, stamp: $1) }, log: log)
+                            emit: { [unowned self] in send($0, stamp: $1) }, log: logLine)
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },
-                              deliver: { [unowned self] in run($0) }, log: log)
+                              deliver: { [unowned self] in run($0) }, log: logLine)
         frameLoop.onTick = { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
         hotkeys.onAction = { [weak self] action in MainActor.assumeIsolated { self?.hotkey(action) } }
     }
 
     public func start() {
-        log("loop: group=\(group) area=\(world.topology.groups.first?.frame ?? .zero) managedPids=\(allowedPids.map { $0.sorted().description } ?? "all")")
+        logLine("loop: group=\(group) area=\(world.topology.groups.first?.frame ?? .zero) managedPids=\(allowedPids.map { $0.sorted().description } ?? "all")")
         observer.clock.current = world.scope(for: group)
         reloadConfig()
         frameLoop.start()
@@ -125,7 +125,7 @@ public final class Loop {
             case .reply(let id, let payload): replies[id] = payload
             case .overlay: break
             case .persist:
-                if !persistLogged { log("loop: persist skipped, the snapshot store arrives with R4") }
+                if !persistLogged { logLine("loop: persist skipped, the snapshot store arrives with R4") }
                 persistLogged = true
             case .requestCensus(let group, let after):
                 guard let owner = world.scope(for: group) else { continue }
@@ -133,7 +133,7 @@ public final class Loop {
             case .schedule(let token, let deadline, let event):
                 scheduler.schedule(.engine(token), deadline: deadline, owner: event.scope, job: .event(event))
             case .cancel(let token): scheduler.cancel(.engine(token))
-            case .log(let line): log("engine: \(line)")
+            case .log(let line): logLine("engine: \(line)")
             }
         }
     }
@@ -146,10 +146,10 @@ public final class Loop {
             key = space.key
         } else {
             key = .fingerprint(Set(windows.map(\.id.rawValue)))
-            log("space: fingerprint fallback")
+            logLine("space: fingerprint fallback")
         }
         let epoch = (world.groups[group]?.epoch ?? 0) + 1
-        log("loop: census key=\(key.debugDescription) windows=\(windows.count)")
+        logLine("loop: census key=\(key.debugDescription) windows=\(windows.count)")
         send(.spaceChanged(key: key, epoch: epoch, windows: windows))
     }
 
@@ -165,10 +165,12 @@ public final class Loop {
         let next = Self.readTopology(revision: world.topology.revision + 1)
         let id = next.groups.first?.id ?? 0
         guard next.groups.first?.frame != world.topology.groups.first?.frame || id != group else { return }
-        log("loop: topology rev=\(next.revision) group=\(id) area=\(next.groups.first?.frame ?? .zero)")
+        logLine("loop: topology rev=\(next.revision) group=\(id) area=\(next.groups.first?.frame ?? .zero)")
         let scope = world.scope(for: group) ?? EventScope(topologyRevision: world.topology.revision, group: group, spaceEpoch: 0)
         reduceAndRun(Event(scope: scope, kind: .topologyChanged(next)))
         group = id
+        // A config loaded while no display existed was dropped for want of a scope.
+        send(.configChanged(config.engine))
         census(group: id)
         send(.command(.recover, .ipc))
     }
@@ -224,7 +226,7 @@ public final class Loop {
         guard value != paused else { return }
         paused = value
         observer.paused = value
-        log("loop: paused=\(value)")
+        logLine("loop: paused=\(value)")
         if value {
             indicator.hide()
             indicatorTile = nil
@@ -242,23 +244,41 @@ public final class Loop {
         let path = paths.configFile
         do {
             let text = FileManager.default.fileExists(atPath: path) ? try String(contentsOfFile: path, encoding: .utf8) : ""
-            apply(try AppConfig.parse(text))
-            configError = nil
-            log("config: loaded \(path)")
+            let next = try AppConfig.parse(text)
+            configError = Self.bindingError(next.keys)
+            if configError == nil {
+                apply(next)
+                logLine("config: loaded \(path)")
+            }
         } catch let error as ConfigError {
             configError = error.description
         } catch {
             configError = "cannot read \(path): \(error.localizedDescription)"
         }
-        if let configError { log("config: error \(configError); keeping the previous config") }
+        if let configError { logLine("config: error \(configError); keeping the previous config") }
         onChange?()
         return configError
+    }
+
+    /// HotkeyManager drops a binding it cannot parse with only a print, so one fails the whole load instead. Unknown
+    /// action names never get here: the schema rejects them.
+    public static func bindingError(_ keys: [KeyAction: String]) -> String? {
+        let parser = HotkeyManager()
+        for (action, key) in keys.sorted(by: { $0.key.rawValue < $1.key.rawValue }) where !key.isEmpty && parser.parseKeyString(key) == nil {
+            return "keys.\(action.rawValue): cannot parse \"\(key)\""
+        }
+        return nil
     }
 
     private func apply(_ next: AppConfig) {
         config = next
         var focus = FocusIndicatorConfig()
-        focus.style = FocusIndicatorConfig.Style(rawValue: next.indicator.style.rawValue) ?? .ring
+        focus.style = switch next.indicator.style {
+        case .none: .none
+        case .ring: .ring
+        case .raise: .raise
+        case .flash: .flash
+        }
         focus.color = next.indicator.color
         focus.width = next.indicator.width
         focus.cornerRadius = next.indicator.cornerRadius
@@ -282,7 +302,7 @@ public final class Loop {
         let drained = DispatchGroup()
         for worker in observer.workers.values {
             drained.enter()
-            worker.app.perform { drained.leave() }
+            if !worker.app.perform({ drained.leave() }) { drained.leave() }
         }
         observer.stop()
         drained.notify(queue: .main) { exit(0) }
@@ -293,14 +313,14 @@ public final class Loop {
 
     private func updateIndicator() {
         guard config.indicator.style == .ring || config.indicator.style == .flash else { return }
-        guard !paused, let tile = focusedTile, let frame = world.frames[tile]?.frame.rect,
+        guard !paused, let tile = focusedTile, let frame = world.frames[tile]?.frame,
               let area = world.topology.groups.first(where: { $0.id == group })?.frame,
-              frame.intersection(area).width >= 10 else {
+              frame.rect.intersection(area).width >= 10 else {
             indicator.hide()
             indicatorTile = nil
             return
         }
-        let screen = CGRect(x: frame.minX, y: world.topology.primaryScreenHeight - frame.maxY, width: frame.width, height: frame.height)
+        let screen = screenRect(frame, in: world.topology).rect
         if indicator.currentFrame == nil || (indicatorTile != tile && config.indicator.style == .flash) {
             if indicator.snapTo(frame: screen) { frameLoop.resume() }
         } else {

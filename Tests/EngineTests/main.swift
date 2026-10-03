@@ -1,6 +1,7 @@
 import Core
 import Engine
 import Foundation
+import Platform
 import Runtime
 
 let environment = ProcessInfo.processInfo.environment
@@ -1487,6 +1488,36 @@ struct FuzzStream {
         check(error("[indicator]\ncolor = \"#12345\"") == "indicator.color must be \"auto\" or #RGB / #RRGGBB", "bad color")
         check(error("layout = 3") == "layout must be a table", "a section that is not a table")
         check(error("[layout\ngap = 3")?.hasPrefix("syntax:") == true, "a TOML syntax error")
+        check(error("[layout]\ngap = nan") == "layout.gap must be a number >= 0.0", "a gap that is not finite")
+        check(error("[[rules]]\nbundle_id = \"\"\nfloating = true") == "rules[0] needs bundle_id and floating", "an empty bundle_id")
+        check(error("[indicator]\ncolor = \"#f80\"") == nil, "#RGB is a color")
+        check(EngineConfig(raiseHeight: -5).raiseHeight == 0 && EngineConfig(raiseHeight: .nan).raiseHeight == 0, "a raise height below zero is off")
+    }
+    section("R3 config: a file with no keys is exactly the engine's defaults") {
+        guard let empty = try? AppConfig.parse("") else { return check(false, "an empty file parses") }
+        let engine = empty.engine, base = EngineConfig()
+        check(engine.gap == base.gap && engine.defaultWidth == base.defaultWidth && engine.animate == base.animate
+              && engine.gestureSnap == base.gestureSnap && engine.rules == base.rules && engine.widthPresets == base.widthPresets
+              && engine.snapPoints == base.snapPoints && engine.scroll.stiffness == base.scroll.stiffness
+              && engine.dampingRatio == base.dampingRatio && engine.bounceDistance == base.bounceDistance
+              && engine.bounceDampingRatio == base.bounceDampingRatio && engine.raiseHeight == base.raiseHeight, "every engine default")
+        check(empty.indicator == IndicatorConfig(), "every indicator default")
+    }
+    section("R3 config: a key binding the hotkey parser rejects fails the whole load") {
+        var keys = AppConfig().keys
+        check(Loop.bindingError(keys) == nil, "the default bindings parse")
+        keys[.focusLeft] = ""
+        check(Loop.bindingError(keys) == nil, "an empty binding turns the action off")
+        keys[.focusLeft] = "alt-hh"
+        check(Loop.bindingError(keys) == "keys.focus_left: cannot parse \"alt-hh\"", "a typo names the key")
+        keys[.focusLeft] = "hyperr-h"
+        check(Loop.bindingError(keys) != nil, "an unknown modifier is a typo too")
+        let hotkeys = HotkeyManager()
+        let bindings = AppConfig().keys
+        hotkeys.registerFromConfig(Dictionary(uniqueKeysWithValues: bindings.map { ($0.key.rawValue, $0.value) }))
+        check(bindings.values.allSatisfy { key in
+            hotkeys.parseKeyString(key).flatMap { hotkeys.matchBinding(keyCode: $0.1, flags: $0.0) } != nil
+        }, "every action name is one the hotkey manager binds")
     }
     section("R3 config: the smoke harness's ReelNext file parses") {
         let smoke = """
@@ -1529,6 +1560,10 @@ struct FuzzStream {
         check(strip.scrollSpringParams.stiffness == 300 && strip.bounceDistance == 10 && strip.gap == 20, "springs, bounce and gap")
         h.send(.command(.cycleWidthPreset, .keyboard))
         check(h.world.groups[1]!.strip.columnData[h.world.groups[1]!.strip.activeColumnIndex].cachedWidth == 250, "cycling uses the new presets")
+        h.send(.command(.cycleWidthPreset, .keyboard))
+        h.send(.configChanged(EngineConfig(widthPresets: [0.5])))
+        check(h.world.groups[1]!.strip.columns[h.world.groups[1]!.strip.activeColumnIndex].presetIndex == nil,
+              "a preset index past the new list is dropped")
         check(h.world.check().isEmpty, "config invariants")
     }
     section("R3 scheduler: a cancelled token never delivers, and a stale owner is dropped") {
@@ -1589,6 +1624,29 @@ struct FuzzStream {
         check(delivered == [1] && scheduler.pendingCount == 1, "the old job does not run in place of the rescheduled one")
         scheduler.fire(now: 5)
         check(delivered == [1, 20], "the rescheduled job runs at its new deadline")
+    }
+    section("R3 scheduler: due jobs run earliest first, and one a job cancels never runs") {
+        var delivered: [UInt64] = []
+        var onDeliver: (UInt64) -> Void = { _ in }
+        let live = EventScope(topologyRevision: 1, group: 1, spaceEpoch: 1)
+        let scheduler = Scheduler(clock: { 0 }, isCurrent: { _ in true }, deliver: { job in
+            if case .event(let event) = job, case .timer(let token) = event.kind { delivered.append(token.rawValue); onDeliver(token.rawValue) }
+        }, log: { _ in })
+        for (raw, deadline) in [(1, 0.3), (2, 0.1), (3, 0.2), (4, 0.4)] as [(UInt64, Double)] {
+            scheduler.schedule(.engine(TimerToken(raw)), deadline: deadline, owner: live, job: .event(Event(scope: live, kind: .timer(TimerToken(raw)))))
+        }
+        onDeliver = { if $0 == 3 { scheduler.cancel(.engine(TimerToken(1))) } }
+        scheduler.fire(now: 1)
+        check(delivered == [2, 3, 4], "earliest first, and the job cancelled mid-batch never runs")
+    }
+    section("R3 scheduler: the run-loop timer fires a due job without a manual fire") {
+        var delivered = 0
+        let live = EventScope(topologyRevision: 1, group: 1, spaceEpoch: 1)
+        let clock = { ProcessInfo.processInfo.systemUptime }
+        let scheduler = Scheduler(clock: clock, isCurrent: { _ in true }, deliver: { _ in delivered += 1 }, log: { _ in })
+        scheduler.schedule(.census(group: 1), deadline: clock() + 0.05, owner: live, job: .census(group: 1))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check(delivered == 1 && scheduler.pendingCount == 0, "the timer delivered the job once")
     }
     section("R3 echo: the written revision decides echo, never a clock") {
         var ledger = EchoLedger()
@@ -1681,6 +1739,7 @@ struct FuzzStream {
         let resized = CGRect(x: request.frame.rect.minX + 40, y: request.frame.rect.minY, width: 640, height: request.frame.rect.height)
         h.send(.windowMoved(TileID(1), AXRect(resized)))
         check(h.widths.first == .fixed(640) && h.world.groups[1]!.strip.columns[0].presetIndex == nil, "the column takes the user's width")
+        check(h.effects.contains { if case .persist = $0 { true } else { false } }, "a user resize is persisted")
         check(h.requests.first { $0.tile == TileID(1) }?.frame.rect.width == 640, "the window is rewritten at its new width")
         check(h.requests.first { $0.tile == TileID(1) }?.frame.rect.minX == request.frame.rect.minX, "and back at its column's x")
         h.send(.command(.focusRight, .keyboard))
@@ -1702,6 +1761,14 @@ struct FuzzStream {
         check(h.widths.first == .fixed(640) && h.requests.isEmpty, "a move during a Space change is ignored")
         check(h.world.check().isEmpty, "user resize invariants")
     }
+    section("R3 user resize: a full-width window reporting more than the screen stays full width") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.toggleFullWidth(TileID(1)), .ipc))
+        let frame = h.world.frames[TileID(1)]!.frame.rect
+        h.send(.windowMoved(TileID(1), AXRect(CGRect(x: frame.minX, y: frame.minY, width: frame.width + 200, height: frame.height))))
+        check(h.world.groups[1]!.strip.columns[0].isFullWidth, "the column keeps full width")
+    }
     section("R3 recover: every frame is written again") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
@@ -1709,6 +1776,11 @@ struct FuzzStream {
         check(h.requests.isEmpty, "a settled strip writes nothing")
         h.send(.command(.recover, .ipc))
         check(Set(h.requests.map(\.tile)) == [TileID(1), TileID(2), TileID(3)], "recover rewrites every tiled window")
+        h.advance(1)
+        h.send(.focus(FocusIntent(tile: TileID(3), pid: 3, source: .appActivation)))
+        h.send(.command(.recover, .ipc))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(3), "recover leaves a pending focus to land")
         check(h.world.check().isEmpty, "recover invariants")
     }
     section("R3 release: quitting brings every off-screen window back on screen") {
@@ -1750,6 +1822,16 @@ struct FuzzStream {
         check(!h.world.needsTicks, "a settled strip lets the frame loop pause")
         h.send(.command(.cycleWidthPreset, .keyboard))
         check(h.world.needsTicks, "a width spring asks for ticks")
+        var raise = Harness(animate: true)
+        raise.census(10, [window(1), window(2)])
+        for _ in 0..<200 { raise.send(.tick, advance: 0.02) }
+        raise.send(.configChanged(EngineConfig(animate: true, raiseHeight: 20)))
+        if case .static = raise.world.groups[1]!.strip.viewOffset {} else { check(false, "the view is settled") }
+        check(raise.world.needsTicks, "a raise spring on a settled view asks for ticks")
+        raise.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
+        let top = raise.world.topology.groups[0].frame.minY
+        check(!raise.world.needsTicks && raise.world.frames[TileID(2)].map { Double($0.frame.rect.minY) } == top + 20,
+              "turning animation off mid-raise snaps the raise to its end")
     }
     section("R3 get-layout: every field the smoke harness reads") {
         var h = Harness()
@@ -1786,6 +1868,13 @@ struct FuzzStream {
         still.census(10, [window(1)])
         still.send(.command(.focusLeft, .keyboard))
         check(!still.world.needsTicks, "without animation there is no bounce")
+        var swiping = Harness(animate: true)
+        swiping.census(10, [window(1), window(2)])
+        swiping.send(.pointer(.beginGesture(TileID(1))))
+        swiping.send(.pointer(.delta(20)))
+        swiping.send(.command(.focusLeft, .keyboard))
+        let viewSwipes = if case .gesture = swiping.world.groups[1]!.strip.viewOffset { true } else { false }
+        check(viewSwipes == (swiping.gesture != nil), "edge focus during a swipe never leaves a swipe without its view")
     }
     section("R3 lane 8: full width keeps the logical width, a preset cycle replaces it") {
         var h = Harness()

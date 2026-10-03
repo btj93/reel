@@ -17,11 +17,11 @@ public enum IndicatorStyle: String, CaseIterable, Sendable {
 }
 
 public struct IndicatorConfig: Equatable, Sendable {
-    public var style = IndicatorStyle.ring
-    public var color = "auto"
-    public var width = 3.0
-    public var cornerRadius = 10.0
-    public var raiseHeight = 20.0
+    public var style: IndicatorStyle
+    public var color: String
+    public var width: Double
+    public var cornerRadius: Double
+    public var raiseHeight: Double
 
     public init(style: IndicatorStyle = .ring, color: String = "auto", width: Double = 3, cornerRadius: Double = 10,
                 raiseHeight: Double = 20) {
@@ -56,10 +56,10 @@ public struct AppConfig: Sendable {
     }
 
     private static func read(_ root: TOMLTable) throws -> AppConfig {
-        var gap = EngineConfig.defaultGap, defaultWidth = EngineConfig.defaultColumnWidth, presets = [0.33, 0.5, 0.67]
-        var snap: [SnapPoint] = [.middle]
-        var animate = true, stiffness = 800.0, damping = 1.0, bounce = 40.0, bounceDamping = 0.6
-        var rules: [Rule] = []
+        let base = EngineConfig()
+        var gap = base.gap, defaultWidth = base.defaultWidth, presets = base.widthPresets, snap = base.snapPoints
+        var animate = base.animate, stiffness = base.scroll.stiffness, damping = base.dampingRatio
+        var bounce = base.bounceDistance, bounceDamping = base.bounceDampingRatio, rules = base.rules
         var config = AppConfig()
         try Section(root, path: "").read([
             "layout": { try Section($0, path: "layout").read([
@@ -100,9 +100,9 @@ public struct AppConfig: Sendable {
                 }
             },
         ])
-        config.engine = EngineConfig(gap: gap, defaultWidth: defaultWidth, animate: animate, rules: rules, widthPresets: presets,
-                                     snapPoints: snap, stiffness: stiffness, dampingRatio: damping, bounceDistance: bounce,
-                                     bounceDampingRatio: bounceDamping,
+        config.engine = EngineConfig(gap: gap, defaultWidth: defaultWidth, animate: animate, gestureSnap: base.gestureSnap,
+                                     rules: rules, widthPresets: presets, snapPoints: snap, stiffness: stiffness,
+                                     dampingRatio: damping, bounceDistance: bounce, bounceDampingRatio: bounceDamping,
                                      raiseHeight: config.indicator.style == .raise ? config.indicator.raiseHeight : 0)
         return config
     }

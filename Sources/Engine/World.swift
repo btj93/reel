@@ -31,6 +31,7 @@ public struct EngineConfig: Sendable {
     public let widthPresets: [Double]
     public let snapPoints: [SnapPoint]
     public let scroll: SpringParams
+    public let dampingRatio: Double
     public let bounceDistance: Double
     public let bounceDampingRatio: Double
     /// Raise-style focus indicator: unfocused columns sit this many points lower. Zero turns raise off.
@@ -49,7 +50,8 @@ public struct EngineConfig: Sendable {
         let presets = widthPresets.filter { $0.isFinite && $0 > 0 && $0 <= 1 }
         self.widthPresets = presets.isEmpty ? [0.33, 0.5, 0.67] : presets
         self.snapPoints = snapPoints.isEmpty ? [.middle] : Array(Set(snapPoints)).sorted()
-        scroll = SpringParams(dampingRatio: valid(dampingRatio, 1), stiffness: valid(stiffness, 800), epsilon: 0.5)
+        self.dampingRatio = valid(dampingRatio, 1)
+        scroll = SpringParams(dampingRatio: self.dampingRatio, stiffness: valid(stiffness, 800), epsilon: 0.5)
         self.bounceDistance = bounceDistance.isFinite && bounceDistance >= 0 ? bounceDistance : 40
         self.bounceDampingRatio = valid(bounceDampingRatio, 0.6)
         self.raiseHeight = raiseHeight.isFinite && raiseHeight > 0 ? raiseHeight : 0

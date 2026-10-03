@@ -12,9 +12,7 @@ public struct WindowFacts: Equatable, Sendable {
     public let bundleID: String?
     public let title: String
     public let frame: CGRect?
-    public let classification: Classification
-
-    public enum Classification: Equatable, Sendable { case tile, float, ignore }
+    public let classification: WindowClassification
 
     var observed: ObservedWindow {
         ObservedWindow(id: TileID(id), pid: pid, bundleID: bundleID, title: title, floating: classification == .float,
@@ -180,11 +178,7 @@ final class AppWorker: @unchecked Sendable {
         var properties = window.getPropertiesFast()
         properties.windowLayer = windowLayer(for: window.windowID)
         properties.bundleIdentifier = app.bundleIdentifier
-        let classification: WindowFacts.Classification = switch classifyWindow(properties) {
-        case .tile: .tile
-        case .float: .float
-        case .ignore: .ignore
-        }
+        let classification = classifyWindow(properties)
         return WindowFacts(id: window.windowID, pid: pid, bundleID: app.bundleIdentifier, title: properties.title ?? "",
                            frame: properties.frame, classification: properties.isMinimized ? .ignore : classification)
     }
@@ -326,8 +320,10 @@ public final class Observer {
     }
 
     /// Facts that hold whatever the epoch (a window died, a write finished) go out under the current scope; what an
-    /// app saw (a new window, a move, focus) keeps the scope it was observed under.
+    /// app saw (a new window, a move, focus) keeps the scope it was observed under, and is dropped when it was seen
+    /// with no scope at all (the health check and the next census pick the window up).
     func receive(_ observation: Observation, stamp: EventScope?) {
+        func emitObserved(_ kind: Event.Kind) { if let stamp { emit(kind, stamp) } }
         switch observation {
         case .discovered(let pid, let windows):
             guard workers[pid] != nil else { return }
@@ -337,7 +333,7 @@ public final class Observer {
         case .created(let facts):
             learn(facts)
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
-            if !paused, facts.classification != .ignore, isWindowOnScreen(facts.id) { emit(.windowAdded(facts.observed), stamp) }
+            if !paused, facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed)) }
         case .destroyed(let id):
             let wasManaged = managed().contains(id)
             forget(id)
@@ -347,16 +343,16 @@ public final class Observer {
             if managed().contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         case .restored(let facts):
             learn(facts)
-            if !paused, facts.classification != .ignore { emit(.windowAdded(facts.observed), stamp) }
+            if !paused, facts.classification != .ignore { emitObserved(.windowAdded(facts.observed)) }
         case .retitled(let facts):
             learn(facts)
             if !paused, facts.classification != .ignore { emit(.windowChanged(facts.observed), nil) }
         case .moved(let id, let frame):
-            guard !paused, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
-            emit(.windowMoved(TileID(id), AXRect(frame)), stamp)
+            guard !paused, stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
+            emitObserved(.windowMoved(TileID(id), AXRect(frame)))
         case .focused(let pid, let id, let activation):
             guard !paused else { return }
-            emit(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus)), stamp)
+            emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus)))
         case .wrote(let tile, let revision, let frame, let landed, let result):
             executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
             emit(.frameCompleted(tile: tile, revision: revision, result: result), nil)

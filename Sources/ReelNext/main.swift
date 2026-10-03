@@ -9,12 +9,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var ipc: IPCBridge?
     private var menu: MenuBar?
     private var permissionTimer: Timer?
+    private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // kill and Ctrl-C quit through applicationShouldTerminate, so off-screen windows are released first.
+        for number in [SIGTERM, SIGINT] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { MainActor.assumeIsolated { NSApp.terminate(nil) } }
+            source.resume()
+            signalSources.append(source)
+        }
         NSApp.setActivationPolicy(.accessory)
         ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleDisplaySleepDisabled], reason: "Reel window management")
         guard AXIsProcessTrusted() else {
-            log("reelnext: waiting for Accessibility permission")
+            logLine("reelnext: waiting for Accessibility permission")
             AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
             permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
@@ -31,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func launch() {
         let loop = Loop()
         let ipc = IPCBridge(loop: loop)
-        if !ipc.start() { log("reelnext: IPC socket failed to start") }
+        if !ipc.start() { logLine("reelnext: IPC socket failed to start") }
         menu = MenuBar(loop: loop)
         loop.start()
         self.loop = loop

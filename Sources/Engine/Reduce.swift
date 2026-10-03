@@ -650,7 +650,7 @@ extension World {
         var step = 0.0
         for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) where target.isOffScreen {
             guard let pid = group.windows[target.tileID]?.pid else { continue }
-            let size = CGSize(width: min(target.frame.width, area.width), height: min(target.frame.height, area.height))
+            let size = target.frame.size
             let origin = CGPoint(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
                                  y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)))
             step += 30
