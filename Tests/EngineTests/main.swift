@@ -1657,6 +1657,22 @@ struct FuzzStream {
         check(!released.isEmpty && released.allSatisfy { frame in areas.contains { $0.contains(frame) } },
               "each released window lies inside one display: \(released)")
     }
+    section("R5 release: a hidden window's saved frame follows its display, and is dropped when the display is gone") {
+        func hiddenFrame(_ h: Harness, _ group: UInt32) -> CGRect? { h.world.groups[group]?.hidden[TileID(7)]?.frame?.rect }
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1)])
+        h.census(20, (3...7).map { window($0) }, group: 2)
+        h.send(.command(.focus(TileID(3)), .keyboard), group: 2)
+        h.send(.windowsHidden([TileID(7)]), group: 2)
+        let parked = hiddenFrame(h, 2)!
+        var moved = h
+        h.send(.topologyChanged(topology(2, [display()])))
+        h.send(.command(.release, .ipc))
+        check(h.world.groups[1]!.hidden[TileID(7)] != nil && !h.requests.contains { $0.tile == TileID(7) },
+              "an unplugged display's hidden window is not written back there: \(h.requests.filter { $0.tile == TileID(7) })")
+        moved.send(.topologyChanged(topology(2, [display(), display(2, y: 830)])))
+        check(hiddenFrame(moved, 2) == parked.offsetBy(dx: -1000, dy: 830), "a moved display carries it: \(String(describing: hiddenFrame(moved, 2)))")
+    }
     section("R5 headless: with no display every strip is saved until one returns") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
