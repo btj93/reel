@@ -77,6 +77,24 @@ func runRuntimeWriteTests() {
         assertEq(w.currentFrame.height, 500, "still a position write")
     }
 
+    section("a write that asks for a new height sets the size")
+    do {
+        let w = FakeAXWindow(windowID: 8, pid: 99001, frame: .zero)
+        var cache = SizeCache()
+        _ = cache.write(tiled, to: w)
+        _ = cache.write(CGRect(x: 100, y: 25, width: 700, height: 600), to: w)
+        assertEq(w.currentFrame.height, 600, "the new height lands")
+    }
+
+    section("a user drag between the write and its read-back is not reported as ours")
+    do {
+        let w = FakeAXWindow(windowID: 9, pid: 99001, frame: .zero)
+        w.dragAfterNextSet = 300
+        var cache = SizeCache()
+        let (_, landed) = cache.write(tiled, to: w)
+        assertEq(landed, tiled, "landed keeps the origin we asked for")
+    }
+
     section("a failed write makes the next one set the size")
     do {
         let w = FakeAXWindow(windowID: 6, pid: 99001, frame: .zero)

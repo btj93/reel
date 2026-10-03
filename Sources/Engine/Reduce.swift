@@ -276,8 +276,9 @@ extension World {
             let delta = if case .focusLeft = command { -1 } else { 1 }
             let index = max(0, min(group.strip.columns.count - 1, group.strip.activeColumnIndex + delta))
             focus(FocusIntent(tile: group.strip.columns[index].activeTile, source: source), group: id, &pass)
-            // At the strip's edge the view stretches past it and springs back, from wherever the focus left it.
-            if index == group.strip.activeColumnIndex, config.animate, !pointer.isSwiping(group: id), var focused = groups[id] {
+            // At the strip's edge the view stretches past it and springs back, from wherever the focus left it. The focus
+            // already ended any swipe, so the bounce cannot strand one without its view.
+            if index == group.strip.activeColumnIndex, config.animate, var focused = groups[id] {
                 focused.strip.createRubberBandAnimation(direction: Double(delta), at: now)
                 groups[id] = focused
             }

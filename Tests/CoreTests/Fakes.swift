@@ -42,6 +42,8 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
     var resistsOffscreen = false
     /// Minimum size clamp applied in `apply` → models a macOS size constraint.
     var minSize: CGSize = .zero
+    /// One-shot: the user drags the window this far right after the next set lands, before anyone reads it back.
+    var dragAfterNextSet: CGFloat?
 
     init(windowID: CGWindowID, pid: pid_t, frame: CGRect, title: String? = "w") {
         self.currentFrame = frame
@@ -78,6 +80,10 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
         g.size.height = max(g.size.height, minSize.height)
         currentFrame = g
         frameLog.append(g)
+        if let drag = dragAfterNextSet {
+            dragAfterNextSet = nil
+            currentFrame.origin.x += drag
+        }
         return .success(())
     }
 

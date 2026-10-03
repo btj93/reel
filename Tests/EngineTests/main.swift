@@ -1543,6 +1543,12 @@ struct FuzzStream {
         check(strip.widthPresets == [.proportion(0.25), .proportion(0.75)] && strip.snapPoints == [.left, .middle], "presets and snap points")
         check(strip.snapIndices.allSatisfy { $0 == strip.defaultSnapIndex }, "snap indices move to the new default")
         check(strip.scrollSpringParams.stiffness == 300 && strip.bounceDistance == 10 && strip.gap == 20, "springs, bounce and gap")
+        var damping = Harness()
+        damping.census(10, [window(1)])
+        damping.send(.configChanged(EngineConfig(bounceDampingRatio: 0.3)))
+        check(damping.world.groups[1]!.strip.bounceDampingRatio == 0.3, "bounce damping")
+        let cleaned = EngineConfig(widthPresets: [0, 0.5, 2, .nan], snapPoints: [.middle, .left, .middle])
+        check(cleaned.widthPresets == [0.5] && cleaned.snapPoints == [.left, .middle], "invalid presets and duplicate snap points are dropped")
         h.send(.command(.cycleWidthPreset, .keyboard))
         check(h.world.groups[1]!.strip.columnData[h.world.groups[1]!.strip.activeColumnIndex].cachedWidth == 250, "cycling uses the new presets")
         h.send(.command(.cycleWidthPreset, .keyboard))
@@ -1651,6 +1657,11 @@ struct FuzzStream {
         ledger.wrote(tile, revision: 3, frame: first)
         ledger.wrote(tile, revision: 4, frame: second)
         check(ledger.classify(tile, observed: first) == .echo(revision: 3), "a late echo of an earlier write in flight is still an echo")
+        let frames = (0..<4).map { CGRect(x: 100 + Double($0) * 20, y: 30, width: 500, height: 800) }
+        for (index, frame) in frames.enumerated() { ledger.wrote(TileID(8), revision: UInt64(10 + index), frame: frame) }
+        check(ledger.classify(TileID(8), observed: frames[0]) == .echo(revision: 10), "the first of four writes in flight still echoes")
+        ledger.wrote(TileID(8), revision: 20, frame: frames[1])
+        check(ledger.classify(TileID(8), observed: frames[1]) == .echo(revision: 20), "a frame written twice echoes its latest revision")
         check(ledger.classify(tile, observed: CGRect(x: 80, y: 30, width: 500, height: 620)) == .echo(revision: 4),
               "a height the app chose is still our write")
         let clamped = CGRect(x: 80, y: 30, width: 560, height: 800)
@@ -1742,6 +1753,8 @@ struct FuzzStream {
               "a pure move keeps the width and puts the window back")
         h.send(.windowMoved(TileID(1), AXRect(moved.insetBy(dx: -0.75, dy: 0))))
         check(h.widths.first == .fixed(640), "a resize within the slop is rounding, not a new width")
+        h.send(.windowMoved(TileID(1), AXRect(CGRect(x: CGFloat.nan, y: 30, width: 500, height: 600))))
+        check(h.requests.isEmpty && h.widths.first == .fixed(640), "a frame that is not finite is ignored")
         h.send(.windowMoved(TileID(2), AXRect(CGRect(x: 0, y: 0, width: 5000, height: 500))))
         check(h.world.groups[1]!.strip.columnData[1].cachedWidth == 1000, "a width wider than the screen is clamped")
         h.send(.command(.toggleFloating(TileID(2)), .ipc))
@@ -1772,6 +1785,10 @@ struct FuzzStream {
         h.send(.command(.recover, .ipc))
         h.advance(EngineConfig.focusDebounce + margin)
         check(h.active == TileID(3), "recover leaves a pending focus to land")
+        h.send(.spaceWillChange)
+        h.send(.ipc(id: 1, command: .recover))
+        let refused = h.effects.contains { if case .reply(1, .command(.refused)) = $0 { true } else { false } }
+        check(refused && h.requests.isEmpty, "recover waits out a Space change")
         check(h.world.check().isEmpty, "recover invariants")
     }
     section("R3 release: quitting brings every off-screen window back on screen") {
@@ -1819,8 +1836,17 @@ struct FuzzStream {
         raise.send(.configChanged(EngineConfig(animate: true, raiseHeight: 20)))
         if case .static = raise.world.groups[1]!.strip.viewOffset {} else { check(false, "the view is settled") }
         check(raise.world.needsTicks, "a raise spring on a settled view asks for ticks")
-        raise.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
         let top = raise.world.topology.groups[0].frame.minY
+        raise.send(.tick, advance: 0.02)
+        let rising = raise.world.frames[TileID(2)].map { Double($0.frame.rect.minY) } ?? top
+        check(rising > top && rising < top + 20, "the raise animates from where the column is")
+        var width = Harness(animate: true)
+        width.census(10, [window(1), window(2)])
+        for _ in 0..<200 { width.send(.tick, advance: 0.02) }
+        width.send(.command(.setWidth(TileID(2), 300), .ipc))
+        if case .static = width.world.groups[1]!.strip.viewOffset {} else { check(false, "the view stays put") }
+        check(width.world.needsTicks, "a width spring on a settled view asks for ticks")
+        raise.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
         check(!raise.world.needsTicks && raise.world.frames[TileID(2)].map { Double($0.frame.rect.minY) } == top + 20,
               "turning animation off mid-raise snaps the raise to its end")
     }
@@ -1902,10 +1928,12 @@ struct FuzzStream {
         h.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
         h.census(10, [window(1), window(2)])
         guard let raised = h.world.frames[TileID(1)]?.frame.rect else { return check(false, "the active column is written") }
+        let before = h.world.frames.mapValues(\.frame.rect)
         h.send(.command(.release, .ipc))
         let released = Dictionary(uniqueKeysWithValues: h.requests.map { ($0.tile, $0.frame.rect) })
         check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minY == raised.minY && released[$0]?.height == raised.height + 20 },
               "every column comes back up at full height")
+        check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minX == before[$0]?.minX }, "in its own column, not cascaded")
     }
     section("R3 lane 8: cycle, toggle full width, toggle back, toggle, cycle") {
         var h = Harness()
