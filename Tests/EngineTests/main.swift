@@ -1699,9 +1699,12 @@ struct FuzzStream {
         h.send(.command(.setWidth(TileID(1), 377), .ipc))
         h.send(.topologyChanged(topology(2, [])))
         check(h.world.groups.isEmpty && h.stash(10) == [TileID(1), TileID(2)] && h.world.check().isEmpty, "the strip is saved")
-        h.send(.topologyChanged(topology(3, [display()])), scope: EventScope(topologyRevision: 2, group: 0, spaceEpoch: 0))
+        let headless = EventScope(topologyRevision: 2, group: 0, spaceEpoch: 0)
+        h.send(.configChanged(EngineConfig(gap: 20, animate: false)), scope: headless)
+        h.send(.topologyChanged(topology(3, [display()])), scope: headless)
         h.census(10, [window(1), window(2)])
         check(h.tiles == [TileID(1), TileID(2)] && h.widths.first == .fixed(377), "it restores when a display returns")
+        check(h.world.groups[1]!.strip.gap == 20, "a config loaded with no display reaches the strip")
     }
     section("R5 resolution: a new size keeps the strip and fits the new area") {
         var h = Harness()

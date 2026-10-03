@@ -200,8 +200,6 @@ public final class Loop {
 
     private func topologyChanged(_ next: Topology) {
         sendGlobal(.topologyChanged(next))
-        // A config loaded while no display existed was dropped for want of a scope.
-        sendGlobal(.configChanged(config.engine))
         world.groups.keys.sorted().forEach(census(group:))
         recover()
         onChange?()
@@ -329,7 +327,7 @@ public final class Loop {
         let bindings = Dictionary(uniqueKeysWithValues: next.keys.filter { !$0.value.isEmpty }.map { ($0.key.rawValue, $0.value) })
         hotkeys.registerFromConfig(bindings)
         if bindings.isEmpty { hotkeys.stop() } else if hotkeys.eventTap == nil { _ = hotkeys.start() }
-        send(.configChanged(next.engine))
+        sendGlobal(.configChanged(next.engine))
     }
 
     /// Pause, which brings off-screen windows back unless a pause already did, let each app thread finish its writes
