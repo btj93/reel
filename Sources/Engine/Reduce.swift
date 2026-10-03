@@ -47,7 +47,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
         }
         pass.effects.append(.reply(id: requestID, payload: .snapshots(snapshots)))
     case .pointer(let input, let token): world.onPointer(input, token: token, group: id, &pass)
-    case .spaceWillChange: world.beginSpaceChange(group: id, &pass)
+    case .spaceWillChange: world.onSpaceWillChange(group: id, &pass)
     case .spaceChanged(let key, let epoch, let windows): world.onSpaceChanged(key: key, epoch: epoch, windows: windows, group: id, &pass)
     case .frameCompleted(let tile, let revision, let result): world.onFrameCompleted(tile, revision: revision, result: result, &pass)
     case .timer(let token): world.onTimer(token, group: id, &pass)
@@ -469,6 +469,14 @@ extension World {
         groups[id] = group
     }
 
+    /// A read confirms only a full settle after the last Space notification, so one taken mid-transition cannot ride
+    /// the clock of a re-read that was pending before it.
+    fileprivate mutating func onSpaceWillChange(group id: UInt32, _ pass: inout Pass) {
+        beginSpaceChange(group: id, &pass)
+        guard let group = groups[id], let deferred = group.phase.deferred else { return }
+        groups[id]!.phase = SpacePhase(space: group.space, deferred: DeferredCensus(key: deferred.key, since: pass.now))
+    }
+
     fileprivate mutating func onSpaceChanged(key: SpaceKey, epoch: UInt64, windows observed: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
         guard let group = groups[id], !key.isEmpty || (observed.isEmpty && !key.isAuthoritative) else {
             return pass.effects.append(.log("space census without identity ignored"))
@@ -480,12 +488,11 @@ extension World {
             pass.effects.append(.log("census window dropped tile=\(window.id.rawValue)"))
         }
         let verdict = censusVerdict(windows, group: id)
-        let deferred = group.phase.deferred.flatMap { $0.key == key ? $0 : nil }
+        let deferred = group.phase.deferred.flatMap { $0.covers(key) ? $0 : nil }
         let settled = deferred.map { pass.now - $0.since >= EngineConfig.censusSettle } ?? false
-        // Under a Space id, a read that still lists another Space's windows a settle later commits. A census never
-        // prunes another Space's stash, so a stale one costs gaps that heal on the next visit.
-        // A fingerprint key is built from the read itself, so it cannot vouch for the read.
-        let confirmed = settled && key.isAuthoritative
+        // A read that still lists another Space's windows a settle after the last notification commits. Under a Space
+        // id a census never prunes another Space's stash, so a stale one costs gaps that heal on the next visit.
+        let confirmed = settled
         let ids = Set(windows.map { $0.id.rawValue })
         if key == group.space {
             let moved = stashedElsewhere(ids, group: id)
@@ -523,6 +530,9 @@ extension World {
             return deferCensus(key, since: deferred?.since, reason: "\(verdict) space census", group: id, &pass)
         }
         commitSpace(key, epoch: epoch, windows: windows, group: id, &pass)
+        // A fingerprint is matched by overlap, so a window that moved here must leave the Space it came from, or that
+        // Space's stash stops matching its own windows.
+        if !key.isAuthoritative { prune(Set(windows.map { $0.id.rawValue }), from: otherSpaces(than: id)) }
     }
 
     private mutating func deferCensus(_ key: SpaceKey, since: Double?, holds: Bool = false, reason: String, group id: UInt32,

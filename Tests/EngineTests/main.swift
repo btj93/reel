@@ -1177,7 +1177,7 @@ struct Harness {
         h.census(10, [window(1), window(2)])
         check(h.active == TileID(1), "Space 10 restores its own focus")
     }
-    section("Moved windows: spaceWillChange during a hold keeps the settle clock") {
+    section("Moved windows: spaceWillChange during a hold restarts the settle clock (R4)") {
         var h = Harness()
         h.census(20, [window(3), window(4)])
         h.census(10, [window(1), window(2)])
@@ -1188,7 +1188,11 @@ struct Harness {
             h.send(.spaceWillChange)
             h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: moved))
         }
-        check(!h.world.groups[1]!.phase.isChanging && h.tiles.contains(TileID(3)), "the re-read settles on the original clock")
+        check(h.world.groups[1]!.phase.isChanging && !h.tiles.contains(TileID(3)),
+              "a read right after a notification does not confirm on the clock of the re-read pending before it")
+        h.advance(EngineConfig.censusSettle + margin)
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: moved))
+        check(!h.world.groups[1]!.phase.isChanging && h.tiles.contains(TileID(3)), "a read a full settle after the last notification confirms")
     }
     section("Moved windows: a cross-Space deferral after a same-Space hold tears down the swipe") {
         var h = Harness()
@@ -1208,7 +1212,7 @@ struct Harness {
         check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "a cross-Space deferral drops AX focus")
         check(h.world.check().isEmpty, "hold invariants")
     }
-    section("Moved windows: TODO(R4) fingerprint mode cannot tell a moved window from a stale read") {
+    section("Moved windows: in fingerprint mode a window moved onto the current Space joins it (R4)") {
         var h = Harness()
         func fingerprint(_ ids: Set<UInt32>, _ windows: [ObservedWindow]) {
             h.send(.spaceChanged(key: .fingerprint(ids), epoch: h.world.groups[1]!.epoch + 1, windows: windows))
@@ -1219,7 +1223,26 @@ struct Harness {
         fingerprint([1, 2, 3], [window(1), window(2), window(3)])
         h.advance(EngineConfig.censusSettle + margin)
         fingerprint([1, 2, 3], [window(1), window(2), window(3)])
-        check(h.world.groups[1]!.space == .fingerprint([3, 4]), "pinned: the group stays on the old Space until R4 resolves this")
+        check(h.world.groups[1]!.space == .fingerprint([1, 2, 3]) && h.tiles == [TileID(1), TileID(2), TileID(3)],
+              "a settled read commits: Space [1, 2] comes back with the moved window")
+        check(h.world.spaces.live.values.contains { $0.fingerprint == [4] } && !h.world.spaces.live.values.contains { $0.fingerprint == [3, 4] },
+              "and the Space it left no longer lists it, so that stash still matches its own windows")
+        fingerprint([4], [window(4)])
+        check(h.tiles == [TileID(4)] && h.world.check().isEmpty, "the Space it left restores without it")
+        var drifting = Harness()
+        func drift(_ ids: Set<UInt32>) {
+            drifting.send(.spaceChanged(key: .fingerprint(ids), epoch: drifting.world.groups[1]!.epoch + 1, windows: ids.sorted().map { window($0) }))
+        }
+        drift([1, 2])
+        drift([3, 4])
+        drifting.send(.spaceWillChange)
+        drift([1, 3])
+        drifting.advance(EngineConfig.censusSettle * 0.6)
+        drift([1, 3, 4])
+        check(drifting.world.groups[1]!.space == .fingerprint([3, 4]), "a read that changes on every retry is still deferred inside the settle")
+        drifting.advance(EngineConfig.censusSettle * 0.6)
+        drift([1, 2, 3])
+        check(drifting.world.groups[1]!.space == .fingerprint([1, 2, 3]), "and settles on the first read's clock, not each new read's")
     }
     section("Moved windows: another display's stash counts as another Space") {
         var h = Harness(displays: [display(), display(2, x: 1000)])

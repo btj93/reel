@@ -86,6 +86,12 @@ public struct DeferredCensus: Equatable, Sendable {
     public let since: Double
     /// Set only when a same-Space read deferred a group that had not been torn down.
     public var holds = false
+
+    /// A fingerprint is built from the read, so every fingerprint read answers the one pending change; a Space id
+    /// answers only its own.
+    func covers(_ read: SpaceKey) -> Bool {
+        key == read || !(key.isAuthoritative || read.isAuthoritative)
+    }
 }
 
 public enum SpacePhase: Equatable, Sendable {
