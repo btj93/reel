@@ -601,7 +601,7 @@ extension World {
         }
         // One display takes OS focus: the one the Dock click crossed to, else the one that had it. The rest restore
         // at their old decision time, so they neither take the commands nor hold off a focus report.
-        let pending = if case .crossing = departing.focus { true } else { false }
+        let pending = if case .crossing(let intent, _, _) = departing.focus, intent.source == .appActivation { true } else { false }
         let quiet = source == .appActivation || (leads && !pending) ? nil : departing.focus.decision?.time ?? -.infinity
         focus(FocusIntent(tile: restore, source: source), group: id, &pass, quietSince: quiet)
         pass.layout.insert(id)

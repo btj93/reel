@@ -37,7 +37,8 @@ public struct SpaceBook: Sendable {
     /// unplugged) is found by its Space id, or on disk by its windows.
     func lookup(group: DisplayGroup, space: SpaceKey, windows: [ObservedWindow], separateSpaces: Bool) -> SpaceMatch? {
         if let exact = lookupExact(group: group.id, space: space) { return SpaceMatch(snapshot: exact, source: .live(space)) }
-        if separateSpaces, space.isAuthoritative, let moved = live.first(where: { $0.key.space == space })?.value {
+        if separateSpaces, space.isAuthoritative,
+           let moved = live.filter({ $0.key.space == space }).min(by: { $0.key.group < $1.key.group })?.value {
             return SpaceMatch(snapshot: moved, source: .live(space))
         }
         let fingerprint = Set(windows.map { $0.id.rawValue })

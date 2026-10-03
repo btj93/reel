@@ -2654,11 +2654,12 @@ struct FuzzStream {
             h.send(.command(.focus(TileID(1)), .keyboard), advance: 1)
             h.send(.windowsHidden([TileID(2)]), advance: 1)
             if park { h.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .axFocus))) }
-            h.send(.spaceChanged(key: .skylight(20), epoch: 2, windows: [window(4, app: 9), window(8, app: 7)]))
+            let commit = h.send(.spaceChanged(key: .skylight(20), epoch: 2, windows: [window(4, app: 9), window(8, app: 7)]))
+            let asked = commit.contains { if case .focus(_, .restore) = $0 { true } else { false } }
             h.advance(1)
-            outcomes.append(h.world.groups[1]!.focus.decision.map { "\($0.tile.rawValue) \($0.source)" } ?? "none")
+            outcomes.append((h.world.groups[1]!.focus.decision.map { "\($0.tile.rawValue) \($0.source)" } ?? "none") + " asked=\(asked)")
         }
-        check(outcomes[0] == outcomes[1] && outcomes[0].hasSuffix("restore"), "the new Space restores its own focus: \(outcomes)")
+        check(outcomes[0] == outcomes[1] && outcomes[0].hasSuffix("restore asked=true"), "the new Space restores its own focus: \(outcomes)")
     }
     section("R3 hide: a window focused before it comes back takes focus when it does") {
         for source in [FocusSource.axFocus, .appActivation] {
