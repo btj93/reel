@@ -1884,7 +1884,8 @@ struct FuzzStream {
               "[[rules]] bundle_id and floating")
         let defaults = try? AppConfig.parse("")
         check(defaults?.engine.gap == EngineConfig.defaultGap && defaults?.indicator.style == .ring && defaults?.engine.raiseHeight == 0
-              && defaults?.keys[.focusLeft] == "alt-h", "an empty file gives the defaults")
+              && defaults?.keys[.focusLeft] == "alt-h" && ["focus_up", "focus_down"].compactMap { name in defaults?.keys.first { $0.key.rawValue == name }?.value } == ["alt-k", "alt-j"],
+              "an empty file gives the defaults")
         let ring = try? AppConfig.parse("[indicator]\nstyle = \"ring\"\nraise_height = 24")
         check(ring?.engine.raiseHeight == 0, "raise_height lowers columns only in raise style")
     }
@@ -1895,7 +1896,8 @@ struct FuzzStream {
         check(error("gapp = 3") == "unknown key gapp", "unknown top-level key")
         check(error("[layout]\ngapp = 3") == "unknown key layout.gapp", "unknown key in a section")
         check(error("[keybindings]\nfocus_left = \"alt-h\"") == "unknown key keybindings", "the old schema's section is unknown")
-        check(error("[keys]\nfocus_up = \"alt-k\"") == "unknown key keys.focus_up", "an action this runtime lacks is unknown")
+        check(error("[keys]\nfocus_up = \"alt-k\"\nfocus_down = \"\"") == nil, "focus_up and focus_down are actions")
+        check(error("[keys]\nfocus_sideways = \"alt-k\"") == "unknown key keys.focus_sideways", "an action this runtime lacks is unknown")
         check(error("[[rules]]\napp_id = \"x\"\nfloating = true") == "unknown key rules[0].app_id", "unknown key in a rule")
         check(error("[[rules]]\nbundle_id = \"x\"") == "rules[0] needs bundle_id and floating", "a rule needs both keys")
         check(error("[layout]\ngap = -1") == "layout.gap must be a number >= 0.0", "negative gap")
