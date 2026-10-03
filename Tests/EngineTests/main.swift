@@ -1954,6 +1954,8 @@ struct FuzzStream {
         guard parked.count == 2 else { return check(false, "six columns hide at least two") }
         var effects = h.send(.windowsHidden(parked))
         check(Set(h.tiles).isDisjoint(with: parked), "the hidden windows leave the strip")
+        let others = h.requests.filter { !parked.contains($0.tile) }
+        check(others.allSatisfy { h.world.frames[$0.tile] == $0 }, "the windows left in the strip only move to their strip frames")
         effects += h.send(.command(.release, .ipc))
         var landed: [CGRect] = []
         for tile in parked {
@@ -1972,11 +1974,21 @@ struct FuzzStream {
         h.send(.windowChanged(window(2)))
         check(Set(h.tiles) == [TileID(1), TileID(2)] && h.world.groups[1]!.floating.isEmpty, "the titled window tiles")
         check(h.world.check().isEmpty, "late title invariants")
-        var toggled = Harness()
-        toggled.census(10, [window(1), window(2)])
-        toggled.send(.command(.toggleFloating(TileID(2)), .keyboard))
-        toggled.send(.windowChanged(window(2)))
-        check(toggled.world.groups[1]!.floating == [TileID(2)], "a window the user floated stays floating")
+        let renamed = ObservedWindow(id: TileID(2), pid: 2, bundleID: "test.app", title: "renamed")
+        var floated = Harness()
+        floated.census(10, [window(1), window(2)])
+        floated.send(.command(.toggleFloating(TileID(2)), .keyboard))
+        floated.send(.windowChanged(renamed))
+        check(floated.world.groups[1]!.floating == [TileID(2)], "a window the user floated stays floating")
+        var tiled = Harness()
+        tiled.census(10, [window(1), window(2, floating: true)])
+        tiled.send(.command(.toggleFloating(TileID(2)), .keyboard))
+        tiled.send(.windowChanged(renamed))
+        check(Set(tiled.tiles) == [TileID(1), TileID(2)], "a window the user tiled stays tiled")
+        var untitled = Harness()
+        untitled.census(10, [window(1), window(2, floating: true)])
+        untitled.send(.windowChanged(ObservedWindow(id: TileID(2), pid: 2, bundleID: "test.app", title: "still floating", floating: true)))
+        check(untitled.world.groups[1]!.floating == [TileID(2)], "a retitle that still floats leaves it floating")
         var ruled = Harness(rules: [Rule(bundleID: "test.app", floating: true)])
         ruled.census(10, [window(1), window(2, floating: true)])
         ruled.send(.windowChanged(window(2)))
@@ -1994,6 +2006,17 @@ struct FuzzStream {
         let low = min(start, end) - 1, high = max(start, end) + 1
         check(h.active == TileID(2) && end != start && samples.allSatisfy { $0 >= low && $0 <= high },
               "an interior focus never overshoots (\(start)->\(end), range \(samples.min()!)...\(samples.max()!))")
+    }
+    section("R3 frames: a layout that overflows to infinity is never written") {
+        var h = Harness(displays: [DisplayGroup(id: 1, displays: [1], frame: CGRect(x: 0, y: 30, width: 1e308, height: 800))])
+        let steps: [(String, Event.Kind)] = [("layout", .spaceChanged(key: .skylight(10), epoch: 1, windows: (1...4).map { window($0) })),
+                                             ("release", .command(.release, .ipc))]
+        for (name, kind) in steps {
+            let effects = h.send(kind)
+            let frames = effects.compactMap { if case .setFrame(let request) = $0 { request.frame.rect } else { nil } }
+            let rejected = effects.contains { if case .log("invalid layout rejected") = $0 { true } else { false } }
+            check(rejected && frames.allSatisfy { $0.minX.isFinite && $0.width.isFinite }, "\(name): the infinite frame is rejected, the rest written")
+        }
     }
     section("R3 config: invalid presets, snap points, stiffness and bounce fall back to the defaults") {
         let config = EngineConfig(widthPresets: [-1, .nan], snapPoints: [], stiffness: -5, bounceDistance: .nan)
