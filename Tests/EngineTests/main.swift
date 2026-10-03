@@ -2990,6 +2990,18 @@ struct FuzzStream {
         shown.send(.spaceWillChange); arrive(&shown, [3, 4, 5])
         check(shown.widths.first == .fixed(411), "an app hidden and shown again from another Space: its Space keeps its widths")
         check(shown.world.check().isEmpty, "and the world is sound")
+
+        for minimized in [[TileID(2)], [TileID(2), TileID(3), TileID(4)]] {
+            var still = Harness()
+            let ids: [UInt32] = minimized.count == 1 ? [1, 2] : [1, 2, 3, 4]
+            arrive(&still, ids)
+            still.send(.command(.setWidth(TileID(1), 411), .ipc))
+            still.send(.windowsHidden(minimized))
+            still.send(.spaceWillChange); arrive(&still, [8, 9])
+            still.send(.spaceWillChange); arrive(&still, [1])
+            check(still.widths.first == .fixed(411), "\(minimized.count) of \(ids.count) windows still hidden on return: the Space keeps its widths")
+            check(Set(still.world.groups[1]!.hidden.keys) == Set(minimized), "and still knows which windows are hidden")
+        }
     }
 }
 
