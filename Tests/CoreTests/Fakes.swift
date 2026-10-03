@@ -34,6 +34,8 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
 
     /// One-shot transient failure on the next set → exercises `dirtyTileIDs` retry.
     var failNextSet = false
+    /// One-shot: the next set times out, as a busy app's does.
+    var timeoutNextSet = false
     /// Models an app that refuses off-screen positioning. In instant `applyLayout`,
     /// `setPosition` is only ever called for OFF-SCREEN tiles (on-screen tiles use
     /// `setFrame`), so failing every `setPosition` fails exactly the off-screen
@@ -42,6 +44,8 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
     var resistsOffscreen = false
     /// Minimum size clamp applied in `apply` → models a macOS size constraint.
     var minSize: CGSize = .zero
+    /// One-shot: the user drags the window this far right after the next set lands, before anyone reads it back.
+    var dragAfterNextSet: CGFloat?
 
     init(windowID: CGWindowID, pid: pid_t, frame: CGRect, title: String? = "w") {
         self.currentFrame = frame
@@ -69,6 +73,10 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
     override func getSize() -> AXResult<CGSize> { .success(currentFrame.size) }
 
     private func apply(_ frame: CGRect) -> AXResult<Void> {
+        if timeoutNextSet {
+            timeoutNextSet = false
+            return .failure(.appUnresponsive)
+        }
         if failNextSet {
             failNextSet = false
             return .failure(.transientFailure(.failure))
@@ -78,6 +86,10 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
         g.size.height = max(g.size.height, minSize.height)
         currentFrame = g
         frameLog.append(g)
+        if let drag = dragAfterNextSet {
+            dragAfterNextSet = nil
+            currentFrame.origin.x += drag
+        }
         return .success(())
     }
 
@@ -93,7 +105,7 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
 
     override func raise() -> AXResult<Void> { raiseCount += 1; return .success(()) }
     override func close() -> AXResult<Void> { closed = true; return .success(()) }
-    override func focus() { focusCount += 1 }
+    override func focus(timeout: Float?) { focusCount += 1 }
 }
 
 /// Fake app. Overrides observation to no-ops so no CFRunLoop thread spawns.

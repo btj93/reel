@@ -13,8 +13,11 @@ let package = Package(
         .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0"),
     ],
     targets: [
-        .target(name: "Engine", dependencies: ["Core"]),
-        .executableTarget(name: "RunEngineTests", dependencies: ["Engine", "Core"], path: "Tests/EngineTests"),
+        .target(name: "Engine", dependencies: ["Core", "TOMLKit"]),
+        .executableTarget(name: "RunEngineTests", dependencies: ["Engine", "Core", "Runtime", "Platform"], path: "Tests/EngineTests"),
+        // The new runtime: turns macOS observations into Engine events and executes its effects.
+        .target(name: "Runtime", dependencies: ["Engine", "Core", "Platform", "IPC", "Config"]),
+        .executableTarget(name: "ReelNext", dependencies: ["Runtime"]),
         // Main app
         .executableTarget(
             name: "Reel",
@@ -67,7 +70,7 @@ let package = Package(
         // Tests (executable — no Xcode required)
         .executableTarget(
             name: "RunTests",
-            dependencies: ["Core", "Config", "IPC", "WindowManager", "Platform"],
+            dependencies: ["Core", "Config", "IPC", "WindowManager", "Platform", "Engine", "Runtime"],
             path: "Tests/CoreTests"
         ),
 

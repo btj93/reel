@@ -36,7 +36,8 @@ DRY="${SMOKE_DRY_RUN:-0}"
 SMOKE_TAG="$$"
 
 BIN_DIR="$REPO_ROOT/.build/debug"
-BIN_REEL="$BIN_DIR/Reel"
+# BIN_REEL picks the binary under test: trunk Reel by default, `BIN_REEL=.build/debug/ReelNext` for the rewrite.
+BIN_REEL="${BIN_REEL:-$BIN_DIR/Reel}"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
 
@@ -461,8 +462,10 @@ main() {
         info "SMOKE_DRY_RUN=1 — walking sections, validating jq against fixtures, launching nothing"
     fi
 
+    info "binary under test: $BIN_REEL"
     mkdir -p "$NS" "$CFG" "$STATE"
     write_test_config "$CFG" 16
+    dry_note "config for $(basename "$BIN_REEL"): $(grep -c '^\[' "$CFG/config.toml") sections"
     write_fixtures
 
     require_binaries

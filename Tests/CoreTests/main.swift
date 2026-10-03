@@ -2942,6 +2942,7 @@ runL1SpaceKeyTests()
 runSimFocus()
 runSimAnim()
 runSimSpace()
+runRuntimeWriteTests()
 
 // ============================================================
 print()

@@ -32,6 +32,10 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .windowRemoved(let tile):
         world.remove(tile, from: id, &pass)
         pass.persist = true
+    case .windowsHidden(let tiles):
+        world.hide(tiles, from: id, &pass)
+        pass.persist = true
+    case .windowMoved(let tile, let frame): world.onWindowMoved(tile, frame: frame, group: id, &pass)
     case .focus(let intent): world.onFocusObserved(intent, group: id, &pass)
     case .command(let command, let source): _ = world.run(command, source: source, group: id, &pass)
     case .ipc(let requestID, let command):
@@ -107,7 +111,9 @@ extension World {
         let local = intent.source == .appActivation && group.windows.values.contains { $0.pid == intent.pid }
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
         if let previous = group.focus.decision, previous.source.protectsFocus, pass.now - previous.time < EngineConfig.focusDebounce { return }
-        if let tile = intent.tile, group.windows[tile] != nil { schedule(.focus(intent), delay: EngineConfig.focusDebounce, &pass) }
+        guard let tile = intent.tile else { return }
+        if group.windows[tile] != nil { schedule(.focus(intent), delay: EngineConfig.focusDebounce, &pass) }
+        else if group.hidden[tile] != nil { groups[id]!.focus = .crossing(intent: intent, time: pass.now, previous: group.focus.decision) }
     }
 
     fileprivate mutating func focus(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
@@ -151,10 +157,13 @@ extension World {
     fileprivate mutating func onWindowAdded(_ window: ObservedWindow, group id: UInt32, _ pass: inout Pass) {
         guard window.isValid else { return pass.effects.append(.log("invalid window ignored tile=\(window.id.rawValue)")) }
         if groups[id]?.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
+        let returning = groups[id]?.returning(window) != nil
         add(window, to: id, &pass)
-        guard groups[id]?.windows[window.id] != nil else { return }
+        guard let group = groups[id], group.windows[window.id] != nil else { return }
         prune([window.id.rawValue], from: otherSpaces(than: id))
-        focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass)
+        // A window back from a hide is not new: its app's focus report or activation decides focus, even one that came first.
+        if !returning { focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass) }
+        else if case .crossing(let intent, _, _) = group.focus, intent.tile == window.id { focus(intent, group: id, &pass) }
         pass.persist = true
     }
 
@@ -164,13 +173,39 @@ extension World {
         refreshIfSameOwner(window, &pass)
     }
 
-    /// An id can be reused by another app's window, so only a holder with the same owner takes the update.
+    /// A tiled window keeps its column's place: a new width becomes the column's logical width, and the frame is
+    /// rewritten. A floating window belongs to the user, so its frame is left alone.
+    fileprivate mutating func onWindowMoved(_ tile: TileID, frame: AXRect, group id: UInt32, _ pass: inout Pass) {
+        guard frame.rect.isFinite, var group = groups[id], !group.phase.isChanging,
+              let index = group.strip.columnIndex(of: tile) else { return }
+        let width = min(frame.rect.width, group.strip.workingArea.width)
+        if abs(width - group.strip.columnData[index].cachedWidth) > EngineConfig.userResizeSlop {
+            group.strip.setWidth(.fixed(width), column: index, at: pass.now, params: nil)
+            groups[id] = group
+            pass.persist = true
+            pass.effects.append(.log("user resize tile=\(tile.rawValue) width=\(Int(width))"))
+        }
+        frames.removeValue(forKey: tile)
+        appliedFrames.removeValue(forKey: tile)
+        pass.layout.insert(id)
+    }
+
+    /// An id can be reused by another app's window, so only a holder with the same owner takes the update. A window
+    /// that floated only because it registered untitled joins the strip, focused as a new window is, once its app says
+    /// it tiles; one the user floated never had floating facts, so it stays. A refused join keeps the old facts, so
+    /// the next report of the new ones tries again.
     private mutating func refreshIfSameOwner(_ window: ObservedWindow, _ pass: inout Pass) {
         var mismatched = false
         for id in groups.keys.sorted() {
             guard let known = groups[id]!.windows[window.id] else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
-            if known != window { groups[id]!.windows[window.id] = window; pass.persist = true }
+            guard known != window else { continue }
+            if shouldFloat(known, config: config), !shouldFloat(window, config: config), groups[id]!.floating.contains(window.id) {
+                guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
+                focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass)
+            }
+            groups[id]!.windows[window.id] = window
+            pass.persist = true
         }
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
@@ -186,12 +221,18 @@ extension World {
         }
         if group.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
         guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
-        cancelTimers(group: id, &pass, focusOnly: true)
+        let returning = group.returning(window)
+        if returning == nil { cancelTimers(group: id, &pass, focusOnly: true) }
         cancelGesture(in: id, &pass)
         group = groups[id]!
         if group.space?.isEmpty == true { group.phase = .settled(.fingerprint([window.id.rawValue])) }
         group.windows[window.id] = window
-        if shouldFloat(window, config: config) { group.floating.insert(window.id) }
+        group.hidden.removeValue(forKey: window.id)
+        if let returning {
+            if let column = returning.column { group.strip.restoreColumn(column, at: group.placeInStrip(returning.place), time: pass.now) }
+            else if shouldFloat(returning.window, config: config), !shouldFloat(window, config: config) { group.strip.insertTile(window.id, at: pass.now) }
+            else { group.floating.insert(window.id) }
+        } else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
         groups[id] = group
         pass.layout.insert(id)
@@ -226,6 +267,16 @@ extension World {
     }
 
     fileprivate mutating func run(_ command: Command, source: FocusSource, group id: UInt32, _ pass: inout Pass) -> CommandOutcome {
+        switch command {
+        case .release:
+            // Quitting must never strand a window off screen, even mid Space change.
+            release(group: id, &pass)
+            return .accepted
+        case .recover:
+            return recover(group: id, &pass)
+        default:
+            break
+        }
         let outcome = execute(command, source: source, group: id, &pass)
         if outcome == .accepted { cancelTimers(group: id, &pass, focusOnly: true) }
         return outcome
@@ -248,6 +299,12 @@ extension World {
             let delta = if case .focusLeft = command { -1 } else { 1 }
             let index = max(0, min(group.strip.columns.count - 1, group.strip.activeColumnIndex + delta))
             focus(FocusIntent(tile: group.strip.columns[index].activeTile, source: source), group: id, &pass)
+            // At the strip's edge the view stretches past it and springs back, from wherever the focus left it. The focus
+            // already ended any swipe, so the bounce cannot strand one without its view.
+            if index == group.strip.activeColumnIndex, config.animate, var focused = groups[id] {
+                focused.strip.createRubberBandAnimation(direction: Double(delta), at: now)
+                groups[id] = focused
+            }
             return .accepted
         case .moveLeft, .moveRight:
             guard !group.strip.columns.isEmpty else { return .refused("empty strip") }
@@ -282,6 +339,8 @@ extension World {
             guard group.windows[tile] != nil else { return .unknownWindow(tile) }
             pass.effects.append(.close(tile))
             return .accepted
+        case .recover, .release:
+            preconditionFailure("run handles recover and release")
         }
         if recenter, !group.strip.columns.isEmpty {
             if case .gesture = group.strip.viewOffset {} else {
@@ -329,7 +388,7 @@ extension World {
             case .toggleFullWidth: targeted = .toggleFullWidth(session.tile)
             case .close: targeted = .close(session.tile)
             case .focus: targeted = .focus(session.tile)
-            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset: return
+            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release: return
             }
             _ = run(targeted, source: .click, group: id, &pass)
         case .dropReorder(let requested):
@@ -484,7 +543,10 @@ extension World {
         groups[id] = group
         var restore = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
         var source: FocusSource = .restore
-        if case .crossing(let intent, let time, _) = departing.focus, pass.now - time <= EngineConfig.crossingTTL, let pid = intent.pid {
+        // Only an activation of an app with no window here is a Dock click across Spaces; a focus held for a hidden
+        // window of an app that is still here is not.
+        if case .crossing(let intent, let time, _) = departing.focus, pass.now - time <= EngineConfig.crossingTTL,
+           intent.source == .appActivation, let pid = intent.pid, !departing.windows.values.contains(where: { $0.pid == pid }) {
             let appWindows = windows.filter { $0.pid == pid }
             if let tile = intent.tile, appWindows.contains(where: { $0.id == tile }) { restore = tile; source = .appActivation }
             else if let tile = appWindows.map(\.id).ordered().first { restore = tile; source = .appActivation }
@@ -584,9 +646,11 @@ extension World {
             if group.space == old.space {
                 for window in old.windows.values.sorted(by: { $0.id.rawValue < $1.id.rawValue }) where group.windows[window.id] == nil {
                     group.windows[window.id] = window
+                    group.hidden.removeValue(forKey: window.id)
                     if old.floating.contains(window.id) { group.floating.insert(window.id) }
                 }
                 for column in old.strip.columns { group.strip.insertColumn(column, at: pass.now, atIndex: group.strip.columns.count) }
+                for (tile, hidden) in old.hidden where group.windows[tile] == nil && group.hidden[tile] == nil { group.hidden[tile] = hidden }
                 groups[destination.id] = group
             } else {
                 stash(old, id: destination.id, time: pass.now)
@@ -595,11 +659,84 @@ extension World {
         pass.persist = true
     }
 
+    /// Forget what was written so the flush writes every frame again. Pending focus is left alone.
+    private mutating func recover(group id: UInt32, _ pass: inout Pass) -> CommandOutcome {
+        guard let group = groups[id], !group.phase.isChanging else { return .refused("space change in progress") }
+        for tile in group.windows.keys.ordered() {
+            frames.removeValue(forKey: tile)
+            appliedFrames.removeValue(forKey: tile)
+        }
+        pass.layout.insert(id)
+        return .accepted
+    }
+
+    /// Hidden windows get their release frames again: the write at hide time may have failed.
+    fileprivate mutating func release(group id: UInt32, _ pass: inout Pass) {
+        let hidden = (groups[id]?.hidden ?? [:]).sorted { $0.key.rawValue < $1.key.rawValue }
+            .compactMap { tile, hidden in hidden.frame.map { (tile: tile, pid: hidden.window.pid, frame: $0) } }
+        write(releaseFrames(group: id, at: pass.now) + hidden, group: id, &pass)
+    }
+
+    /// Release only walks the strip, so windows that leave it alive (their app hid, or one minimized) get their release
+    /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them. Each one's
+    /// column, or its floating, and its release frame are remembered.
+    fileprivate mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
+        let writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
+        for tile in tiles {
+            guard let group = groups[id], let window = group.windows[tile] else { continue }
+            let index = group.strip.columnIndex(of: tile)
+            let column = index.map { group.strip.columns[$0] }.map {
+                Column(tiles: [tile], width: $0.width, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
+            }
+            remove(tile, from: id, &pass)
+            groups[id]!.hidden[tile] = HiddenTile(window: window, column: column, place: index.map(group.placeAmongHidden) ?? 0,
+                                                  frame: writes.first { $0.tile == tile }?.frame)
+        }
+        write(writes, group: id, &pass)
+    }
+
+    private mutating func write(_ writes: [(tile: TileID, pid: Int32, frame: AXRect)], group id: UInt32, _ pass: inout Pass) {
+        guard let scope = scope(for: id) else { return }
+        for (tile, pid, frame) in writes { write(tile, pid: pid, frame: frame, scope: scope, &pass) }
+    }
+
+    /// Where quitting leaves each tile: off-screen ones come back on screen at their own size, cascaded so none hides
+    /// another completely, and columns the raise style lowered, or whose last write failed, go to their full frame.
+    /// The cascade starts one step further for each hidden window, so successive hides do not stack exactly.
+    private func releaseFrames(group id: UInt32, at time: Double) -> [(tile: TileID, pid: Int32, frame: AXRect)] {
+        guard let group = groups[id], let display = topology.groups.first(where: { $0.id == id }) else { return [] }
+        let area = display.frame
+        var step = 30 * Double(group.hidden.count)
+        return computeTargetFrames(strip: group.strip, time: time).compactMap { target in
+            guard let pid = group.windows[target.tileID]?.pid else { return nil }
+            let frame = axRect(ViewportRect(target.frame), on: display)
+            guard target.isOffScreen else {
+                return config.raiseHeight > 0 || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
+            }
+            let size = target.frame.size
+            defer { step += 30 }
+            return (target.tileID, pid, AXRect(CGRect(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
+                                                      y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)),
+                                                      width: size.width, height: size.height)))
+        }
+    }
+
+    /// One frame write. A non-finite frame never leaves the engine.
+    @discardableResult
+    private mutating func write(_ tile: TileID, pid: Int32, frame: AXRect, scope: EventScope, _ pass: inout Pass) -> FrameRequest? {
+        guard frame.rect.isFinite else {
+            pass.effects.append(.log("invalid layout rejected"))
+            return nil
+        }
+        let request = FrameRequest(tile: tile, pid: pid, frame: frame, revision: nextRevision(), scope: scope)
+        pass.effects.append(.setFrame(request))
+        return request
+    }
+
     fileprivate mutating func onConfig(_ next: EngineConfig, _ pass: inout Pass) {
         config = next
         for id in groups.keys.sorted() {
-            groups[id]!.strip.gap = next.gap
-            groups[id]!.strip.defaultWidth = .proportion(next.defaultWidth)
+            next.configure(&groups[id]!.strip)
             groups[id]!.strip.recalculateWidths(at: pass.now)
             pass.layout.insert(id)
         }
@@ -608,18 +745,17 @@ extension World {
 
     fileprivate mutating func flush(_ pass: inout Pass) {
         for id in pass.layout.sorted() {
-            guard let group = groups[id], !group.phase.isChanging, let scope = scope(for: id),
+            guard var group = groups[id], !group.phase.isChanging, let scope = scope(for: id),
                   let display = topology.groups.first(where: { $0.id == id }) else { continue }
-            for target in computeTargetFrames(strip: group.strip, time: pass.now) {
+            if config.raiseHeight > 0 {
+                group.strip.retargetRaise(height: config.raiseHeight, params: config.animate ? config.scroll : nil, at: pass.now)
+                groups[id] = group
+            }
+            for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) {
                 let frame = axRect(ViewportRect(target.frame), on: display)
-                guard frame.rect.isFinite, let pid = group.windows[target.tileID]?.pid else {
-                    pass.effects.append(.log("invalid layout rejected"))
-                    continue
-                }
+                guard let pid = group.windows[target.tileID]?.pid else { continue }
                 if let existing = frames[target.tileID], existing.frame == frame, existing.scope == scope { continue }
-                let request = FrameRequest(tile: target.tileID, pid: pid, frame: frame, revision: nextRevision(), scope: scope)
-                frames[target.tileID] = request
-                pass.effects.append(.setFrame(request))
+                if let request = write(target.tileID, pid: pid, frame: frame, scope: scope, &pass) { frames[target.tileID] = request }
             }
         }
         guard pass.persist else { return }
@@ -639,11 +775,31 @@ extension Strip {
         insertColumn(Column(tiles: [tile], width: defaultWidth), at: time)
     }
 
+    /// Puts a column back at `index` without moving the view: the active column stays active, where it was on screen.
+    mutating func restoreColumn(_ column: Column, at index: Int, time: Double) {
+        guard !columns.isEmpty else { return insertColumn(column, at: time, atIndex: 0) }
+        let index = min(index, columns.count), active = activeColumnIndex, offset = viewOffset
+        insertColumn(column, at: time, atIndex: index)
+        activeColumnIndex = index <= active ? active + 1 : active
+        viewOffset = offset
+    }
+
     mutating func removeTile(_ tile: TileID, at time: Double) {
         guard let index = columnIndex(of: tile) else { return }
         columns[index].tiles.removeAll { $0 == tile }
         if columns[index].tiles.isEmpty { removeColumn(at: index, at: time) }
         else { columns[index].activeTileIndex = min(columns[index].activeTileIndex, columns[index].tiles.count - 1) }
+    }
+
+    /// Raise targets derive from the active column, so no focus path has to remember to start them.
+    mutating func retargetRaise(height: Double, params: SpringParams?, at time: Double) {
+        for index in columnData.indices {
+            let target = index == activeColumnIndex ? 0 : height
+            guard columnData[index].cachedRaiseTarget != target else { continue }
+            let from = columnData[index].currentRaiseOffset(at: time)
+            columnData[index].raiseAnimation = params.map { SpringAnimation(from: from, to: target, startTime: time, params: $0) }
+            columnData[index].cachedRaiseTarget = target
+        }
     }
 
     mutating func recenter(animated: Bool, at time: Double, columnWidth: Double? = nil) {

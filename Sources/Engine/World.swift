@@ -20,20 +20,64 @@ public struct EngineConfig: Sendable {
     public static let flickVelocity = 50.0
     public static let defaultGap = 8.0
     public static let defaultColumnWidth = 0.5
+    public static let defaultWidthPresets = [0.33, 0.5, 0.67]
+    public static let defaultSnapPoints: [SnapPoint] = [.middle]
+    public static let defaultStiffness = 800.0
+    public static let defaultDampingRatio = 1.0
+    public static let defaultBounceDistance = 40.0
+    public static let defaultBounceDampingRatio = 0.6
+    /// A user resize within this many points of the column width is the app rounding, not a new width.
+    public static let userResizeSlop = 2.0
 
     public let gap: Double
     public let defaultWidth: Double
     public let animate: Bool
     public let gestureSnap: Bool
     public let rules: [Rule]
+    public let widthPresets: [Double]
+    public let snapPoints: [SnapPoint]
+    public let scroll: SpringParams
+    public let dampingRatio: Double
+    public let bounceDistance: Double
+    public let bounceDampingRatio: Double
+    /// Raise-style focus indicator: unfocused columns sit this many points lower. Zero turns raise off.
+    public let raiseHeight: Double
 
     public init(gap: Double = defaultGap, defaultWidth: Double = defaultColumnWidth, animate: Bool = true,
-                gestureSnap: Bool = true, rules: [Rule] = []) {
+                gestureSnap: Bool = true, rules: [Rule] = [], widthPresets: [Double] = defaultWidthPresets,
+                snapPoints: [SnapPoint] = defaultSnapPoints, stiffness: Double = defaultStiffness,
+                dampingRatio: Double = defaultDampingRatio, bounceDistance: Double = defaultBounceDistance,
+                bounceDampingRatio: Double = defaultBounceDampingRatio, raiseHeight: Double = 0) {
+        func valid(_ value: Double, _ fallback: Double) -> Double { value.isFinite && value > 0 ? value : fallback }
         self.gap = gap.isFinite && gap >= 0 ? gap : Self.defaultGap
-        self.defaultWidth = defaultWidth.isFinite && defaultWidth > 0 ? defaultWidth : Self.defaultColumnWidth
+        self.defaultWidth = valid(defaultWidth, Self.defaultColumnWidth)
         self.animate = animate
         self.gestureSnap = gestureSnap
         self.rules = rules
+        let presets = widthPresets.filter { $0.isFinite && $0 > 0 && $0 <= 1 }
+        self.widthPresets = presets.isEmpty ? Self.defaultWidthPresets : presets
+        self.snapPoints = snapPoints.isEmpty ? Self.defaultSnapPoints : Array(Set(snapPoints)).sorted()
+        self.dampingRatio = valid(dampingRatio, Self.defaultDampingRatio)
+        scroll = SpringParams(dampingRatio: self.dampingRatio, stiffness: valid(stiffness, Self.defaultStiffness), epsilon: 0.5)
+        self.bounceDistance = bounceDistance.isFinite && bounceDistance >= 0 ? bounceDistance : Self.defaultBounceDistance
+        self.bounceDampingRatio = valid(bounceDampingRatio, Self.defaultBounceDampingRatio)
+        self.raiseHeight = raiseHeight.isFinite && raiseHeight > 0 ? raiseHeight : 0
+    }
+
+    func configure(_ strip: inout Strip) {
+        strip.gap = gap
+        strip.defaultWidth = .proportion(defaultWidth)
+        strip.widthPresets = widthPresets.map(ColumnWidth.proportion)
+        strip.scrollSpringParams = scroll
+        strip.bounceDistance = bounceDistance
+        strip.bounceDampingRatio = bounceDampingRatio
+        if strip.snapPoints != snapPoints {
+            strip.snapPoints = snapPoints
+            strip.snapIndices = strip.snapIndices.map { _ in strip.defaultSnapIndex }
+        }
+        for index in strip.columns.indices where strip.columns[index].presetIndex.map({ !widthPresets.indices.contains($0) }) == true {
+            strip.columns[index].presetIndex = nil
+        }
     }
 }
 
@@ -98,16 +142,48 @@ public struct GroupState: Sendable {
     public internal(set) var phase: SpacePhase = .unknown(deferred: nil)
     public internal(set) var epoch: UInt64 = 0
     public internal(set) var focus: FocusState = .none
+    /// Windows whose app hid, or that minimized, with the place they left. Dropped with the group on a Space change.
+    // ponytail: a window that closes while hidden keeps its entry until then (the observer reports no removal for an
+    // unmanaged window); prune on the observer's destroy if hidden-then-closed windows ever pile up.
+    var hidden: [TileID: HiddenTile] = [:]
     public var space: SpaceKey? { phase.key }
 
     init(display: DisplayGroup, config: EngineConfig) {
         strip = Strip(gap: config.gap, groupArea: Self.area(for: display), defaultWidth: .proportion(config.defaultWidth))
+        config.configure(&strip)
     }
+
+    /// The place `window` left when it hid, if it is the same app's window coming back.
+    func returning(_ window: ObservedWindow) -> HiddenTile? {
+        hidden[window.id].flatMap { $0.window.hasSameOwner(as: window) ? $0 : nil }
+    }
+
+    /// A strip index as a place among the visible and hidden columns.
+    func placeAmongHidden(_ index: Int) -> Int {
+        hiddenPlaces.reduce(index) { place, hidden in hidden <= place ? place + 1 : place }
+    }
+
+    /// A place among the visible and hidden columns as a strip index.
+    func placeInStrip(_ place: Int) -> Int {
+        place - hiddenPlaces.filter { $0 < place }.count
+    }
+
+    private var hiddenPlaces: [Int] { hidden.values.filter { $0.column != nil }.map(\.place).sorted() }
 
     static func area(for display: DisplayGroup) -> GroupWorkingArea {
         let rect = CGRect(origin: .zero, size: display.frame.size)
         return GroupWorkingArea(regions: [DisplayRegion(displayID: 0, rect: rect)], referenceMidX: rect.midX)
     }
+}
+
+/// A hidden window comes back as its own column, or floating when `column` is nil. `place` counts the other hidden
+/// columns too, so windows hidden one app at a time come back in their own order, whichever returns first. `frame` is
+/// the release frame computed when it hid (the write itself is dropped if Reel was paused); release writes it again.
+struct HiddenTile: Sendable {
+    let window: ObservedWindow
+    let column: Column?
+    let place: Int
+    let frame: AXRect?
 }
 
 public enum ScheduledAction: Sendable {
@@ -144,6 +220,16 @@ public struct World: Sendable {
         groups[group].map { EventScope(topologyRevision: topology.revision, group: group, spaceEpoch: $0.epoch) }
     }
 
+    /// The frame loop runs while any strip still animates.
+    public var needsTicks: Bool {
+        groups.values.contains { group in
+            if case .static = group.strip.viewOffset {
+                return group.strip.columnData.contains { $0.widthAnimation != nil || $0.raiseAnimation != nil }
+            }
+            return true
+        }
+    }
+
     public func check() -> [String] {
         var errors: [String] = []
         var allTiles = Set<TileID>()
@@ -173,6 +259,7 @@ public struct World: Sendable {
             if strip.snapIndices.contains(where: { !strip.snapPoints.indices.contains($0) }) { errors.append("invalid snap index") }
             if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
             if group.space == nil, !group.windows.isEmpty { errors.append("windows without a Space") }
+            if group.hidden.keys.contains(where: { group.windows[$0] != nil }) { errors.append("hidden window managed") }
         }
         if let owner = pointer.scope,
            scope(for: owner.group) != owner || pointer.tile.map({ groups[owner.group]?.windows[$0] == nil }) == true {
