@@ -758,10 +758,10 @@ extension World {
 
     /// Where quitting leaves each tile: off-screen ones come back on screen at their own size, cascaded so none hides
     /// another completely, and columns the raise style lowered, or whose last write failed, go to their full frame.
-    /// The cascade starts one step further for each hidden window, so successive hides do not stack exactly.
+    /// The cascade starts one step further for each hidden window, so successive hides do not stack exactly. Each
+    /// lands on the display of the group nearest where it was parked.
     private func releaseFrames(group id: UInt32, at time: Double) -> [(tile: TileID, pid: Int32, frame: AXRect)] {
         guard let group = groups[id], let display = topology.group(id: id) else { return [] }
-        let area = display.frame
         var step = 30 * Double(group.hidden.count)
         return computeTargetFrames(strip: group.strip, time: time).compactMap { target in
             guard let pid = group.windows[target.tileID]?.pid else { return nil }
@@ -770,6 +770,7 @@ extension World {
                 return config.raiseHeight > 0 || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
             }
             let size = target.frame.size
+            let area = display.displays.min { abs($0.area.midX - frame.rect.midX) < abs($1.area.midX - frame.rect.midX) }!.area
             defer { step += 30 }
             return (target.tileID, pid, AXRect(CGRect(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
                                                       y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)),

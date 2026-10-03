@@ -96,6 +96,8 @@ public final class Loop {
         observer.start(timeout: 1.5) { [weak self] in
             guard let self else { return }
             world.groups.keys.sorted().forEach(census(group:))
+            // Each census restored a focus; the real one decides which group commands act on.
+            reportFrontmostFocus()
             spaces.start()
         }
     }
@@ -268,10 +270,13 @@ public final class Loop {
             observer.healthCheck()
             recover()
             // Focus reports were dropped while paused; read the real focus again so commands act on it.
-            NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?
-                .reportFocus(activation: false, space: nil)
+            reportFrontmostFocus()
         }
         onChange?()
+    }
+
+    private func reportFrontmostFocus() {
+        NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: false, space: nil)
     }
 
     /// Load the config file. On any error the previous config stays active and the error is kept for the menu bar.

@@ -1642,6 +1642,17 @@ struct FuzzStream {
         check(empty.world.spaces.live.values.contains { $0.fingerprint == [3] }, "windows that land on an empty Space are saved with it")
         check([h, adopted, empty].allSatisfy { $0.world.check().isEmpty }, "invariants")
     }
+    section("R5 release: quitting brings each window back onto the display it was parked beside") {
+        let short = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 430), area: CGRect(x: 0, y: 30, width: 1000, height: 400))
+        var h = Harness(displays: [short, display(2, x: 1000)], separateSpaces: false)
+        h.census(10, (1...8).map { window($0) })
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.send(.command(.release, .ipc))
+        let areas = [short.area, display(2, x: 1000).area].map { $0.insetBy(dx: -0.5, dy: -0.5) }
+        let released = h.requests.map(\.frame.rect)
+        check(!released.isEmpty && released.allSatisfy { frame in areas.contains { $0.contains(frame) } },
+              "each released window lies inside one display: \(released)")
+    }
     section("R5 headless: with no display every strip is saved until one returns") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
