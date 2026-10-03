@@ -349,9 +349,9 @@ public final class Observer {
         for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window), nil) }
     }
 
-    /// A hidden app's windows leave the strip but stay known, so the health check adds them back once they are on
-    /// screen again. A window that only orders out (closing to the Dock in some apps) stays until R4 can ask SkyLight
-    /// whether it is on another Space.
+    /// A hidden app's windows leave the strip but stay known, so the health check adds them back, to the place they
+    /// left, once they are on screen again. A window that only orders out (closing to the Dock in some apps) stays
+    /// until R4 can ask SkyLight whether it is on another Space.
     private func hide(_ pid: Int32) {
         let managed = managed()
         let hidden = known.values.filter { $0.pid == pid && managed.contains($0.id) }.map(\.id).sorted().map(TileID.init)
