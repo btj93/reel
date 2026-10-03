@@ -25,6 +25,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .configChanged(let config): world.onConfig(config, &pass)
     case .loadSnapshots(let snapshots): world.spaces.disk = snapshots.filter(\.isValid)
     case .windowAdded(let window): world.onWindowAdded(window, group: id, &pass)
+    case .windowChanged: break
     case .windowRemoved(let tile):
         world.remove(tile, from: id, &pass)
         pass.persist = true

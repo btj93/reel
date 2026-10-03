@@ -67,6 +67,7 @@ public enum FrameResult: Sendable {
 public struct Event: Sendable {
     public enum Kind: Sendable {
         case windowAdded(ObservedWindow)
+        case windowChanged(ObservedWindow)
         case windowRemoved(TileID)
         case focus(FocusIntent)
         case command(Command, FocusSource)
