@@ -25,14 +25,15 @@ make run                                 # Kill existing, bundle, open .app
 
 ## Architecture
 
-Six library modules with strict layering:
+Library modules with strict layering:
 
 ```
 Reel (app entry) ──→ WindowManager ──→ Platform ──→ Core
                               │                         ↑
                               ├──→ Config (TOMLKit) ────┘
                               └──→ IPC ─────────────────┘
-Engine ──→ Core   (not imported by the shipped app yet)
+ReelNext ──→ Runtime ──→ Engine ──→ Core, TOMLKit   (the rewrite; not part of the shipped app yet)
+                   └──→ Platform, IPC, Config
 ```
 
 **Core** — Pure layout logic. Foundation + CoreGraphics only. No AppKit, no AX calls. Fully testable.
@@ -43,7 +44,9 @@ Engine ──→ Core   (not imported by the shipped app yet)
 - `SwipeTracker`: weighted-sample velocity tracker (macOS-style). Used for trackpad gesture momentum.
 - `SnapPoint`: `.left` / `.middle` / `.right` — configurable per-column snap alignment targets. `snapIndices` (parallel to columns) tracks the current snap milestone per column for incremental scroll.
 
-**Engine** — The rewrite's pure reducer: `reduce(&world, event, now:) -> [Effect]` is the only `World` mutator. Depends on Core only; time, windows and Space identity arrive as event data, and every side effect (frames, focus, timers, persistence, census re-reads) leaves as an `Effect` value.
+**Engine** — The rewrite's pure reducer: `reduce(&world, event, now:) -> [Effect]` is the only `World` mutator. Depends on Core, plus TOMLKit for parsing the config schema in `Engine/Config.swift` (text in, values out, no I/O); time, windows and Space identity arrive as event data, and every side effect (frames, focus, timers, persistence, census re-reads) leaves as an `Effect` value.
+
+**Runtime** — the rewrite's side-effect shell, run by the `ReelNext` app. `Observer` turns AX and NSWorkspace notifications into stamped events, `Executor` runs effects on each app's `AXApp` thread and decides echo with `EchoLedger` (frames we wrote, never a time window), `Scheduler` owns timer tokens, and one `@MainActor` `Loop` calls `reduce`.
 
 **Platform** — macOS API wrappers.
 - `AXApp`: **one Thread + CFRunLoop per app** for AX observers. Prevents hung apps from blocking main thread.
