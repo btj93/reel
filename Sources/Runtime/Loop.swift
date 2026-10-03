@@ -72,9 +72,9 @@ public final class Loop {
         executor = Executor(worker: { [unowned self] in observer.workers[$0] }, log: logLine)
         observer = Observer(executor: executor, allowedPids: allowedPids,
                             managed: { [unowned self] in Set(world.groups[group]?.windows.keys.map(\.rawValue) ?? []) },
-                            hidden: { [unowned self] in
+                            elsewhere: { [unowned self] in
                                 Set(world.groups.values.flatMap(\.hidden.keys).map(\.rawValue)
-                                    + world.spaces.live.values.flatMap(\.hidden).map(\.window.id.rawValue))
+                                    + world.spaces.live.values.flatMap { $0.fingerprint.union($0.hidden.map(\.window.id.rawValue)) })
                             },
                             paused: { [unowned self] in paused },
                             emit: { [unowned self] in send($0, stamp: $1) }, log: logLine)
