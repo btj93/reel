@@ -46,6 +46,8 @@ struct Harness {
     var effects: [Effect] = []
     var reduceTime: Duration = .zero
     var reduceCPU: Duration = .zero
+    /// Restores that asked the OS for focus from a group other than the one commands acted on.
+    var stolenFocus = 0
 
     init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [Display] = [display()],
          separateSpaces: Bool = true) {
@@ -71,7 +73,9 @@ struct Harness {
     mutating func apply(_ event: Event) {
         let cpu = threadCPUTime()
         let start = ContinuousClock.now
+        let leader = world.activeGroup
         effects = reduce(&world, event, now: time)
+        if event.scope.group != leader, effects.contains(where: { if case .focus(_, .restore) = $0 { true } else { false } }) { stolenFocus += 1 }
         reduceTime += start.duration(to: .now)
         reduceCPU += threadCPUTime() - cpu
     }
@@ -3342,6 +3346,7 @@ struct FuzzStream {
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
         check(stream.reached["mixed read frozen", default: 0] == 0, "seed=\(seed) every settled mixed fingerprint read commits within the bound")
         check(stream.reached["window lost on a topology change", default: 0] == 0, "seed=\(seed) no topology change loses a window")
+        check(stream.h.stolenFocus == 0, "seed=\(seed) only the group commands act on restores OS focus: \(stream.h.stolenFocus)")
     }
 }
 

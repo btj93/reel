@@ -118,13 +118,16 @@ extension World {
         else if group.hidden[tile] != nil { groups[id]!.focus = .crossing(intent: intent, time: pass.now, previous: group.focus.decision) }
     }
 
-    fileprivate mutating func focus(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
+    /// With `quietSince`, the decision is recorded at that time and the OS is not asked to focus.
+    fileprivate mutating func focus(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass, quietSince: Double? = nil) {
         guard var group = groups[id] else { return }
         if let observed = intent.observedSpace, observed.isAuthoritative,
            let current = group.space, current.isAuthoritative, observed != current { return }
         if intent.source == .appActivation, let pid = intent.pid, !group.windows.values.contains(where: { $0.pid == pid }) {
-            group.focus = .crossing(intent: intent, time: pass.now, previous: group.focus.decision)
-            groups[id] = group
+            // The app may be on another Space of any display, so whichever display changes Space next takes the click.
+            for other in groups.keys where !groups[other]!.windows.values.contains(where: { $0.pid == pid }) {
+                groups[other]!.focus = .crossing(intent: intent, time: pass.now, previous: groups[other]!.focus.decision)
+            }
             return
         }
         guard group.phase.acceptsFocus, let tile = intent.tile, group.windows[tile] != nil else { return }
@@ -144,9 +147,9 @@ extension World {
             }
             group.strip.columns[index].activeTileIndex = group.strip.columns[index].tiles.firstIndex(of: tile)!
         }
-        group.focus = .resolved(FocusDecision(tile: tile, source: intent.source, time: pass.now))
+        group.focus = .resolved(FocusDecision(tile: tile, source: intent.source, time: quietSince ?? pass.now))
         groups[id] = group
-        if intent.source != .axFocus {
+        if intent.source != .axFocus, quietSince == nil {
             pass.effects.append(.focus(tile: tile, source: intent.source))
             pass.effects.append(.raise(tile))
         }
@@ -570,6 +573,7 @@ extension World {
     /// `onto` names the saved strip to restore, by key or by overlap; nil restores none.
     private mutating func commitSpace(_ key: SpaceKey, onto: SpaceKey?, epoch: UInt64, windows: [ObservedWindow],
                                       group id: UInt32, _ pass: inout Pass) {
+        let leads = activeGroup == id
         beginSpaceChange(group: id, &pass)
         let departing = groups[id]!
         stash(departing, id: id, time: pass.now)
@@ -595,7 +599,11 @@ extension World {
             if let tile = intent.tile, appWindows.contains(where: { $0.id == tile }) { restore = tile; source = .appActivation }
             else if let tile = appWindows.map(\.id).ordered().first { restore = tile; source = .appActivation }
         }
-        focus(FocusIntent(tile: restore, source: source), group: id, &pass)
+        // One display takes OS focus: the one the Dock click crossed to, else the one that had it. The rest restore
+        // at their old decision time, so they neither take the commands nor hold off a focus report.
+        let pending = if case .crossing = departing.focus { true } else { false }
+        let quiet = source == .appActivation || (leads && !pending) ? nil : departing.focus.decision?.time ?? -.infinity
+        focus(FocusIntent(tile: restore, source: source), group: id, &pass, quietSince: quiet)
         pass.layout.insert(id)
         pass.persist = true
     }
