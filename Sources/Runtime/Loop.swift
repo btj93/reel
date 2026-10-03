@@ -232,8 +232,10 @@ public final class Loop {
         if let command { send(.command(command, .keyboard)) }
     }
 
+    /// Pausing hands every window back as quitting does, so none waits out the pause as an off-screen sliver.
     public func setPaused(_ value: Bool) {
         guard value != paused else { return }
+        if value { send(.command(.release, .ipc)) }
         paused = value
         logLine("loop: paused=\(value)")
         if value {
@@ -300,12 +302,12 @@ public final class Loop {
         send(.configChanged(next.engine))
     }
 
-    /// Bring off-screen windows back, let each app thread finish its writes (at most a second), then call `done` once.
-    /// GCD, not a Timer: AppKit waits for a terminate reply outside the default run-loop mode.
+    /// Pause, which brings off-screen windows back unless a pause already did, let each app thread finish its writes
+    /// (at most a second), then call `done` once. GCD, not a Timer: AppKit waits for a terminate reply outside the
+    /// default run-loop mode.
     public func quit(then done: @escaping @MainActor () -> Void) {
         guard !quitting else { return }
-        paused = false
-        send(.command(.release, .ipc))
+        setPaused(true)
         quitting = true
         hotkeys.stop()
         var finished = false
