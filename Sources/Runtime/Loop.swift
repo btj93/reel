@@ -245,6 +245,8 @@ public final class Loop {
             // Windows opened during the pause join, and every frame is written again over whatever moved meanwhile.
             observer.healthCheck()
             recover()
+            // Focus reports were dropped while paused; read the real focus again so commands act on it.
+            NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: false)
         }
         onChange?()
     }

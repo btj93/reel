@@ -178,7 +178,7 @@ public struct GroupState: Sendable {
 
 /// A hidden window comes back as its own column, or floating when `column` is nil. `place` counts the other hidden
 /// columns too, so windows hidden one app at a time come back in their own order, whichever returns first. `frame` is
-/// the release frame written when it hid, if any; release writes it again.
+/// the release frame computed when it hid (the write itself is dropped if Reel was paused); release writes it again.
 struct HiddenTile: Sendable {
     let window: ObservedWindow
     let column: Column?

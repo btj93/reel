@@ -2145,6 +2145,38 @@ struct FuzzStream {
         merged.send(.topologyChanged(Topology(revision: 2, groups: [display(1)], primaryScreenHeight: 900)))
         check(merged.world.groups[1]!.windows[TileID(1)] != nil && merged.world.check().isEmpty,
               "a window hidden on one display and shown on another forgets its hidden place when the displays merge")
+        var ruled = Harness(rules: [Rule(bundleID: "float.app", floating: true)])
+        ruled.census(10, [window(1), window(2, bundle: "float.app")])
+        ruled.send(.windowsHidden([TileID(2)]))
+        ruled.send(.windowAdded(window(2, bundle: "float.app")))
+        check(ruled.world.groups[1]!.floating == [TileID(2)], "a window a rule floats still floats when it comes back")
+        var moved = Harness(displays: [display(1)])
+        moved.census(10, [window(1), window(2, app: 7), window(3, app: 7), window(4)], group: 1)
+        moved.send(.command(.toggleFloating(TileID(3)), .keyboard), group: 1)
+        moved.send(.command(.focus(TileID(1)), .keyboard), group: 1, advance: 1)
+        moved.send(.windowsHidden([TileID(2), TileID(3)]), group: 1, advance: 1)
+        moved.send(.topologyChanged(Topology(revision: 2, groups: [display(2)], primaryScreenHeight: 900)))
+        moved.send(.windowAdded(window(2, app: 7)), group: 2)
+        moved.send(.windowAdded(window(3, app: 7)), group: 2)
+        moved.advance(1)
+        let after = moved.world.groups[2]!
+        check(![TileID(2), TileID(3)].contains(after.focus.decision?.tile) && after.floating == [TileID(3)]
+              && after.strip.columns.flatMap(\.tiles) == [TileID(1), TileID(2), TileID(4)],
+              "hidden places survive a main-display change: focus \(after.focus.decision?.tile.rawValue as Any), tiles \(after.strip.columns.flatMap(\.tiles).map(\.rawValue)), floating \(after.floating.map(\.rawValue))")
+    }
+    section("R3 hide: a focus held for a hidden window is not a Dock click on the next Space change") {
+        var outcomes: [String] = []
+        for park in [false, true] {
+            var h = Harness()
+            h.census(10, [window(1, app: 5), window(2, app: 7), window(3, app: 7)])
+            h.send(.command(.focus(TileID(1)), .keyboard), advance: 1)
+            h.send(.windowsHidden([TileID(2)]), advance: 1)
+            if park { h.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .axFocus))) }
+            h.send(.spaceChanged(key: .skylight(20), epoch: 2, windows: [window(4, app: 9), window(8, app: 7)]))
+            h.advance(1)
+            outcomes.append(h.world.groups[1]!.focus.decision.map { "\($0.tile.rawValue) \($0.source)" } ?? "none")
+        }
+        check(outcomes[0] == outcomes[1] && outcomes[0].hasSuffix("restore"), "the new Space restores its own focus: \(outcomes)")
     }
     section("R3 hide: a window focused before it comes back takes focus when it does") {
         for source in [FocusSource.axFocus, .appActivation] {

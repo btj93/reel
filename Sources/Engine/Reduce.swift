@@ -543,7 +543,10 @@ extension World {
         groups[id] = group
         var restore = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
         var source: FocusSource = .restore
-        if case .crossing(let intent, let time, _) = departing.focus, pass.now - time <= EngineConfig.crossingTTL, let pid = intent.pid {
+        // Only an activation of an app with no window here is a Dock click across Spaces; a focus held for a hidden
+        // window of an app that is still here is not.
+        if case .crossing(let intent, let time, _) = departing.focus, pass.now - time <= EngineConfig.crossingTTL,
+           intent.source == .appActivation, let pid = intent.pid, !departing.windows.values.contains(where: { $0.pid == pid }) {
             let appWindows = windows.filter { $0.pid == pid }
             if let tile = intent.tile, appWindows.contains(where: { $0.id == tile }) { restore = tile; source = .appActivation }
             else if let tile = appWindows.map(\.id).ordered().first { restore = tile; source = .appActivation }
@@ -647,6 +650,7 @@ extension World {
                     if old.floating.contains(window.id) { group.floating.insert(window.id) }
                 }
                 for column in old.strip.columns { group.strip.insertColumn(column, at: pass.now, atIndex: group.strip.columns.count) }
+                for (tile, hidden) in old.hidden where group.windows[tile] == nil && group.hidden[tile] == nil { group.hidden[tile] = hidden }
                 groups[destination.id] = group
             } else {
                 stash(old, id: destination.id, time: pass.now)
