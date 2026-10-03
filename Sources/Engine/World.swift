@@ -315,8 +315,7 @@ public struct World: Sendable {
     /// The group commands act on: the one focused last, else the leftmost.
     public var activeGroup: UInt32? {
         let focused = groups.filter { $0.value.focusedAt > -.infinity }
-        return focused.max { $0.value.focusedAt != $1.value.focusedAt ? $0.value.focusedAt < $1.value.focusedAt : $0.key > $1.key }?.key
-            ?? topology.groups.first?.id
+        return focused.max { ($0.value.focusedAt, $1.key) < ($1.value.focusedAt, $0.key) }?.key ?? topology.groups.first?.id
     }
 
     public func owner(of tile: TileID) -> UInt32? { groups.first { $0.value.windows[tile] != nil }?.key }
