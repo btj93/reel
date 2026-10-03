@@ -271,7 +271,7 @@ public final class Observer {
     private var onDiscovered: (() -> Void)?
     /// On-screen windows their app classified `.ignore`, so the health check does not ask about them every pass.
     private var ignored = Set<CGWindowID>()
-    /// While paused, the engine hears only removals; the registry still tracks everything for the resume census.
+    /// While paused, the engine hears only removals and retitles; the registry still tracks everything for the resume census.
     private let paused: () -> Bool
 
     public static let healthInterval = 0.5
@@ -432,7 +432,8 @@ public final class Observer {
             if !paused(), facts.classification != .ignore { emitObserved(.windowAdded(facts.observed)) }
         case .retitled(let facts):
             learn(facts)
-            if !paused(), facts.classification != .ignore { emit(.windowChanged(facts.observed), nil) }
+            // Even while paused, so a late title is not lost; the engine's writes are held back until resume.
+            if facts.classification != .ignore { emit(.windowChanged(facts.observed), nil) }
         case .moved(let id, let frame):
             guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
