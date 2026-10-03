@@ -1338,7 +1338,7 @@ struct FuzzStream {
         let tile = pick(group.windows.keys.sorted { $0.rawValue < $1.rawValue }) ?? TileID(99999)
         let epoch = group.epoch + 1
         let before = (space: group.space, groups: h.world.groups.count)
-        switch rng.next(35) {
+        switch rng.next(39) {
         case 0: h.send(.command(.focus(tile), .ipc), group: id)
         case 1: h.send(.focus(FocusIntent(tile: tile, source: .axFocus)), group: id)
         case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keyboard), group: id)
@@ -1422,8 +1422,45 @@ struct FuzzStream {
             h.send(.windowMoved(tile, AXRect(frame)), group: id)
         case 33: h.send(.command(rng.next(4) == 0 ? .release : .recover, .ipc), group: id)
         case 34: h.send(.ipc(id: UInt64(rng.next(1000)), command: .recover), group: id, scope: pick(priorScopes)!)
+        case 35:
+            // A return to a stashed Space, with some of the windows hidden there back on screen.
+            let saved = h.world.spaces.live.values.filter { $0.group == id && $0.space != group.space }.sorted { $0.space.debugDescription < $1.space.debugDescription }
+            guard let visit = pick(saved) else { h.send(.tick, group: id); break }
+            let back = visit.hidden.map(\.window).filter { _ in rng.next(2) == 0 }
+            if rng.next(2) == 0 { h.send(.spaceWillChange, group: id) }
+            h.send(.spaceChanged(key: visit.space, epoch: epoch, windows: visit.windows + back), group: id, advance: 0.6)
+            if !back.isEmpty, h.world.groups[id]?.space == visit.space { reached["hidden place restored", default: 0] += 1 }
+        case 36:
+            // A late title for a window that floated untitled on a stashed Space.
+            let floating = h.world.spaces.live.values.flatMap(\.floating).filter(\.floating).sorted { $0.id.rawValue < $1.id.rawValue }
+            guard let known = pick(floating) else {
+                nextID += 1
+                h.send(.windowAdded(window(nextID, app: Int32(nextID), floating: true)), group: id)
+                break
+            }
+            h.send(.windowChanged(ObservedWindow(id: known.id, pid: known.pid, bundleID: known.bundleID, title: "titled")), group: id)
+            reached["stashed late title", default: 0] += 1
+        case 37:
+            // A Dock click for an app that lives only on a stashed Space, then the switch there.
+            let here = Set(group.windows.values.map(\.pid))
+            let saved = h.world.spaces.live.values.filter { $0.group == id && $0.space != group.space && !$0.windows.isEmpty }
+                .sorted { $0.space.debugDescription < $1.space.debugDescription }
+            guard let visit = pick(saved), let target = pick(visit.windows.filter { !here.contains($0.pid) }) else { h.send(.tick, group: id); break }
+            h.send(.focus(FocusIntent(tile: rng.next(2) == 0 ? target.id : nil, pid: target.pid, source: .appActivation)), group: id)
+            h.send(.spaceWillChange, group: id)
+            h.send(.spaceChanged(key: visit.space, epoch: epoch, windows: visit.windows), group: id)
+            if h.world.groups[id]?.focus.decision?.source == .appActivation { reached["dock crossing honored", default: 0] += 1 }
+        case 38:
+            if rng.next(2) == 0 {
+                h.send(.ipc(id: UInt64(rng.next(1000)), command: .clearPositions), group: id)
+                if h.world.spaces.persisted.isEmpty { reached["positions cleared", default: 0] += 1 }
+            } else {
+                let disk = (try? SpaceBook.decode(SpaceBook.encode(h.world.spaces.persisted))) ?? []
+                h.send(.loadSnapshots(disk), group: id)
+            }
         default: h.send(.tick, group: id)
         }
+        if h.world.spaces.live.values.contains(where: { !$0.hidden.isEmpty }) { reached["hidden place stashed", default: 0] += 1 }
         let after = h.world.groups[id]
         if case .fingerprint = after?.space { reached["fingerprint key", default: 0] += 1 }
         if case .crossing = after?.focus { reached["dock crossing", default: 0] += 1 }
@@ -2500,7 +2537,8 @@ struct FuzzStream {
             if !violations.isEmpty { break }
         }
         let states = ["hidden return", "fingerprint key", "dock crossing", "multi-column restore", "group added or removed",
-                      "empty fingerprint key", "census window dropped"]
+                      "empty fingerprint key", "census window dropped", "hidden place stashed", "hidden place restored",
+                      "stashed late title", "dock crossing honored", "positions cleared"]
         print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
     }
