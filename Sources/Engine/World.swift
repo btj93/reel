@@ -16,6 +16,9 @@ public struct EngineConfig: Sendable {
     public static let crossingTTL = 0.5
     public static let frameRetryDelay = 0.1
     public static let censusSettle = 0.5
+    /// A settled mixed fingerprint read commits once it repeats, or on this many settled reads after the last Space
+    /// notification.
+    public static let censusReads = 4
     public static let gestureQuiet = 0.3
     public static let flickVelocity = 50.0
     public static let defaultGap = 8.0
@@ -257,6 +260,12 @@ public struct World: Sendable {
     /// The strip on screen in `group`, as it would be stashed now.
     public func currentSnapshot(group: UInt32) -> Snapshot? {
         groups[group].flatMap { Engine.snapshot($0, id: group, time: time) }
+    }
+
+    /// Windows kept off the current strips, hidden or on a saved strip, so the Observer still hears them close.
+    public var trackedElsewhere: Set<UInt32> {
+        Set(groups.values.flatMap(\.hidden.keys).map(\.rawValue)
+            + spaces.live.values.flatMap { $0.fingerprint.union($0.hidden.map(\.window.id.rawValue)) })
     }
 
     /// The frame loop runs while any strip still animates.

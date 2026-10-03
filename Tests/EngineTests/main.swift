@@ -75,6 +75,13 @@ struct Harness {
         send(.spaceChanged(key: .skylight(id), epoch: world.groups[group]!.epoch + 1, windows: windows), group: group)
     }
 
+    /// A fingerprint-mode census, a settle after the last one when `settle`. Each window is its own app, so no bundle
+    /// match can stand in for the window ids.
+    mutating func read(_ ids: [UInt32], settle: Bool = false) {
+        if settle { advance(EngineConfig.censusSettle + margin) }
+        send(.spaceChanged(key: .fingerprint(Set(ids)), epoch: world.groups[1]!.epoch + 1, windows: ids.map { window($0, bundle: "b\($0)") }))
+    }
+
     mutating func advance(_ delta: Double) {
         let target = time + delta
         while let entry = world.timers.filter({ $0.value.deadline <= target }).min(by: {
@@ -1338,7 +1345,7 @@ struct FuzzStream {
         let tile = pick(group.windows.keys.sorted { $0.rawValue < $1.rawValue }) ?? TileID(99999)
         let epoch = group.epoch + 1
         let before = (space: group.space, groups: h.world.groups.count)
-        switch rng.next(39) {
+        switch rng.next(40) {
         case 0: h.send(.command(.focus(tile), .ipc), group: id)
         case 1: h.send(.focus(FocusIntent(tile: tile, source: .axFocus)), group: id)
         case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keyboard), group: id)
@@ -1458,6 +1465,21 @@ struct FuzzStream {
                 let disk = (try? SpaceBook.decode(SpaceBook.encode(h.world.spaces.persisted))) ?? []
                 h.send(.loadSnapshots(disk), group: id)
             }
+        case 39:
+            // A fingerprint read touching a saved strip: one of its windows dragged here (P2), a window swapped each way
+            // (P1), or all of it but one window whose app hid there unheard (PROBE-A). Kept at, it commits within the bound.
+            let saved = h.world.spaces.live.values.filter { $0.group == id && $0.space != group.space && !$0.windows.isEmpty }
+                .sorted { $0.space.debugDescription < $1.space.debugDescription }
+            let mine = group.windows.values.sorted { $0.id.rawValue < $1.id.rawValue }
+            guard let other = pick(saved), let kept = pick(mine), let taken = pick(other.windows) else { h.send(.tick, group: id); break }
+            let shapes = [mine + [taken], [kept, taken], [kept] + other.windows.filter { $0.id != taken.id }]
+            let read = Dictionary(pick(shapes)!.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }).values.sorted { $0.id.rawValue < $1.id.rawValue }
+            h.send(.spaceWillChange, group: id)
+            for _ in 0...EngineConfig.censusReads where h.world.groups[id]?.phase.isChanging != false {
+                h.send(.spaceChanged(key: .fingerprint(Set(read.map(\.id.rawValue))), epoch: h.world.groups[id]!.epoch + 1, windows: read),
+                       group: id, advance: EngineConfig.censusSettle + 0.05)
+            }
+            reached[h.world.groups[id]!.phase.isChanging ? "mixed read frozen" : "mixed read committed", default: 0] += 1
         default: h.send(.tick, group: id)
         }
         if h.world.spaces.live.values.contains(where: { !$0.hidden.isEmpty }) { reached["hidden place stashed", default: 0] += 1 }
@@ -2600,6 +2622,117 @@ struct FuzzStream {
               "the strip settles with the moved window")
         check(h.world.spaces.live.values.contains { $0.fingerprint == [1, 2] }, "and the Space it came from lets it go")
     }
+    section("R4 fingerprint: a settled mixed read commits once stable, and prunes only an unambiguous target") {
+        var drag = Harness()
+        drag.read([3])
+        drag.send(.command(.setWidth(TileID(3), 411), .ipc))
+        drag.read([1, 2])
+        drag.send(.command(.setWidth(TileID(1), 377), .ipc))
+        drag.send(.spaceWillChange)
+        drag.read([1, 2, 3])
+        drag.read([1, 2, 3], settle: true)
+        check(drag.world.groups[1]!.phase.isChanging, "P2: the first settled read waits for a second")
+        drag.read([1, 2, 3], settle: true)
+        check(!drag.world.groups[1]!.phase.isChanging && drag.tiles == [TileID(1), TileID(2), TileID(3)] && drag.widths.first == .fixed(377),
+              "P2: a one-window Space dragged here commits onto the strip just left, with the moved window")
+        check(drag.world.spaces.live.values.contains { $0.fingerprint == [3] }, "P2: and no saved strip is deleted")
+        var swap = Harness()
+        swap.read([1, 2])
+        swap.read([3, 4])
+        swap.send(.spaceWillChange)
+        swap.read([1, 3])
+        swap.read([1, 3], settle: true)
+        swap.read([1, 3], settle: true)
+        check(!swap.world.groups[1]!.phase.isChanging && swap.world.groups[1]!.space == .fingerprint([1, 3]),
+              "P1 and PROBE-A: a stable read listing no Space whole commits a fresh strip")
+        check(Set(swap.world.spaces.live.values.map(\.fingerprint)).isSuperset(of: [[1, 2], [3, 4]]), "and keeps both saved strips")
+        var drift = Harness()
+        drift.read([1, 2])
+        drift.read([3, 4])
+        drift.send(.spaceWillChange)
+        drift.read([1, 3])
+        for (n, ids) in ([[1, 3, 4], [1, 2, 3], [2, 3], [1, 3]] as [[UInt32]]).enumerated() {
+            drift.read(ids, settle: true)
+            check(drift.world.groups[1]!.phase.isChanging == (n + 1 < EngineConfig.censusReads),
+                  "a read that changes on every settle commits on settled read \(EngineConfig.censusReads), not before (read \(n + 1))")
+        }
+        var stale = Harness()
+        stale.read([3, 4, 5])
+        stale.send(.command(.setWidth(TileID(3), 411), .ipc))
+        stale.read([1, 2])
+        stale.send(.spaceWillChange)
+        stale.read([1, 2, 3, 5])
+        stale.read([1, 2, 3, 5], settle: true)
+        check(stale.world.groups[1]!.phase.isChanging, "PROBE-B: a stale union listing only the strip just left whole is read again")
+        stale.read([3, 5], settle: true)
+        check(!stale.world.groups[1]!.phase.isChanging && stale.tiles == [TileID(3), TileID(5)] && stale.widths.first == .fixed(411),
+              "PROBE-B: and commits onto the real destination once the read changes")
+        check(stale.world.spaces.live.values.contains { $0.fingerprint == [1, 2] }, "PROBE-B: the strip just left keeps its windows")
+        var empty = Harness()
+        empty.read([1, 2])
+        empty.read([3, 4])
+        empty.read([])
+        empty.read([], settle: true)
+        empty.send(.spaceWillChange)
+        empty.read([1, 3])
+        empty.read([1, 3], settle: true)
+        empty.read([1, 3], settle: true)
+        check(Set(empty.world.spaces.live.values.map(\.fingerprint)).isSuperset(of: [[1, 2], [3, 4]]),
+              "from an empty Space, a read listing no Space whole prunes no saved strip")
+    }
+    section("R4 hidden: an app hidden while its window is on another Space hides on that saved strip") {
+        var h = Harness()
+        h.read([3, 4])
+        h.send(.command(.setWidth(TileID(3), 411), .ipc))
+        h.read([1, 2])
+        h.send(.windowsHidden([TileID(4)]))
+        let saved = h.world.spaces.live.values.first { $0.fingerprint.contains(3) }
+        check(saved?.fingerprint == [3] && saved?.hidden.map(\.window.id) == [TileID(4)], "the saved strip lists window 4 as hidden")
+        h.send(.spaceWillChange)
+        h.read([1, 3])
+        h.read([1, 3], settle: true)
+        h.read([1, 3], settle: true)
+        check(!h.world.groups[1]!.phase.isChanging && h.tiles == [TileID(3), TileID(1)] && h.widths.first == .fixed(411),
+              "PROBE-A: a window dragged onto that Space commits onto it")
+        h.send(.windowAdded(window(4, bundle: "b4")))
+        check(h.tiles == [TileID(3), TileID(4), TileID(1)], "and the unhidden window comes back to its place")
+        var middle = Harness()
+        middle.census(20, [window(4, x: 0), window(3, app: 20, x: 300), window(5, x: 600)])
+        middle.census(10, [window(1)])
+        middle.send(.spaceWillChange)
+        middle.census(20, [window(4), window(5)])
+        middle.send(.windowAdded(window(3, app: 20)))
+        check(middle.tiles == [TileID(4), TileID(3), TileID(5)], "a window hidden from the middle of a strip returns to the middle")
+        var floated = Harness()
+        floated.census(20, [window(3, app: 20, floating: true), window(4)])
+        floated.census(10, [window(1)])
+        floated.send(.spaceWillChange)
+        floated.census(20, [window(4)])
+        check(floated.world.groups[1]!.hidden[TileID(3)] != nil, "an absent floating window is hidden, not dropped")
+        floated.send(.windowAdded(window(3, app: 20, floating: true)))
+        check(floated.world.groups[1]!.floating == [TileID(3)], "and comes back floating")
+        var moved = Harness()
+        moved.census(10, [window(1), window(2)])
+        moved.census(20, [window(1), window(3)])
+        moved.census(10, [window(2)])
+        moved.census(20, [window(1), window(3)])
+        check(moved.world.spaces.lookupExact(group: 1, space: .skylight(10))?.hidden.isEmpty == true,
+              "a window moved to another Space leaves no hidden place on the one it left")
+        moved.send(.windowsHidden([TileID(3)]))
+        check(moved.world.trackedElsewhere.isSuperset(of: [2, 3]), "a window on a saved strip and a hidden one are tracked off the strip")
+    }
+    section("R4 dock: a Dock click that expired before the change keeps the focus it replaced") {
+        var h = Harness()
+        h.census(20, [window(3, app: 30)])
+        h.census(10, [window(1, app: 10), window(2, app: 20, floating: true)])
+        h.send(.command(.focus(TileID(2)), .ipc))
+        h.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation)))
+        h.advance(EngineConfig.crossingTTL * 2)
+        h.send(.spaceWillChange)
+        h.census(20, [window(3, app: 30)])
+        check(h.world.spaces.lookupExact(group: 1, space: .skylight(10))?.focusedTile == TileID(2),
+              "the strip it left keeps focus on the window focused before the click")
+    }
     section("R4 hidden: an app hidden on another Space keeps its columns on this one") {
         var h = Harness()
         h.census(20, [window(3, app: 20), window(4)])
@@ -2819,9 +2952,10 @@ struct FuzzStream {
         }
         let states = ["hidden return", "fingerprint key", "dock crossing", "multi-column restore", "group added or removed",
                       "empty fingerprint key", "census window dropped", "hidden place stashed", "hidden place restored",
-                      "stashed late title", "dock crossing honored", "positions cleared"]
+                      "stashed late title", "dock crossing honored", "positions cleared", "mixed read committed"]
         print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
+        check(stream.reached["mixed read frozen", default: 0] == 0, "seed=\(seed) every settled mixed fingerprint read commits within the bound")
     }
 }
 
