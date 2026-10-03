@@ -142,10 +142,10 @@ public struct GroupState: Sendable {
     public internal(set) var phase: SpacePhase = .unknown(deferred: nil)
     public internal(set) var epoch: UInt64 = 0
     public internal(set) var focus: FocusState = .none
-    /// Windows whose app hid, or that minimized, with the place they left. Dropped with the group on a Space change.
+    /// Windows whose app hid, or that minimized, with the place they left. A Space change stashes them with the strip.
     // ponytail: a window that closes while hidden keeps its entry until then (the observer reports no removal for an
     // unmanaged window); prune on the observer's destroy if hidden-then-closed windows ever pile up.
-    var hidden: [TileID: HiddenTile] = [:]
+    public internal(set) var hidden: [TileID: HiddenTile] = [:]
     public var space: SpaceKey? { phase.key }
 
     init(display: DisplayGroup, config: EngineConfig) {
@@ -156,6 +156,16 @@ public struct GroupState: Sendable {
     /// The place `window` left when it hid, if it is the same app's window coming back.
     func returning(_ window: ObservedWindow) -> HiddenTile? {
         hidden[window.id].flatMap { $0.window.hasSameOwner(as: window) ? $0 : nil }
+    }
+
+    /// A hidden window comes back to the place it left: its own column, or floating. One that floated only for its
+    /// facts tiles once they say it tiles.
+    mutating func putBack(_ window: ObservedWindow, from returning: HiddenTile, config: EngineConfig, at time: Double) {
+        hidden.removeValue(forKey: window.id)
+        windows[window.id] = window
+        if let column = returning.column { strip.restoreColumn(column, at: placeInStrip(returning.place), time: time) }
+        else if joinsStrip(was: returning.window, now: window, config: config) { strip.insertTile(window.id, at: time) }
+        else { floating.insert(window.id) }
     }
 
     /// A strip index as a place among the visible and hidden columns.
@@ -176,14 +186,33 @@ public struct GroupState: Sendable {
     }
 }
 
-/// A hidden window comes back as its own column, or floating when `column` is nil. `place` counts the other hidden
+/// A hidden window comes back as its own column, or floating when `width` is nil. `place` counts the other hidden
 /// columns too, so windows hidden one app at a time come back in their own order, whichever returns first. `frame` is
 /// the release frame computed when it hid (the write itself is dropped if Reel was paused); release writes it again.
-struct HiddenTile: Sendable {
-    let window: ObservedWindow
-    let column: Column?
-    let place: Int
-    let frame: AXRect?
+public struct HiddenTile: Codable, Sendable {
+    public let window: ObservedWindow
+    public let width: ColumnWidth?
+    public let presetIndex: Int?
+    public let isFullWidth: Bool
+    public let place: Int
+    public let frame: AXRect?
+
+    init(window: ObservedWindow, column: Column?, place: Int, frame: AXRect?) {
+        self.window = window
+        width = column?.width
+        presetIndex = column?.presetIndex
+        isFullWidth = column?.isFullWidth ?? false
+        self.place = place
+        self.frame = frame
+    }
+
+    var column: Column? {
+        width.map { Column(tiles: [window.id], width: $0, presetIndex: presetIndex, isFullWidth: isFullWidth) }
+    }
+
+    var isValid: Bool {
+        window.isValid && place >= 0 && (width?.isValid ?? true) && (presetIndex ?? 0) >= 0 && (frame?.rect.isFinite ?? true)
+    }
 }
 
 public enum ScheduledAction: Sendable {

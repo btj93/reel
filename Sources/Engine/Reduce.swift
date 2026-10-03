@@ -200,17 +200,20 @@ extension World {
             guard let known = groups[id]!.windows[window.id] else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
             guard known != window else { continue }
-            if shouldFloat(known, config: config), !shouldFloat(window, config: config), groups[id]!.floating.contains(window.id) {
+            if joinsStrip(was: known, now: window, config: config), groups[id]!.floating.contains(window.id) {
                 guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
                 focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass)
             }
             groups[id]!.windows[window.id] = window
             pass.persist = true
         }
+        // A stashed window that floated for its facts keeps them, so its Space's restore can see it joins the strip.
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
-            if known != window { spaces.live[key] = refreshing(window, in: saved); pass.persist = true }
+            guard known != window, !joinsStrip(was: known, now: window, config: config) else { continue }
+            spaces.live[key] = refreshing(window, in: saved)
+            pass.persist = true
         }
         if mismatched { pass.effects.append(.log("window identity changed tile=\(window.id.rawValue)")) }
     }
@@ -228,11 +231,8 @@ extension World {
         if group.space?.isEmpty == true { group.phase = .settled(.fingerprint([window.id.rawValue])) }
         group.windows[window.id] = window
         group.hidden.removeValue(forKey: window.id)
-        if let returning {
-            if let column = returning.column { group.strip.restoreColumn(column, at: group.placeInStrip(returning.place), time: pass.now) }
-            else if shouldFloat(returning.window, config: config), !shouldFloat(window, config: config) { group.strip.insertTile(window.id, at: pass.now) }
-            else { group.floating.insert(window.id) }
-        } else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
+        if let returning { group.putBack(window, from: returning, config: config, at: pass.now) }
+        else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
         groups[id] = group
         pass.layout.insert(id)
@@ -243,9 +243,9 @@ extension World {
     }
 
     private mutating func prune(_ ids: Set<UInt32>, from stashes: [GroupSpace: Snapshot]) {
-        for (key, saved) in stashes where !saved.fingerprint.isDisjoint(with: ids) {
+        for (key, saved) in stashes where !saved.fingerprint.isDisjoint(with: ids) || saved.hidden.contains(where: { ids.contains($0.window.id.rawValue) }) {
             let pruned = removing(ids, from: saved)
-            spaces.live[key] = pruned.windows.isEmpty ? nil : pruned
+            spaces.live[key] = pruned.isEmpty ? nil : pruned
         }
     }
 
@@ -821,6 +821,12 @@ extension Sequence where Element == TileID {
 
 func shouldFloat(_ window: ObservedWindow, config: EngineConfig) -> Bool {
     config.rules.last(where: { window.bundleID == $0.bundleID })?.floating ?? window.floating
+}
+
+/// A window that floated only for its facts (it registered untitled) tiles once new facts say it tiles. One the user
+/// floated never had floating facts, so it stays.
+func joinsStrip(was old: ObservedWindow, now new: ObservedWindow, config: EngineConfig) -> Bool {
+    shouldFloat(old, config: config) && !shouldFloat(new, config: config)
 }
 
 private func distance(_ lhs: CGRect, _ rhs: CGRect) -> Double {

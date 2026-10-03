@@ -391,16 +391,16 @@ struct Harness {
         h.send(.command(.setWidth(TileID(1), 317), .ipc))
         h.send(.command(.focus(TileID(2)), .ipc))
         let snapshots = Array(h.world.spaces.live.values)
-        let data = try Snapshot.encode(snapshots)
-        let decoded = try Snapshot.decode(data)
-        let encodedAgain = try Snapshot.encode(decoded)
+        let data = try SpaceBook.encode(snapshots)
+        let decoded = try SpaceBook.decode(data)
+        let encodedAgain = try SpaceBook.encode(decoded)
         check(encodedAgain == data, "codec round trip byte stable")
         check(decoded[0].columns[0].windows[0].bundleID == nil, "nil bundle round trip")
         let stacked = Snapshot(group: 1, space: .fingerprint([7, 8]), columns: [
             SnapshotColumn(windows: [window(7), window(8)], width: .proportion(0.7), activeTileIndex: 1,
                            snapIndex: 2, presetIndex: 1, isFullWidth: true)
         ], offset: -120)
-        let stackedRoundTrip = try Snapshot.decode(Snapshot.encode([stacked]))[0]
+        let stackedRoundTrip = try SpaceBook.decode(SpaceBook.encode([stacked]))[0]
         check(stackedRoundTrip.columns[0].activeTileIndex == 1 && stackedRoundTrip.columns[0].snapIndex == 2,
               "codec retains stacked active tile and snap milestone")
         check(stackedRoundTrip.columns[0].isFullWidth && stackedRoundTrip.columns[0].width == .proportion(0.7)
@@ -409,13 +409,13 @@ struct Harness {
         fresh.send(.loadSnapshots(decoded))
         fresh.census(99, [ObservedWindow(id: TileID(11), pid: 1, bundleID: "", title: "window-1"),
                           ObservedWindow(id: TileID(12), pid: 2, bundleID: "test.app", title: "window-2"),
-                          ObservedWindow(id: TileID(13), pid: 3, bundleID: "test.app", title: "window-3")])
+                          ObservedWindow(id: TileID(13), pid: 3, bundleID: "test.app", title: "window-3", floating: true)])
         check(fresh.world.groups[1]!.strip.columns[0].width == .fixed(317), "disk matching normalizes nil bundle to empty")
         check(fresh.active == TileID(12), "disk remaps saved active window")
         check(fresh.world.groups[1]!.floating.contains(TileID(13)), "disk restores floating window")
         check(fresh.world.check().isEmpty, "round-trip invariants")
         let bad = Snapshot(group: 1, space: .skylight(1), columns: [SnapshotColumn(windows: [window(1)], width: .fixed(-1))])
-        let kept = try Snapshot.decode(Snapshot.encode([bad, stacked]))
+        let kept = try SpaceBook.decode(SpaceBook.encode([bad, stacked]))
         check(kept.count == 1 && kept[0].space == stacked.space, "invalid entry dropped, valid sibling kept")
     }
     section("554b4ed: initial adoption follows visual order, not AX enumeration order") {
@@ -710,7 +710,7 @@ struct Harness {
     }
     section("Snapshot codec: a negative preset index is rejected") {
         let bad = Snapshot(group: 1, space: .skylight(1), columns: [SnapshotColumn(windows: [window(1)], width: .fixed(300), presetIndex: -5)])
-        let decoded = (try? Snapshot.decode(Snapshot.encode([bad]))) ?? []
+        let decoded = (try? SpaceBook.decode(SpaceBook.encode([bad]))) ?? []
         check(decoded.isEmpty, "negative preset index rejected")
     }
     section("Gesture basis: releases clamp and re-anchor the active column") {
@@ -1241,7 +1241,7 @@ struct Harness {
         h.send(.windowChanged(window(4, x: .nan)))
         h.send(.windowChanged(window(1, x: .infinity)))
         check(h.world.check().isEmpty, "World.check stays clean")
-        check((try? Snapshot.encode(h.world.spaces.persisted)) != nil, "the book still encodes")
+        check((try? SpaceBook.encode(h.world.spaces.persisted)) != nil, "the book still encodes")
     }
     section("Snapshot identity: a bundle-less disk entry restores by window id") {
         var h = Harness()
@@ -2253,6 +2253,82 @@ struct FuzzStream {
     }
 }
 
+@MainActor func spaceTests() throws {
+    section("R4 hidden: a Space change while an app is hidden keeps the places it left") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.setWidth(TileID(2), 271), .ipc))
+        h.send(.windowsHidden([TileID(2)]))
+        h.census(20, [window(4)])
+        h.census(10, [window(1), window(2), window(3)])
+        check(h.tiles == [TileID(1), TileID(2), TileID(3)] && h.widths[1] == .fixed(271),
+              "unhidden while away, the window is back in its own column with its width")
+        var still = Harness()
+        still.census(10, [window(1), window(2), window(3)])
+        still.send(.windowsHidden([TileID(2)]))
+        still.census(20, [window(4)])
+        still.census(10, [window(1), window(3)])
+        check(still.tiles == [TileID(1), TileID(3)] && still.world.groups[1]!.hidden[TileID(2)] != nil,
+              "still hidden on return, its place comes back with the Space")
+        still.send(.windowAdded(window(2)))
+        check(still.tiles == [TileID(1), TileID(2), TileID(3)], "and it returns there when its app unhides")
+        var reused = Harness()
+        reused.census(10, [window(1), window(2)])
+        reused.send(.windowsHidden([TileID(2)]))
+        reused.census(20, [window(4)])
+        reused.census(10, [window(1), window(2, app: 99)])
+        check(reused.world.check().isEmpty && reused.world.groups[1]!.hidden.isEmpty,
+              "an id another app reuses is a new window, and the stale place is dropped")
+        var moved = Harness()
+        moved.census(10, [window(1), window(2)])
+        moved.send(.windowsHidden([TileID(2)]))
+        moved.census(20, [window(4)])
+        moved.send(.windowAdded(window(2)))
+        check(moved.world.spaces.lookupExact(group: 1, space: .skylight(10))?.hidden.isEmpty == true,
+              "a hidden window that shows up on another Space leaves the old Space's places")
+        check(h.world.check().isEmpty && still.world.check().isEmpty && moved.world.check().isEmpty, "hidden Space invariants")
+    }
+    section("R4 late title: a title that lands while the window's Space is stashed tiles it on return") {
+        var h = Harness()
+        h.census(10, [window(1), window(2, floating: true)])
+        h.census(20, [window(3)])
+        h.send(.windowChanged(window(2)))
+        h.census(10, [window(1), window(2)])
+        check(h.tiles == [TileID(1), TileID(2)] && h.world.groups[1]!.floating.isEmpty, "the retitled window tiles")
+        var user = Harness()
+        user.census(10, [window(1), window(2)])
+        user.send(.command(.toggleFloating(TileID(2)), .ipc))
+        user.census(20, [window(3)])
+        user.send(.windowChanged(ObservedWindow(id: TileID(2), pid: 2, bundleID: "test.app", title: "renamed")))
+        user.census(10, [window(1), window(2)])
+        check(user.world.groups[1]!.floating == [TileID(2)], "a window the user floated stays floating")
+        var disk = Harness()
+        disk.send(.loadSnapshots([Snapshot(group: 1, space: .skylight(10), columns: [
+            SnapshotColumn(windows: [window(1)], width: .fixed(300))], floating: [window(2, floating: true)])]))
+        disk.census(10, [window(1), window(2)])
+        check(disk.tiles == [TileID(1), TileID(2)] && disk.world.groups[1]!.strip.columns[0].width == .fixed(300),
+              "after a restart, a saved untitled window that now has its title tiles")
+    }
+    try section("R4 codec: one versioned file; another version or shape is refused") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.windowsHidden([TileID(2)]))
+        h.census(20, [window(4)])
+        let data = try SpaceBook.encode(h.world.spaces.persisted)
+        let text = String(decoding: data, as: UTF8.self)
+        check(text.hasPrefix("{\"snapshots\":") && text.hasSuffix("\"version\":\(SpaceBook.version)}"), "the envelope names its version")
+        let decoded = try SpaceBook.decode(data)
+        let again = try SpaceBook.encode(decoded)
+        check(again == data, "hidden places round trip byte for byte")
+        check(decoded.first { $0.space == .skylight(10) }?.hidden.map(\.window.id) == [TileID(2)], "the hidden place is saved")
+        var refused: [String] = []
+        for bad in ["{\"version\":0,\"snapshots\":[]}", "[]", "not json", ""] {
+            do { _ = try SpaceBook.decode(Data(bad.utf8)) } catch { refused.append(bad) }
+        }
+        check(refused.count == 4, "old versions, the R2 bare array and garbage all throw: \(refused)")
+    }
+}
+
 @MainActor func fuzzTests(seeds: [UInt64]) {
     guard only.isEmpty || only == "fuzz" else { return }
     print("▸ fuzz: \(seeds.count) seeds × 10,000 events, World.check() after every event")
@@ -2290,7 +2366,7 @@ struct FuzzStream {
 }
 
 MainActor.assumeIsolated {
-    do { try replayTests(); probeTests(); runtimeTests() }
+    do { try replayTests(); probeTests(); runtimeTests(); try spaceTests() }
     catch { check(false, "unexpected error: \(error)") }
     var seeds: [UInt64] = [0]
     for value in (environment["ENGINE_FUZZ_SEEDS"] ?? "").split(separator: ",") {

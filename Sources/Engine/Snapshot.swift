@@ -37,13 +37,15 @@ public struct Snapshot: Codable, Sendable {
     public let activeColumnIndex: Int
     public let offset: Double
     public let focusedTile: TileID?
+    /// Windows hidden from this strip, with the places they left. Not on screen, so not in `windows` or `fingerprint`.
+    public let hidden: [HiddenTile]
     public let windows: [ObservedWindow]
     public let fingerprint: Set<UInt32>
     let identities: Set<WindowIdentity>
     let bundles: Set<String>
 
     public init(group: UInt32, space: SpaceKey, columns: [SnapshotColumn], floating: [ObservedWindow] = [],
-                activeColumnIndex: Int = 0, offset: Double = 0, focusedTile: TileID? = nil) {
+                activeColumnIndex: Int = 0, offset: Double = 0, focusedTile: TileID? = nil, hidden: [HiddenTile] = []) {
         self.group = group
         self.space = space
         self.columns = columns
@@ -51,6 +53,7 @@ public struct Snapshot: Codable, Sendable {
         self.activeColumnIndex = activeColumnIndex
         self.offset = offset
         self.focusedTile = focusedTile
+        self.hidden = hidden.sorted { $0.window.id.rawValue < $1.window.id.rawValue }
         windows = columns.flatMap(\.windows) + floating
         fingerprint = Set(windows.map { $0.id.rawValue })
         identities = Set(windows.map(WindowIdentity.init))
@@ -58,7 +61,7 @@ public struct Snapshot: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case group, space, columns, floating, activeColumnIndex, offset, focusedTile
+        case group, space, columns, floating, activeColumnIndex, offset, focusedTile, hidden
     }
 
     public init(from decoder: Decoder) throws {
@@ -69,7 +72,8 @@ public struct Snapshot: Codable, Sendable {
                   floating: try container.decode([ObservedWindow].self, forKey: .floating),
                   activeColumnIndex: try container.decode(Int.self, forKey: .activeColumnIndex),
                   offset: try container.decode(Double.self, forKey: .offset),
-                  focusedTile: try container.decodeIfPresent(TileID.self, forKey: .focusedTile))
+                  focusedTile: try container.decodeIfPresent(TileID.self, forKey: .focusedTile),
+                  hidden: try container.decode([HiddenTile].self, forKey: .hidden))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -81,21 +85,16 @@ public struct Snapshot: Codable, Sendable {
         try container.encode(activeColumnIndex, forKey: .activeColumnIndex)
         try container.encode(offset, forKey: .offset)
         try container.encodeIfPresent(focusedTile, forKey: .focusedTile)
+        try container.encode(hidden, forKey: .hidden)
     }
 
-    public static func encode(_ snapshots: [Snapshot]) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(snapshots)
-    }
-
-    public static func decode(_ data: Data) throws -> [Snapshot] {
-        try JSONDecoder().decode([Snapshot].self, from: data).filter(\.isValid)
-    }
+    var isEmpty: Bool { windows.isEmpty && hidden.isEmpty }
 
     var isValid: Bool {
         offset.isFinite && fingerprint.count == windows.count
             && windows.allSatisfy(\.isValid)
+            && hidden.allSatisfy(\.isValid) && Set(hidden.map(\.window.id.rawValue)).count == hidden.count
+            && Set(hidden.map(\.window.id.rawValue)).isDisjoint(with: fingerprint)
             && (focusedTile.map { tile in windows.contains { $0.id == tile } } ?? true)
             && (columns.isEmpty ? activeColumnIndex == 0 : columns.indices.contains(activeColumnIndex))
             && columns.allSatisfy {
@@ -133,7 +132,7 @@ func snapshot(_ group: GroupState, id: UInt32, time: Double) -> Snapshot? {
                 isFullWidth: column.isFullWidth)
         }, floating: group.floating.ordered().compactMap { group.windows[$0] },
         activeColumnIndex: group.strip.activeColumnIndex, offset: group.strip.viewOffset.current(at: time),
-        focusedTile: group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile)
+        focusedTile: group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile, hidden: Array(group.hidden.values))
 }
 
 func removing(_ ids: Set<UInt32>, from saved: Snapshot) -> Snapshot {
@@ -145,7 +144,8 @@ func removing(_ ids: Set<UInt32>, from saved: Snapshot) -> Snapshot {
     }
     return Snapshot(group: saved.group, space: saved.space, columns: columns, floating: saved.floating.filter { !ids.contains($0.id.rawValue) },
                     activeColumnIndex: min(saved.activeColumnIndex, max(0, columns.count - 1)), offset: saved.offset,
-                    focusedTile: saved.focusedTile.flatMap { ids.contains($0.rawValue) ? nil : $0 })
+                    focusedTile: saved.focusedTile.flatMap { ids.contains($0.rawValue) ? nil : $0 },
+                    hidden: saved.hidden.filter { !ids.contains($0.window.id.rawValue) })
 }
 
 func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
@@ -155,7 +155,8 @@ func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
                        snapIndex: $0.snapIndex, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
     }
     return Snapshot(group: saved.group, space: saved.space, columns: columns, floating: saved.floating.map(fresh),
-                    activeColumnIndex: saved.activeColumnIndex, offset: saved.offset, focusedTile: saved.focusedTile)
+                    activeColumnIndex: saved.activeColumnIndex, offset: saved.offset, focusedTile: saved.focusedTile,
+                    hidden: saved.hidden)
 }
 
 func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, epoch: UInt64, windows: [ObservedWindow],
@@ -164,7 +165,11 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     group.phase = .settled(key)
     group.epoch = epoch
     group.windows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
-    var unused = windows.sorted { $0.id.rawValue < $1.id.rawValue }
+    group.hidden = Dictionary(uniqueKeysWithValues: (saved?.hidden ?? []).map { ($0.window.id, $0) })
+    // A window that hid on this Space and is back on screen returns to its own place, after the rest of the strip.
+    let returning = windows.compactMap { window in group.returning(window).map { (window, $0) } }.sorted { $0.1.place < $1.1.place }
+    let returned = Set(returning.map(\.0.id))
+    var unused = windows.filter { !returned.contains($0.id) }.sorted { $0.id.rawValue < $1.id.rawValue }
     var mappedIDs: [TileID: TileID] = [:]
     let tiers: [(_ saved: ObservedWindow, _ live: ObservedWindow) -> Bool] = [
         { $0.id == $1.id && $0.knownBundleID == $1.knownBundleID },
@@ -177,6 +182,7 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
             mappedIDs[old.id] = unused.remove(at: index).id
         }
     }
+    var joined: [ObservedWindow] = []
     if let saved {
         for column in saved.columns {
             let matched = column.windows.compactMap { mappedIDs[$0.id].flatMap { group.windows[$0] } }
@@ -191,14 +197,23 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
             group.strip.insertColumn(restored, at: time, atIndex: group.strip.columns.count)
             group.strip.snapIndices[group.strip.columns.count - 1] = min(column.snapIndex, max(0, group.strip.snapPoints.count - 1))
         }
-        for window in saved.floating { if let match = mappedIDs[window.id] { group.floating.insert(match) } }
-    }
-    for window in visualOrder(unused) {
-        if shouldFloat(window, config: config) { group.floating.insert(window.id) }
-        else { group.strip.insertColumn(Column(tiles: [window.id], width: group.strip.defaultWidth), at: time, atIndex: group.strip.columns.count) }
+        for old in saved.floating {
+            guard let live = mappedIDs[old.id].flatMap({ group.windows[$0] }) else { continue }
+            if joinsStrip(was: old, now: live, config: config) { joined.append(live) } else { group.floating.insert(live.id) }
+        }
     }
     group.strip.activeColumnIndex = min(saved?.activeColumnIndex ?? 0, max(0, group.strip.columns.count - 1))
     group.strip.viewOffset = .static(saved?.offset ?? 0)
+    for (window, hidden) in returning { group.putBack(window, from: hidden, config: config, at: time) }
+    group.hidden = group.hidden.filter { group.windows[$0.key] == nil }
+    let active = group.strip.activeColumnIndex, offset = group.strip.viewOffset
+    let fresh = visualOrder(unused)
+    for window in fresh where shouldFloat(window, config: config) { group.floating.insert(window.id) }
+    for window in joined + fresh where !group.floating.contains(window.id) {
+        group.strip.insertColumn(Column(tiles: [window.id], width: group.strip.defaultWidth), at: time, atIndex: group.strip.columns.count)
+    }
+    group.strip.activeColumnIndex = min(active, max(0, group.strip.columns.count - 1))
+    group.strip.viewOffset = offset
     if let oldFocus = saved?.focusedTile, let focused = mappedIDs[oldFocus] {
         group.focus = .resolved(FocusDecision(tile: focused, source: .restore, time: time))
     }

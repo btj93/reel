@@ -1,4 +1,5 @@
 import Core
+import Foundation
 
 public struct GroupSpace: Hashable, Sendable {
     public let group: UInt32
@@ -132,4 +133,36 @@ private func bestMatch(_ candidates: [Snapshot], score: (Snapshot) -> MatchScore
         if lhs.fingerprint != rhs.fingerprint { return lhs.fingerprint.sorted().lexicographicallyPrecedes(rhs.fingerprint.sorted()) }
         return SpaceOrder(lhs.group, lhs.space) < SpaceOrder(rhs.group, rhs.space)
     }?.index
+}
+
+public enum SpaceBookError: Error, Equatable {
+    case version(Int)
+}
+
+/// The one codec for saved strips. The state file is `{"version": n, "snapshots": [...]}`; any other version, or a
+/// file that is not this shape, throws, and the caller starts fresh.
+extension SpaceBook {
+    public static let version = 1
+
+    private struct File: Codable {
+        let version: Int
+        let snapshots: [Snapshot]
+    }
+
+    private struct Header: Decodable {
+        let version: Int
+    }
+
+    public static func encode(_ snapshots: [Snapshot]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(File(version: version, snapshots: snapshots))
+    }
+
+    /// Entries that fail validation are dropped; their valid siblings are kept.
+    public static func decode(_ data: Data) throws -> [Snapshot] {
+        let found = try JSONDecoder().decode(Header.self, from: data).version
+        guard found == version else { throw SpaceBookError.version(found) }
+        return try JSONDecoder().decode(File.self, from: data).snapshots.filter(\.isValid)
+    }
 }
