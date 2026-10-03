@@ -2084,6 +2084,15 @@ struct FuzzStream {
         late.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .appActivation)))
         late.advance(1)
         check(late.world.groups[1]!.focus.decision?.tile == TileID(2), "an activation after the windows return decides focus too")
+        for order: [UInt32] in [[2, 3, 4], [4, 3, 2], [3, 2, 4]] {
+            var others = Harness()
+            others.census(10, (1...5).map { window($0) })
+            others.send(.command(.focus(TileID(1)), .keyboard), advance: 1)
+            for tile: UInt32 in [2, 3, 4] { others.send(.windowsHidden([TileID(tile)])) }
+            for tile in order { others.send(.windowAdded(window(tile))) }
+            check(others.tiles == (1...5).map { TileID($0) } && others.active == TileID(1),
+                  "Hide Others, then Show All in order \(order), puts every column back in its place: \(others.tiles.map(\.rawValue))")
+        }
     }
     section("R3 bounce: focus between columns moves the view without overshoot") {
         var h = Harness(animate: true)
