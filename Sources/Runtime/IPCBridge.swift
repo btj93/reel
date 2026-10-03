@@ -10,7 +10,7 @@ import IPC
 public final class IPCBridge {
     private let loop: Loop
     private let server = SocketServer()
-    public static let version = "next-r3"
+    public static let version = "next-r4"
 
     public init(loop: Loop) {
         self.loop = loop
@@ -41,7 +41,13 @@ public final class IPCBridge {
         case .closeWindow: return onFocused(Command.close)
         case .recover: return reply(loop.recover())
         case .focusUp, .focusDown: return ReelResponse(success: false, message: "one display until R5")
-        case .getLayouts, .listPositions, .clearPositions: return ReelResponse(success: false, message: "saved Spaces arrive with R4")
+        case .listPositions: return json(Self.positions(loop.world.spaces.persisted))
+        case .clearPositions:
+            let outcome = loop.request(.clearPositions)
+            guard outcome == .accepted else { return reply(outcome) }
+            loop.store.flush()
+            return ReelResponse(success: true, message: "Cleared all saved positions")
+        case .getLayouts: return json(Self.layouts(world: loop.world, active: loop.group, windows: windowServerFrames()))
         case .listWindows: return json(listWindows())
         case .getLayout: return json(Self.layout(world: loop.world, active: loop.group, now: TimeUtil.now()))
         case .getStatus: return json(status())
@@ -56,6 +62,69 @@ public final class IPCBridge {
             return ReelResponse(success: true, message: "Config reloaded")
         case .quit: return ReelResponse(success: true, message: "Quitting")
         }
+    }
+
+    /// One entry per saved window, in the order the book keeps its strips.
+    public static func positions(_ snapshots: [Snapshot]) -> [[String: Any]] {
+        snapshots.flatMap { saved in
+            let slots: [(ObservedWindow, String, Bool)] = saved.columns.flatMap { column in column.windows.map { ($0, "\(column.width)", false) } }
+                + saved.floating.map { ($0, "floating", false) } + saved.hidden.map { ($0.window, $0.width.map { "\($0)" } ?? "floating", true) }
+            return slots.enumerated().map { index, slot in
+                ["groupID": saved.group, "space": saved.space.debugDescription, "slotIndex": index, "windowID": slot.0.id.rawValue,
+                 "bundleID": slot.0.bundleID ?? "", "windowTitle": slot.0.title, "width": slot.1, "hidden": slot.2]
+            }
+        }
+    }
+
+    /// Every Space the engine knows, the current one first, with where each window is now. Frames come from the
+    /// window server, not AX, so a hung app cannot stall the reply. A window less than 10 points on its display is
+    /// `slivered`: parked off screen, or stuck there.
+    public static func layouts(world: World, active: UInt32, windows: [UInt32: (frame: CGRect, onScreen: Bool)]) -> [String: Any] {
+        func entries(_ saved: Snapshot) -> [[String: Any]] {
+            let area = world.topology.groups.first { $0.id == saved.group }?.frame
+            let columns = saved.columns.flatMap { column in column.windows.map { ($0, Optional(column)) } }
+            return (columns + saved.floating.map { ($0, nil) }).map { window, column in
+                let now = windows[window.id.rawValue]
+                var entry: [String: Any] = [
+                    "windowID": window.id.rawValue, "bundleID": window.bundleID ?? "", "title": window.title,
+                    "savedWidth": column.map { "\($0.width)" } ?? "floating", "isFullWidth": column?.isFullWidth ?? false,
+                    "isOnScreen": now?.onScreen ?? false, "currentFrame": NSNull(), "slivered": false,
+                ]
+                if let frame = now?.frame {
+                    entry["currentFrame"] = ["x": frame.minX, "y": frame.minY, "w": frame.width, "h": frame.height]
+                    entry["slivered"] = area.map { frame.intersection($0).width < 10 } ?? false
+                }
+                return entry
+            }
+        }
+        var spaces: [[String: Any]] = []
+        var current = Set<GroupSpace>()
+        for id in world.groups.keys.sorted() {
+            guard let saved = world.currentSnapshot(group: id) else { continue }
+            current.insert(GroupSpace(group: id, space: saved.space))
+            spaces.append(["groupID": id, "isActiveGroup": id == active, "isCurrentSpace": true, "source": "live",
+                           "spaceKey": saved.space.debugDescription, "windows": entries(saved)])
+        }
+        let session = world.spaces.live.filter { !current.contains($0.key) }.map(\.value)
+        let disk = world.spaces.disk.filter { world.spaces.lookupExact(group: $0.group, space: $0.space) == nil }
+        for (source, saved) in session.map({ ("session", $0) }) + disk.map({ ("disk", $0) }) {
+            spaces.append(["groupID": saved.group, "isActiveGroup": false, "isCurrentSpace": false, "source": source,
+                           "spaceKey": saved.space.debugDescription, "windows": entries(saved)])
+        }
+        return ["activeDisplayID": active, "primaryScreenHeight": world.topology.primaryScreenHeight, "spaces": spaces]
+    }
+
+    /// Where the window server has every window now, on any Space.
+    private func windowServerFrames() -> [UInt32: (frame: CGRect, onScreen: Bool)] {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return [:] }
+        var frames: [UInt32: (frame: CGRect, onScreen: Bool)] = [:]
+        for info in list {
+            guard let id = info[kCGWindowNumber as String] as? UInt32,
+                  let bounds = (info[kCGWindowBounds as String] as? NSDictionary).flatMap({ CGRect(dictionaryRepresentation: $0 as CFDictionary) })
+            else { continue }
+            frames[id] = (bounds, info[kCGWindowIsOnscreen as String] as? Bool ?? false)
+        }
+        return frames
     }
 
     private func onFocused(_ command: (TileID) -> Command) -> ReelResponse {

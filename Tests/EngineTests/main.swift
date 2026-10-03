@@ -2401,6 +2401,73 @@ struct FuzzStream {
         check(unhide.active == TileID(5) && unhide.world.groups[1]!.space == .skylight(10),
               "a focus report for the app's hidden window here after the click means the app unhides here; that window takes focus")
     }
+    section("R4 storm: churn is coalesced into one census after it settles; a quiet switch is read at once") {
+        var storm = SpaceStorm()
+        let delays = [0.0, 1.0, 1.1, 1.3, 1.55, 2.0].map { storm.notified(at: $0) }
+        check(delays == [0, 0, SpaceStorm.settle, SpaceStorm.settle, SpaceStorm.settle, 0],
+              "notifications under \(SpaceStorm.threshold) s apart wait out the settle; the first after a quiet gap does not: \(delays)")
+        check(SpaceStorm.settle < SpaceStorm.threshold, "the settle is shorter than the storm threshold")
+    }
+    try section("R4 store: the only reader and writer of the state file") {
+        let dir = NSTemporaryDirectory() + "reel-r4-store-\(getpid())"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        var lines: [String] = []
+        let store = SnapshotStore(directory: dir + "/state", log: { lines.append($0) })
+        check(store.load().isEmpty && lines.isEmpty, "no file is an empty book, quietly")
+        var h = Harness()
+        h.census(10, [window(3, x: 600), window(1, x: 0), window(2, x: 300)])
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.command(.moveRight, .ipc))
+        h.send(.command(.setWidth(TileID(3), 412), .ipc))
+        let order = h.tiles
+        let first: [Snapshot] = h.effects.compactMap { effect -> [Snapshot]? in if case .persist(let book) = effect { return book.persisted }; return nil }.last ?? []
+        store.save([])
+        store.save(first)
+        check(!FileManager.default.fileExists(atPath: store.path), "a save waits for the debounce")
+        store.flush()
+        let loaded = store.load()
+        let same = try SpaceBook.encode(loaded) == SpaceBook.encode(first)
+        check(loaded.count == 1 && same, "the newest book is written in the one codec")
+        var restart = Harness()
+        restart.send(.loadSnapshots(loaded))
+        restart.census(10, [window(1, x: 0), window(2, x: 300), window(3, x: 600)])
+        check(restart.tiles == order && order != [TileID(1), TileID(2), TileID(3)] && restart.widths.contains(.fixed(412)),
+              "a restart restores the strip order and widths from disk: \(restart.tiles) vs \(order)")
+        store.save(first)
+        store.save([])
+        store.flush()
+        check(store.load().isEmpty, "a clear replaces a write queued before it, so the old book never lands")
+        for (bad, why) in [("{\"version\":0,\"snapshots\":[]}", "version"), ("[{\"group\":1}]", "R3"), ("\u{0}garbage", "corrupt")] {
+            lines = []
+            try Data(bad.utf8).write(to: URL(fileURLWithPath: store.path))
+            check(store.load().isEmpty && lines.contains { $0.hasPrefix("store: starting fresh") }, "a \(why) file is a logged fresh start")
+        }
+        store.save(first)
+        store.flush()
+        check(store.load().count == 1, "and the next write replaces it")
+    }
+    section("R4 IPC: list-positions and get-layouts read the book, current Space first") {
+        var h = Harness()
+        h.send(.loadSnapshots([Snapshot(group: 1, space: .skylight(90), columns: [SnapshotColumn(windows: [window(9, bundle: "other.app")], width: .fixed(300))])]))
+        h.census(10, [window(1), window(2)])
+        h.send(.windowsHidden([TileID(2)]))
+        h.census(20, [window(3)])
+        let positions = IPCBridge.positions(h.world.spaces.persisted)
+        check(positions.count == 4 && positions.contains { $0["windowID"] as? UInt32 == 2 && $0["hidden"] as? Bool == true },
+              "one entry per saved window, hidden ones marked")
+        let area = h.world.topology.groups[0].frame
+        let layouts = IPCBridge.layouts(world: h.world, active: 1, windows: [
+            3: (CGRect(x: area.minX + 10, y: area.minY, width: 400, height: 400), true),
+            1: (CGRect(x: area.maxX - 1, y: area.minY, width: 400, height: 400), false)])
+        let spaces = layouts["spaces"] as? [[String: Any]] ?? []
+        check(spaces.map { $0["source"] as? String ?? "" } == ["live", "session", "disk"], "current, then this session's stashes, then disk")
+        let away = (spaces[1]["windows"] as? [[String: Any]])?.first
+        check(away?["windowID"] as? UInt32 == 1 && away?["slivered"] as? Bool == true && away?["isOnScreen"] as? Bool == false,
+              "a stashed window parked as a sliver is flagged")
+        check(JSONSerialization.isValidJSONObject(layouts) && positions.allSatisfy(JSONSerialization.isValidJSONObject), "both encode as JSON")
+        h.send(.ipc(id: 1, command: .clearPositions))
+        check(IPCBridge.positions(h.world.spaces.persisted).isEmpty, "list-positions is empty after a clear")
+    }
     try section("R4 codec: one versioned file; another version or shape is refused") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])

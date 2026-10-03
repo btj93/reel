@@ -54,13 +54,14 @@ public final class Loop {
     private(set) var executor: Executor!
     private(set) var observer: Observer!
     private(set) var scheduler: Scheduler!
+    public private(set) var store: SnapshotStore!
+    private(set) var spaces: SpaceObserver!
     private let frameLoop = FrameLoop()
     private let indicator = FocusIndicator()
     private let hotkeys = HotkeyManager()
     private var replies: [UInt64: ReplyPayload] = [:]
     private var lastRequest: UInt64 = 0
     private var indicatorTile: TileID?
-    private var persistLogged = false
     private var quitting = false
     private var screenToken: NSObjectProtocol?
 
@@ -75,6 +76,9 @@ public final class Loop {
                             emit: { [unowned self] in send($0, stamp: $1) }, log: logLine)
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },
                               deliver: { [unowned self] in run($0) }, log: logLine)
+        store = SnapshotStore(directory: paths.stateDir, log: logLine)
+        spaces = SpaceObserver(clock: TimeUtil.now, notify: { [unowned self] in send(.spaceWillChange) },
+                               census: { [unowned self] delay in census(group: group, after: delay) }, log: logLine)
         frameLoop.onTick = { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
         hotkeys.onAction = { [weak self] action in MainActor.assumeIsolated { self?.hotkey(action) } }
     }
@@ -82,6 +86,8 @@ public final class Loop {
     public func start() {
         logLine("loop: group=\(group) area=\(world.topology.groups.first?.frame ?? .zero) managedPids=\(allowedPids.map { $0.sorted().description } ?? "all")")
         observer.clock.current = world.scope(for: group)
+        let scope = world.scope(for: group) ?? EventScope(topologyRevision: world.topology.revision, group: group, spaceEpoch: 0)
+        reduceAndRun(Event(scope: scope, kind: .loadSnapshots(store.load())))
         // The defaults go live first, so a file the schema rejects leaves hotkeys working and the error in the menu bar.
         apply(config)
         reloadConfig()
@@ -90,7 +96,12 @@ public final class Loop {
                                                              object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.screensChanged() }
         }
-        observer.start(timeout: 1.5) { [weak self] in self?.census(group: self?.group ?? 0) }
+        // Space notifications wait for the first census: until then the group has no Space to leave.
+        observer.start(timeout: 1.5) { [weak self] in
+            guard let self else { return }
+            census(group: group)
+            spaces.start()
+        }
     }
 
     // MARK: Events
@@ -127,9 +138,7 @@ public final class Loop {
             case .close(let tile): if let pid = pid(of: tile) { executor.close(tile, pid: pid) }
             case .reply(let id, let payload): replies[id] = payload
             case .overlay: break
-            case .persist:
-                if !persistLogged { logLine("loop: persist skipped, the snapshot store arrives with R4") }
-                persistLogged = true
+            case .persist(let book): store.save(book.persisted)
             case .requestCensus(let group, let after):
                 guard let owner = world.scope(for: group) else { continue }
                 scheduler.schedule(.census(group: group), deadline: world.time + after, owner: owner, job: .census(group: group))
@@ -141,16 +150,18 @@ public final class Loop {
         }
     }
 
-    /// A fresh on-screen read, sent as a new `spaceChanged`; a deferred census is never answered from a cache.
+    /// Read the census now, or after `delay` through the group's one census slot, so a later request replaces it.
+    private func census(group: UInt32, after delay: Double) {
+        guard delay > 0 else { return census(group: group) }
+        guard let owner = world.scope(for: group) else { return }
+        scheduler.schedule(.census(group: group), deadline: TimeUtil.now() + delay, owner: owner, job: .census(group: group))
+    }
+
+    /// A fresh on-screen read, sent as a new `spaceChanged`; a deferred census is never answered from a cache. Every
+    /// census proposes the next epoch, so the one `reduce` commits retires the old Space's focus events and timers.
     private func census(group: UInt32) {
         let windows = observer.census()
-        let key: SpaceKey
-        if let space = SpaceIdentity.currentSpace(displayID: group) {
-            key = space.key
-        } else {
-            key = .fingerprint(Set(windows.map(\.id.rawValue)))
-            logLine("space: fingerprint fallback")
-        }
+        guard let key = spaces.key(display: group, windows: windows) else { return logLine("loop: census skipped on a system Space") }
         let epoch = (world.groups[group]?.epoch ?? 0) + 1
         logLine("loop: census key=\(key.debugDescription) windows=\(windows.count)")
         send(.spaceChanged(key: key, epoch: epoch, windows: windows))
@@ -246,7 +257,7 @@ public final class Loop {
             observer.healthCheck()
             recover()
             // Focus reports were dropped while paused; read the real focus again so commands act on it.
-            NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: false)
+            NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: false, space: SpaceObserver.observedSpace())
         }
         onChange?()
     }
@@ -312,6 +323,8 @@ public final class Loop {
         setPaused(true)
         quitting = true
         hotkeys.stop()
+        spaces.stop()
+        store.flush()
         var finished = false
         let finish = { @MainActor in
             guard !finished else { return }

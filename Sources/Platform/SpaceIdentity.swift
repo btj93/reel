@@ -54,6 +54,7 @@ public enum SpaceIdentity {
     private typealias FnCurrentSpace = @convention(c) (Int32, CFString) -> UInt64
     private typealias FnSpaceName = @convention(c) (Int32, UInt64) -> Unmanaged<CFString>?
     private typealias FnSpaceType = @convention(c) (Int32, UInt64) -> Int32
+    private typealias FnWindowSpaces = @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
 
     private struct Symbols {
         let connectionID: FnConnection
@@ -61,6 +62,7 @@ public enum SpaceIdentity {
         let currentSpace: FnCurrentSpace?
         let spaceName: FnSpaceName?
         let spaceType: FnSpaceType?
+        let windowSpaces: FnWindowSpaces?
     }
 
     /// Only the function pointers are cached — those genuinely cannot change for
@@ -69,8 +71,10 @@ public enum SpaceIdentity {
     /// switch) would otherwise pin this unavailable forever with no retry, and a
     /// connection that dies later would keep being used. `SLSMainConnectionID` is
     /// a cheap call, so it is re-read on every query instead.
+    /// `REEL_DISABLE_SKYLIGHT=1` resolves nothing, so a test lane can force the fingerprint fallback.
     private static let symbols: Symbols? = {
-        guard let sky = dlopen(
+        guard ProcessInfo.processInfo.environment["REEL_DISABLE_SKYLIGHT"] != "1",
+              let sky = dlopen(
             "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
         else { return nil }
 
@@ -88,7 +92,9 @@ public enum SpaceIdentity {
             spaceName: dlsym(sky, "SLSSpaceCopyName")
                 .map { unsafeBitCast($0, to: FnSpaceName.self) },
             spaceType: dlsym(sky, "SLSSpaceGetType")
-                .map { unsafeBitCast($0, to: FnSpaceType.self) })
+                .map { unsafeBitCast($0, to: FnSpaceType.self) },
+            windowSpaces: dlsym(sky, "SLSCopySpacesForWindows")
+                .map { unsafeBitCast($0, to: FnWindowSpaces.self) })
     }()
 
     /// A live window-server connection, or nil if one cannot be obtained right now.
@@ -144,6 +150,16 @@ public enum SpaceIdentity {
         return SpaceSnapshot(sid: sid, uuid: uuid, isUserSpace: isUser)
     }
 
+    /// The Spaces a window is on, from every Space and not only the visible ones. Empty for a window that is ordered
+    /// out (on no Space at all); nil when the shim cannot answer, which callers must treat as "unknown".
+    public static func spaces(ofWindow windowID: CGWindowID) -> Set<UInt64>? {
+        guard let (sym, cid) = connection(), let windowSpaces = sym.windowSpaces else { return nil }
+        // Selector 0x7 asks for every Space kind: current, other and fullscreen.
+        let ids = [NSNumber(value: windowID)] as CFArray
+        guard let spaces = windowSpaces(cid, 0x7, ids)?.takeRetainedValue() as? [NSNumber] else { return nil }
+        return Set(spaces.map(\.uint64Value))
+    }
+
     /// One-line capability summary for the startup log.
     public static var diagnostics: String {
         guard let (sym, cid) = connection() else {
@@ -153,6 +169,7 @@ public enum SpaceIdentity {
         if sym.currentSpace != nil { caps.append("per-display") }
         if sym.spaceName != nil { caps.append("uuid") }
         if sym.spaceType != nil { caps.append("type") }
+        if sym.windowSpaces != nil { caps.append("window-spaces") }
         return "SpaceIdentity: available cid=\(cid) caps=[\(caps.joined(separator: ","))]"
     }
 }

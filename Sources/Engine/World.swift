@@ -255,7 +255,12 @@ public struct World: Sendable {
         groups[group].map { EventScope(topologyRevision: topology.revision, group: group, spaceEpoch: $0.epoch) }
     }
 
-    /// The frame loop runs while any strip still animates.
+    /// The strip on screen in `group`, as it would be stashed now.
+    public func currentSnapshot(group: UInt32) -> Snapshot? {
+        groups[group].flatMap { Engine.snapshot($0, id: group, time: time) }
+    }
+
+        /// The frame loop runs while any strip still animates.
     public var needsTicks: Bool {
         groups.values.contains { group in
             if case .static = group.strip.viewOffset {

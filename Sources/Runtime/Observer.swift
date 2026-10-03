@@ -29,7 +29,8 @@ enum Observation: Sendable {
     case restored(WindowFacts)
     case retitled(WindowFacts)
     case moved(CGWindowID, CGRect)
-    case focused(pid: Int32, CGWindowID?, activation: Bool)
+    /// `space` is the Space the focus was observed on, read where it happened; nil without SkyLight.
+    case focused(pid: Int32, CGWindowID?, activation: Bool, space: SpaceKey?)
     /// `landed` is the frame the app kept, when known: an app may clamp the size we asked for.
     case wrote(TileID, revision: UInt64, frame: CGRect, landed: CGRect?, FrameResult)
 }
@@ -169,10 +170,10 @@ final class AppWorker: @unchecked Sendable {
         }
     }
 
-    func reportFocus(activation: Bool) {
+    func reportFocus(activation: Bool, space: SpaceKey?) {
         app.perform { [self] in
             let stamp = clock.current
-            send(.focused(pid: pid, app.focusedWindowID(), activation: activation), stamp)
+            send(.focused(pid: pid, app.focusedWindowID(), activation: activation, space: space), stamp)
         }
     }
 
@@ -220,7 +221,7 @@ final class AppWorker: @unchecked Sendable {
         case kAXTitleChangedNotification:
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.retitled(facts(window))) }
         case kAXFocusedWindowChangedNotification:
-            post(.focused(pid: pid, windowID(for: element), activation: false))
+            post(.focused(pid: pid, windowID(for: element), activation: false, space: SpaceObserver.observedSpace()))
         default: break
         }
     }
@@ -297,9 +298,7 @@ public final class Observer {
         }
         observe(NSWorkspace.didLaunchApplicationNotification) { [weak self] in self?.register($0) }
         observe(NSWorkspace.didTerminateApplicationNotification) { [weak self] in self?.unregister($0.processIdentifier) }
-        observe(NSWorkspace.didActivateApplicationNotification) { [weak self] in
-            self?.workers[$0.processIdentifier]?.reportFocus(activation: true)
-        }
+        observe(NSWorkspace.didActivateApplicationNotification) { [weak self] in self?.activated($0.processIdentifier) }
         observe(NSWorkspace.didHideApplicationNotification) { [weak self] in self?.hide($0.processIdentifier) }
         observe(NSWorkspace.didUnhideApplicationNotification) { [weak self] _ in self?.healthCheck() }
         onDiscovered = discovered
@@ -333,8 +332,17 @@ public final class Observer {
         for id in managed.sorted() where !alive.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         let onScreen = getAllWindowInfo()
         let visible = Set(onScreen.map(\.windowID))
+        // A managed window that is alive but on no Space at all was ordered out (some apps close to the Dock that
+        // way): it leaves the strip as a hidden window does, and comes back to its place if it is shown again. One on
+        // another Space is left alone. Without SkyLight the two cannot be told apart, so both stay.
+        var orderedOut: [TileID] = []
         for id in managed.sorted() where alive.contains(id) && !visible.contains(id) {
             known[id].flatMap { workers[$0.pid] }?.validate(id)
+            if SpaceIdentity.spaces(ofWindow: id)?.isEmpty == true { orderedOut.append(TileID(id)) }
+        }
+        if !orderedOut.isEmpty {
+            log("observer: ordered out \(orderedOut.map(\.rawValue))")
+            emit(.windowsHidden(orderedOut), nil)
         }
         ignored.formIntersection(visible)
         guard !paused() else { return }
@@ -349,9 +357,19 @@ public final class Observer {
         for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window), nil) }
     }
 
+    /// A Dock click or Cmd+Tab. The app is named at once, with the Space it was activated on, so a Space change that
+    /// follows cannot commit before `reduce` hears of it; the app thread then names the window.
+    private func activated(_ pid: Int32) {
+        guard let worker = workers[pid] else { return }
+        let space = SpaceObserver.observedSpace()
+        if !paused(), let stamp = clock.current {
+            emit(.focus(FocusIntent(tile: nil, pid: pid, source: .appActivation, observedSpace: space)), stamp)
+        }
+        worker.reportFocus(activation: true, space: space)
+    }
+
     /// A hidden app's windows leave the strip but stay known, so the health check adds them back, to the place they
-    /// left, once they are on screen again. A window that only orders out (closing to the Dock in some apps) stays
-    /// until R4 can ask SkyLight whether it is on another Space.
+    /// left, once they are on screen again.
     private func hide(_ pid: Int32) {
         let managed = managed()
         let hidden = known.values.filter { $0.pid == pid && managed.contains($0.id) }.map(\.id).sorted().map(TileID.init)
@@ -437,9 +455,10 @@ public final class Observer {
         case .moved(let id, let frame):
             guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
-        case .focused(let pid, let id, let activation):
+        case .focused(let pid, let id, let activation, let space):
             guard !paused() else { return }
-            emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus)))
+            emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus,
+                                            observedSpace: space)))
         case .wrote(let tile, let revision, let frame, let landed, let result):
             executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
             emit(.frameCompleted(tile: tile, revision: revision, result: result), nil)
