@@ -2438,6 +2438,85 @@ struct FuzzStream {
         check(unhide.active == TileID(5) && unhide.world.groups[1]!.space == .skylight(10),
               "a focus report for the app's hidden window here after the click means the app unhides here; that window takes focus")
     }
+    section("R4 dock: a Dock click survives a first read that is deferred") {
+        var h = Harness()
+        h.census(20, [window(3, app: 30), window(4, app: 40)])
+        h.send(.command(.focus(TileID(4)), .ipc))
+        h.census(10, [window(1, app: 10), window(2, app: 20)])
+        h.advance(1)
+        h.send(.focus(FocusIntent(tile: nil, pid: 30, source: .appActivation)))
+        h.send(.spaceWillChange)
+        h.census(20, [])
+        check(h.world.groups[1]!.space == .skylight(10) && h.censusRequest != nil, "the empty first read is deferred")
+        h.advance(EngineConfig.censusSettle)
+        h.census(20, [window(3, app: 30), window(4, app: 40)])
+        check(h.active == TileID(3) && h.world.groups[1]!.focus.decision?.source == .appActivation,
+              "the re-read a settle later still focuses the clicked app's window")
+    }
+    section("R4 fingerprint: a read still mixed a settle later commits only onto a known Space") {
+        var h = Harness()
+        func fingerprint(_ ids: [UInt32]) {
+            h.send(.spaceChanged(key: .fingerprint(Set(ids)), epoch: h.world.groups[1]!.epoch + 1, windows: ids.map { window($0) }))
+        }
+        fingerprint([1, 2])
+        h.send(.command(.setWidth(TileID(1), 377), .ipc))
+        fingerprint([3, 4])
+        h.send(.command(.setWidth(TileID(3), 411), .ipc))
+        h.send(.spaceWillChange)
+        fingerprint([1, 2, 3, 4])
+        h.advance(EngineConfig.censusSettle + margin)
+        fingerprint([1, 2, 3, 4])
+        check(h.world.groups[1]!.space == .fingerprint([3, 4]) && h.logged("mixed space census dropped after settle"),
+              "a read that matches no known Space is dropped")
+        check(h.world.spaces.persisted.contains { $0.fingerprint == [1, 2] }, "and the saved strip of [1, 2] is still in the book")
+        h.send(.spaceWillChange)
+        fingerprint([1, 2])
+        check(h.tiles == [TileID(1), TileID(2)] && h.widths.first == .fixed(377), "Space [1, 2] keeps width 377")
+        h.send(.spaceWillChange)
+        fingerprint([3, 4])
+        check(h.tiles == [TileID(3), TileID(4)] && h.widths.first == .fixed(411), "Space [3, 4] keeps width 411")
+    }
+    section("R4 fingerprint: a window on every Space keeps its column on each") {
+        var h = Harness()
+        func fingerprint(_ ids: [UInt32]) {
+            h.send(.spaceChanged(key: .fingerprint(Set(ids)), epoch: h.world.groups[1]!.epoch + 1, windows: ids.map { window($0) }))
+        }
+        fingerprint([1, 2, 9])
+        h.send(.command(.focus(TileID(9)), .ipc))
+        h.send(.command(.moveLeft, .ipc))
+        h.send(.command(.moveLeft, .ipc))
+        let order = h.tiles
+        h.send(.spaceWillChange)
+        fingerprint([4, 5, 9])
+        h.send(.spaceWillChange)
+        fingerprint([1, 2, 9])
+        check(!h.world.groups[1]!.phase.isChanging && h.tiles == order && order.first == TileID(9),
+              "the return commits at once, with the window where it was: \(h.tiles)")
+        h.send(.spaceWillChange)
+        fingerprint([4, 5, 9])
+        check(!h.world.groups[1]!.phase.isChanging, "and so does the next switch")
+    }
+    section("R4 reboot: a Space id reused by another Space keeps the first one's saved strip in the file") {
+        var h = Harness()
+        let a = Snapshot(group: 1, space: .skylight(3), columns: [SnapshotColumn(windows: [window(91, bundle: "a.app")], width: .fixed(301)),
+                                                                   SnapshotColumn(windows: [window(92, bundle: "a2.app")], width: .fixed(302))])
+        let b = Snapshot(group: 1, space: .skylight(5), columns: [SnapshotColumn(windows: [window(81, bundle: "b.app")], width: .fixed(401))])
+        h.send(.loadSnapshots([a, b]))
+        h.census(3, [window(1, bundle: "b.app")])
+        check(h.widths == [.fixed(401)], "B restores by its windows under the id A had")
+        check(h.world.spaces.persisted.contains { $0.windows.map(\.id) == [TileID(91), TileID(92)] }, "A is still in the next save")
+    }
+    section("R4 hidden: a window that closes while hidden is forgotten") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.windowsHidden([TileID(2)]))
+        h.send(.windowRemoved(TileID(2)))
+        check(h.world.groups[1]!.hidden.isEmpty, "the strip forgets it")
+        h.send(.windowsHidden([TileID(3)]))
+        h.census(20, [window(4)])
+        h.send(.windowRemoved(TileID(3)))
+        check(h.world.spaces.persisted.allSatisfy { $0.hidden.isEmpty }, "and so does its Space's saved strip")
+    }
     section("R4 storm: churn is coalesced into one census after it settles; a quiet switch is read at once") {
         var storm = SpaceStorm()
         let delays = [0.0, 1.0, 1.1, 1.3, 1.55, 2.0].map { storm.notified(at: $0) }
@@ -2482,6 +2561,10 @@ struct FuzzStream {
         store.save(first)
         store.flush()
         check(store.load().count == 1, "and the next write replaces it")
+        try FileManager.default.removeItem(atPath: store.path)
+        store.save(first)
+        RunLoop.main.run(until: Date().addingTimeInterval(SnapshotStore.writeDelay + 0.2))
+        check(store.load().count == 1, "a save reaches the disk once the debounce passes")
     }
     section("R4 IPC: list-positions and get-layouts read the book, current Space first") {
         var h = Harness()
@@ -2574,6 +2657,32 @@ struct FuzzStream {
             do { _ = try SpaceBook.decode(Data(bad.utf8)) } catch { refused.append(bad) }
         }
         check(refused.count == 4, "old versions, the R2 bare array and garbage all throw: \(refused)")
+        let file = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        func damaged(_ edit: (inout [String: Any]) -> Void) throws -> [Snapshot] {
+            var snapshots = file["snapshots"] as! [[String: Any]]
+            let index = snapshots.firstIndex { !($0["hidden"] as! [Any]).isEmpty }!
+            edit(&snapshots[index])
+            var copy = file
+            copy["snapshots"] = snapshots
+            return try SpaceBook.decode(JSONSerialization.data(withJSONObject: copy))
+        }
+        let cases: [(String, (inout [String: Any]) -> Void)] = [
+            ("a hidden id listed twice", { $0["hidden"] = ($0["hidden"] as! [Any]) + ($0["hidden"] as! [Any]) }),
+            ("a negative hidden place", { var tile = ($0["hidden"] as! [[String: Any]])[0]; tile["place"] = -1; $0["hidden"] = [tile] }),
+            ("a hidden window also on screen", {
+                var tile = ($0["hidden"] as! [[String: Any]])[0]
+                tile["window"] = (($0["columns"] as! [[String: Any]])[0]["windows"] as! [Any])[0]
+                $0["hidden"] = [tile]
+            }),
+        ]
+        for (name, edit) in cases {
+            let kept = try damaged(edit)
+            check(kept.count == 1 && kept[0].space == .skylight(20), "\(name) drops that entry and keeps the rest")
+            var restart = Harness()
+            restart.send(.loadSnapshots(kept))
+            restart.census(10, [window(1), window(2), window(3)])
+            check(restart.world.check().isEmpty, "and a restart from the rest is sound")
+        }
     }
 }
 
