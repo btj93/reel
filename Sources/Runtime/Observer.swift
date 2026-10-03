@@ -29,7 +29,8 @@ enum Observation: Sendable {
     case restored(WindowFacts)
     case retitled(WindowFacts)
     case moved(CGWindowID, CGRect)
-    case focused(pid: Int32, CGWindowID?, activation: Bool)
+    /// `space` is the Space the focus was observed on, read where it happened; nil without SkyLight.
+    case focused(pid: Int32, CGWindowID?, activation: Bool, space: SpaceKey?)
     /// `landed` is the frame the app kept, when known: an app may clamp the size we asked for.
     case wrote(TileID, revision: UInt64, frame: CGRect, landed: CGRect?, FrameResult)
 }
@@ -169,10 +170,10 @@ final class AppWorker: @unchecked Sendable {
         }
     }
 
-    func reportFocus(activation: Bool) {
+    func reportFocus(activation: Bool, space: SpaceKey?) {
         app.perform { [self] in
             let stamp = clock.current
-            send(.focused(pid: pid, app.focusedWindowID(), activation: activation), stamp)
+            send(.focused(pid: pid, app.focusedWindowID(), activation: activation, space: space), stamp)
         }
     }
 
@@ -220,7 +221,7 @@ final class AppWorker: @unchecked Sendable {
         case kAXTitleChangedNotification:
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.retitled(facts(window))) }
         case kAXFocusedWindowChangedNotification:
-            post(.focused(pid: pid, windowID(for: element), activation: false))
+            post(.focused(pid: pid, windowID(for: element), activation: false, space: SpaceObserver.observedSpace()))
         default: break
         }
     }
@@ -264,6 +265,8 @@ public final class Observer {
     private let emit: (Event.Kind, EventScope?) -> Void
     let clock = ScopeClock()
     private let managed: () -> Set<CGWindowID>
+    /// Windows the engine keeps off the current strip: hidden ones and every saved strip's, so a close there is heard.
+    private let elsewhere: () -> Set<CGWindowID>
     private let log: (String) -> Void
     private var tokens: [NSObjectProtocol] = []
     private var healthTimer: Timer?
@@ -276,11 +279,13 @@ public final class Observer {
 
     public static let healthInterval = 0.5
 
-    init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
+    init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
+         elsewhere: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
          emit: @escaping (Event.Kind, EventScope?) -> Void, log: @escaping (String) -> Void) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
+        self.elsewhere = elsewhere
         self.paused = paused
         self.emit = emit
         self.log = log
@@ -297,9 +302,7 @@ public final class Observer {
         }
         observe(NSWorkspace.didLaunchApplicationNotification) { [weak self] in self?.register($0) }
         observe(NSWorkspace.didTerminateApplicationNotification) { [weak self] in self?.unregister($0.processIdentifier) }
-        observe(NSWorkspace.didActivateApplicationNotification) { [weak self] in
-            self?.workers[$0.processIdentifier]?.reportFocus(activation: true)
-        }
+        observe(NSWorkspace.didActivateApplicationNotification) { [weak self] in self?.activated($0.processIdentifier) }
         observe(NSWorkspace.didHideApplicationNotification) { [weak self] in self?.hide($0.processIdentifier) }
         observe(NSWorkspace.didUnhideApplicationNotification) { [weak self] _ in self?.healthCheck() }
         onDiscovered = discovered
@@ -327,14 +330,23 @@ public final class Observer {
 
     /// Removals for windows that died without a notification, additions for on-screen windows the engine lacks.
     func healthCheck() {
-        let managed = managed()
-        guard let alive = existingWindows(managed.union(known.keys)) else { return log("observer: window list unavailable, health check skipped") }
+        let managed = managed(), tracked = managed.union(elsewhere())
+        guard let alive = existingWindows(tracked.union(known.keys)) else { return log("observer: window list unavailable, health check skipped") }
         for id in known.keys where !alive.contains(id) { forget(id) }
-        for id in managed.sorted() where !alive.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
+        for id in tracked.sorted() where !alive.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         let onScreen = getAllWindowInfo()
         let visible = Set(onScreen.map(\.windowID))
+        // A managed window that is alive but on no Space at all was ordered out (some apps close to the Dock that
+        // way): it leaves the strip as a hidden window does, and comes back to its place if it is shown again. One on
+        // another Space is left alone. Without SkyLight the two cannot be told apart, so both stay.
+        var orderedOut: [TileID] = []
         for id in managed.sorted() where alive.contains(id) && !visible.contains(id) {
             known[id].flatMap { workers[$0.pid] }?.validate(id)
+            if SpaceIdentity.spaces(ofWindow: id)?.isEmpty == true { orderedOut.append(TileID(id)) }
+        }
+        if !orderedOut.isEmpty {
+            log("observer: ordered out \(orderedOut.map(\.rawValue))")
+            emit(.windowsHidden(orderedOut), nil)
         }
         ignored.formIntersection(visible)
         guard !paused() else { return }
@@ -349,12 +361,22 @@ public final class Observer {
         for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window), nil) }
     }
 
-    /// A hidden app's windows leave the strip but stay known, so the health check adds them back, to the place they
-    /// left, once they are on screen again. A window that only orders out (closing to the Dock in some apps) stays
-    /// until R4 can ask SkyLight whether it is on another Space.
+    /// A Dock click or Cmd+Tab. The app is named at once, with the Space it was activated on, so a Space change that
+    /// follows cannot commit before `reduce` hears of it; the app thread then names the window.
+    private func activated(_ pid: Int32) {
+        guard let worker = workers[pid] else { return }
+        let space = SpaceObserver.observedSpace()
+        if !paused(), let stamp = clock.current {
+            emit(.focus(FocusIntent(tile: nil, pid: pid, source: .appActivation, observedSpace: space)), stamp)
+        }
+        worker.reportFocus(activation: true, space: space)
+    }
+
+    /// A hidden app's windows leave the strip, or the saved strip of the Space they are on, but stay known, so the
+    /// health check adds them back, to the place they left, once they are on screen again.
     private func hide(_ pid: Int32) {
-        let managed = managed()
-        let hidden = known.values.filter { $0.pid == pid && managed.contains($0.id) }.map(\.id).sorted().map(TileID.init)
+        let tracked = managed().union(elsewhere())
+        let hidden = known.values.filter { $0.pid == pid && tracked.contains($0.id) }.map(\.id).sorted().map(TileID.init)
         if !hidden.isEmpty { emit(.windowsHidden(hidden), nil) }
     }
 
@@ -371,10 +393,10 @@ public final class Observer {
         guard let worker = workers.removeValue(forKey: pid) else { return }
         worker.stop()
         let gone = known.values.filter { $0.pid == pid }.map(\.id)
-        let managed = managed()
+        let tracked = managed().union(elsewhere())
         for id in gone.sorted() {
             forget(id)
-            if managed.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
+            if tracked.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         }
         log("observer: app exited pid=\(pid) windows=\(gone.count)")
     }
@@ -421,9 +443,9 @@ public final class Observer {
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
             if !paused(), facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed)) }
         case .destroyed(let id):
-            let wasManaged = managed().contains(id)
+            let tracked = managed().contains(id) || elsewhere().contains(id)
             forget(id)
-            if wasManaged { emit(.windowRemoved(TileID(id)), nil) }
+            if tracked { emit(.windowRemoved(TileID(id)), nil) }
         case .minimized(let id):
             known.removeValue(forKey: id)
             if managed().contains(id) { emit(.windowsHidden([TileID(id)]), nil) }
@@ -437,9 +459,10 @@ public final class Observer {
         case .moved(let id, let frame):
             guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
-        case .focused(let pid, let id, let activation):
+        case .focused(let pid, let id, let activation, let space):
             guard !paused() else { return }
-            emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus)))
+            emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus,
+                                            observedSpace: space)))
         case .wrote(let tile, let revision, let frame, let landed, let result):
             executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
             emit(.frameCompleted(tile: tile, revision: revision, result: result), nil)

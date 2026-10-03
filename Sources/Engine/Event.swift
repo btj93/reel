@@ -53,6 +53,8 @@ public enum Command: Sendable {
     case recover
     /// Bring off-screen tiles back on screen before the runtime exits.
     case release
+    /// Forget every saved strip, in this session and on disk.
+    case clearPositions
 }
 
 public enum PointerInput: Sendable {

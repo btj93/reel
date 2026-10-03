@@ -47,7 +47,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
         }
         pass.effects.append(.reply(id: requestID, payload: .snapshots(snapshots)))
     case .pointer(let input, let token): world.onPointer(input, token: token, group: id, &pass)
-    case .spaceWillChange: world.beginSpaceChange(group: id, &pass)
+    case .spaceWillChange: world.onSpaceWillChange(group: id, &pass)
     case .spaceChanged(let key, let epoch, let windows): world.onSpaceChanged(key: key, epoch: epoch, windows: windows, group: id, &pass)
     case .frameCompleted(let tile, let revision, let result): world.onFrameCompleted(tile, revision: revision, result: result, &pass)
     case .timer(let token): world.onTimer(token, group: id, &pass)
@@ -200,7 +200,7 @@ extension World {
             guard let known = groups[id]!.windows[window.id] else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
             guard known != window else { continue }
-            if shouldFloat(known, config: config), !shouldFloat(window, config: config), groups[id]!.floating.contains(window.id) {
+            if joinsStrip(was: known, now: window, config: config), groups[id]!.floating.contains(window.id) {
                 guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
                 focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass)
             }
@@ -210,7 +210,10 @@ extension World {
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
-            if known != window { spaces.live[key] = refreshing(window, in: saved); pass.persist = true }
+            let floated = saved.floating.contains { $0.id == window.id }
+            guard known != window, !(floated && joinsStrip(was: known, now: window, config: config)) else { continue }
+            spaces.live[key] = refreshing(window, in: saved)
+            pass.persist = true
         }
         if mismatched { pass.effects.append(.log("window identity changed tile=\(window.id.rawValue)")) }
     }
@@ -228,11 +231,8 @@ extension World {
         if group.space?.isEmpty == true { group.phase = .settled(.fingerprint([window.id.rawValue])) }
         group.windows[window.id] = window
         group.hidden.removeValue(forKey: window.id)
-        if let returning {
-            if let column = returning.column { group.strip.restoreColumn(column, at: group.placeInStrip(returning.place), time: pass.now) }
-            else if shouldFloat(returning.window, config: config), !shouldFloat(window, config: config) { group.strip.insertTile(window.id, at: pass.now) }
-            else { group.floating.insert(window.id) }
-        } else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
+        if let returning { group.putBack(window, from: returning, config: config, at: pass.now) }
+        else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
         groups[id] = group
         pass.layout.insert(id)
@@ -242,16 +242,19 @@ extension World {
         if case .gesture(let session) = pointer, session.scope.group == id { cancelPointer(&pass) }
     }
 
-    private mutating func prune(_ ids: Set<UInt32>, from stashes: [GroupSpace: Snapshot]) {
-        for (key, saved) in stashes where !saved.fingerprint.isDisjoint(with: ids) {
-            let pruned = removing(ids, from: saved)
-            spaces.live[key] = pruned.windows.isEmpty ? nil : pruned
+    private mutating func prune(_ ids: Set<UInt32>, from stashes: [GroupSpace: Snapshot], hiddenOnly: Bool = false) {
+        for (key, saved) in stashes {
+            let gone = hiddenOnly ? ids.subtracting(saved.fingerprint) : ids
+            guard !saved.fingerprint.isDisjoint(with: gone) || saved.hidden.contains(where: { gone.contains($0.window.id.rawValue) }) else { continue }
+            let pruned = removing(gone, from: saved)
+            spaces.live[key] = pruned.isEmpty ? nil : pruned
         }
     }
 
     /// Disk entries keep closed ids: after a reboot an id can name another window, and restore skips absent ones anyway.
     fileprivate mutating func remove(_ tile: TileID, from id: UInt32, _ pass: inout Pass) {
         prune([tile.rawValue], from: spaces.live)
+        for group in groups.keys { groups[group]!.hidden[tile] = nil }
         guard groups[id]?.windows[tile] != nil else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
         if pointer.tile == tile { cancelPointer(&pass) }
@@ -274,6 +277,8 @@ extension World {
             return .accepted
         case .recover:
             return recover(group: id, &pass)
+        case .clearPositions:
+            return clearPositions(&pass)
         default:
             break
         }
@@ -339,8 +344,8 @@ extension World {
             guard group.windows[tile] != nil else { return .unknownWindow(tile) }
             pass.effects.append(.close(tile))
             return .accepted
-        case .recover, .release:
-            preconditionFailure("run handles recover and release")
+        case .recover, .release, .clearPositions:
+            preconditionFailure("run handles recover, release and clearPositions")
         }
         if recenter, !group.strip.columns.isEmpty {
             if case .gesture = group.strip.viewOffset {} else {
@@ -388,7 +393,7 @@ extension World {
             case .toggleFullWidth: targeted = .toggleFullWidth(session.tile)
             case .close: targeted = .close(session.tile)
             case .focus: targeted = .focus(session.tile)
-            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release: return
+            case .focusLeft, .focusRight, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release, .clearPositions: return
             }
             _ = run(targeted, source: .click, group: id, &pass)
         case .dropReorder(let requested):
@@ -461,10 +466,22 @@ extension World {
         guard var group = groups[id] else { return }
         for tile in group.windows.keys.ordered() { invalidate(tile, &pass) }
         if group.phase.awaitsTeardown, let key = group.phase.key {
-            // A pending re-read keeps its settle clock but no longer holds: focus from here on is an echo.
+            // A pending re-read no longer holds: focus from here on is an echo.
             group.phase = .changing(from: key, deferred: group.phase.deferred.map { DeferredCensus(key: $0.key, since: $0.since) })
+            // A Dock click counts from the first notification of a change, not the last one of a storm.
+            if case .crossing(_, let time, let previous) = group.focus, pass.now - time > EngineConfig.crossingTTL {
+                group.focus = previous.map(FocusState.resolved) ?? .none
+            }
         }
         groups[id] = group
+    }
+
+    /// A read confirms only a full settle after the last Space notification, so one taken mid-transition cannot ride
+    /// the clock of a re-read that was pending before it.
+    fileprivate mutating func onSpaceWillChange(group id: UInt32, _ pass: inout Pass) {
+        beginSpaceChange(group: id, &pass)
+        guard let group = groups[id], let deferred = group.phase.deferred else { return }
+        groups[id]!.phase = SpacePhase(space: group.space, deferred: DeferredCensus(key: deferred.key, since: pass.now))
     }
 
     fileprivate mutating func onSpaceChanged(key: SpaceKey, epoch: UInt64, windows observed: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
@@ -478,25 +495,21 @@ extension World {
             pass.effects.append(.log("census window dropped tile=\(window.id.rawValue)"))
         }
         let verdict = censusVerdict(windows, group: id)
-        let deferred = group.phase.deferred.flatMap { $0.key == key ? $0 : nil }
+        let deferred = group.phase.deferred.flatMap { $0.covers(key) ? $0 : nil }
         let settled = deferred.map { pass.now - $0.since >= EngineConfig.censusSettle } ?? false
-        // Under a Space id, a read that still lists another Space's windows a settle later commits. A census never
-        // prunes another Space's stash, so a stale one costs gaps that heal on the next visit.
-        // A fingerprint key is built from the read itself, so it cannot vouch for the read.
-        let confirmed = settled && key.isAuthoritative
         let ids = Set(windows.map { $0.id.rawValue })
         if key == group.space {
             let moved = stashedElsewhere(ids, group: id)
             // Nothing has left the screen, so the hold skips the teardown: swipes, timers and focus survive. Like any
             // deferral it still holds frames, refuses commands and new gestures, and drops windowAdded until the re-read.
             if key.isAuthoritative, !settled, !moved.isEmpty {
-                return deferCensus(key, since: deferred?.since, holds: group.phase.awaitsTeardown,
+                return deferCensus(DeferredCensus(key: key, since: deferred?.since ?? pass.now, holds: group.phase.awaitsTeardown),
                                    reason: "same-Space census lists windows stashed elsewhere", group: id, &pass)
             }
             groups[id]!.phase = .settled(key)
             if case .crossing(_, _, let previous) = group.focus { groups[id]!.focus = previous.map(FocusState.resolved) ?? .none }
-            if verdict == .trusted || (verdict == .mixed && (confirmed || moved.isEmpty)) {
-                let skipped = confirmed ? [] : moved
+            if verdict == .trusted || (verdict == .mixed && (settled || moved.isEmpty)) {
+                let skipped = settled ? [] : moved
                 for window in visualOrder(windows) where !skipped.contains(window.id.rawValue) { add(window, to: id, &pass) }
                 if !skipped.isEmpty { pass.effects.append(.log("same-Space census skipped windows stashed elsewhere")) }
             } else if !windows.isEmpty {
@@ -507,46 +520,55 @@ extension World {
             return
         }
         guard epoch > group.epoch else { return pass.effects.append(.log("stale space census ignored")) }
+        let reads = (deferred?.settledReads ?? 0) + (settled ? 1 : 0)
+        var target: (onto: SpaceKey?, prunes: Bool) = (key, false)
         switch verdict {
         case .trusted: break
         case .empty where group.windows.isEmpty || settled: break
-        case .mixed where confirmed: break
-        case .mixed where settled, .invalid where settled:
-            groups[id]!.phase = SpacePhase(space: group.space, deferred: nil)
-            pass.effects.append(.log("\(verdict) space census dropped after settle"))
-            pass.layout.insert(id)
-            return
+        case .mixed where settled && key.isAuthoritative: break
+        // A stale fingerprint read changes when it is read again.
+        case .mixed where settled && (deferred?.lastSettled == key || reads >= EngineConfig.censusReads):
+            target = commitTarget(ids, group: id)
         case .empty, .mixed, .invalid:
+            // A read that cannot commit leaves the group torn down, so nothing the health check adds lands on the
+            // Space it left.
             if group.phase.awaitsTeardown { beginSpaceChange(group: id, &pass) }
-            return deferCensus(key, since: deferred?.since, reason: "\(verdict) space census", group: id, &pass)
+            let census = DeferredCensus(key: key, since: settled ? pass.now : deferred?.since ?? pass.now,
+                                        settledReads: reads, lastSettled: settled ? key : deferred?.lastSettled)
+            return deferCensus(census, reason: "\(verdict) space census", group: id, &pass)
         }
-        commitSpace(key, epoch: epoch, windows: windows, group: id, &pass)
+        commitSpace(key, onto: target.onto, epoch: epoch, windows: windows, group: id, &pass)
+        // A fingerprint is matched by overlap, so a window that moved here must leave the Space it came from, or that
+        // Space's stash stops matching its own windows. A window on screen here is hidden nowhere else.
+        if target.prunes { prune(ids, from: otherSpaces(than: id)) }
+        else if verdict == .trusted || key.isAuthoritative { prune(ids, from: otherSpaces(than: id), hiddenOnly: true) }
     }
 
-    private mutating func deferCensus(_ key: SpaceKey, since: Double?, holds: Bool = false, reason: String, group id: UInt32,
-                                      _ pass: inout Pass) {
-        let since = since ?? pass.now
-        groups[id]!.phase = SpacePhase(space: groups[id]!.space, deferred: DeferredCensus(key: key, since: since, holds: holds))
+    private mutating func deferCensus(_ census: DeferredCensus, reason: String, group id: UInt32, _ pass: inout Pass) {
+        groups[id]!.phase = SpacePhase(space: groups[id]!.space, deferred: census)
         pass.effects.append(.log("\(reason) deferred"))
-        pass.effects.append(.requestCensus(group: id, after: since + EngineConfig.censusSettle - pass.now))
+        pass.effects.append(.requestCensus(group: id, after: census.since + EngineConfig.censusSettle - pass.now))
     }
 
-    private mutating func commitSpace(_ key: SpaceKey, epoch: UInt64, windows: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
+    /// `onto` names the saved strip to restore, by key or by overlap; nil restores none.
+    private mutating func commitSpace(_ key: SpaceKey, onto: SpaceKey?, epoch: UInt64, windows: [ObservedWindow],
+                                      group id: UInt32, _ pass: inout Pass) {
+        beginSpaceChange(group: id, &pass)
         let departing = groups[id]!
         stash(departing, id: id, time: pass.now)
-        beginSpaceChange(group: id, &pass)
-        let match = spaces.lookup(group: id, space: key, windows: windows)
+        let match = onto.flatMap { spaces.lookup(group: id, space: $0, windows: windows) }
         if let match { spaces.adopt(match, as: key) }
         let display = topology.groups.first { $0.id == id }!
+        let live = if case .live? = match?.source { true } else { false }
         let group = restoredGroup(display: display, config: config, key: key, epoch: epoch, windows: windows,
-                                  saved: match?.snapshot, time: pass.now)
+                                  saved: match?.snapshot, hidesMissing: live, time: pass.now)
         groups[id] = group
         var restore = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
         var source: FocusSource = .restore
         // Only an activation of an app with no window here is a Dock click across Spaces; a focus held for a hidden
         // window of an app that is still here is not.
-        if case .crossing(let intent, let time, _) = departing.focus, pass.now - time <= EngineConfig.crossingTTL,
-           intent.source == .appActivation, let pid = intent.pid, !departing.windows.values.contains(where: { $0.pid == pid }) {
+        if case .crossing(let intent, _, _) = departing.focus, intent.source == .appActivation, let pid = intent.pid,
+           !departing.windows.values.contains(where: { $0.pid == pid }) {
             let appWindows = windows.filter { $0.pid == pid }
             if let tile = intent.tile, appWindows.contains(where: { $0.id == tile }) { restore = tile; source = .appActivation }
             else if let tile = appWindows.map(\.id).ordered().first { restore = tile; source = .appActivation }
@@ -564,9 +586,28 @@ extension World {
     private func censusVerdict(_ windows: [ObservedWindow], group id: UInt32) -> CensusVerdict {
         guard Set(windows.map(\.id)).count == windows.count else { return .invalid }
         guard !windows.isEmpty else { return .empty }
-        var fingerprints = spaces.live.values.filter { $0.group == id }.map(\.fingerprint)
-        fingerprints.append(Set(groups[id]!.windows.keys.map(\.rawValue)))
+        let fingerprints = sessionSpaces(group: id).map(\.windows)
         return spansMultipleSpaces(onScreenIDs: Set(windows.map { $0.id.rawValue }), knownFingerprints: fingerprints) ? .mixed : .trusted
+    }
+
+    /// This group's Spaces of this session: every saved strip, and the current one as it stands.
+    private func sessionSpaces(group id: UInt32) -> [(space: SpaceKey, windows: Set<UInt32>)] {
+        var known = otherSpaces(than: id).filter { $0.key.group == id }.map { ($0.key.space, $0.value.fingerprint) }
+        if let here = groups[id]!.space { known.append((here, Set(groups[id]!.windows.keys.map(\.rawValue)))) }
+        return known
+    }
+
+    /// Windows that moved between two Spaces leave the one they came from partly listed, so a mixed read commits onto
+    /// the one Space of this session it lists whole, and only then prunes. Of several, the strip just left, else the
+    /// largest; of none, a fresh strip (nil). An ambiguous read deletes no saved strip.
+    private func commitTarget(_ ids: Set<UInt32>, group id: UInt32) -> (onto: SpaceKey?, prunes: Bool) {
+        let whole = sessionSpaces(group: id).filter { !$0.windows.isEmpty && $0.windows.isSubset(of: ids) }
+        if whole.count == 1 { return (whole[0].space, true) }
+        if let here = groups[id]!.space, whole.contains(where: { $0.space == here }) { return (here, false) }
+        let largest = whole.max {
+            $0.windows.count != $1.windows.count ? $0.windows.count < $1.windows.count : SpaceOrder(id, $1.space) < SpaceOrder(id, $0.space)
+        }
+        return (largest?.space, false)
     }
 
     /// Every live stash except this group's current Space, on any display.
@@ -670,6 +711,18 @@ extension World {
         return .accepted
     }
 
+    /// Forget every saved strip, on disk and in this session. No pending work may save one again: a Space change still
+    /// in progress would stash the departing strip, so it refuses, and a debounced focus would save the strip it moves,
+    /// so it is cancelled. The empty book goes out at once; the strips on screen are saved again at their next change.
+    private mutating func clearPositions(_ pass: inout Pass) -> CommandOutcome {
+        guard !groups.values.contains(where: \.phase.isChanging) else { return .refused("space change in progress") }
+        for id in groups.keys.sorted() { cancelTimers(group: id, &pass, focusOnly: true) }
+        spaces = SpaceBook()
+        pass.effects.append(.persist(spaces))
+        pass.effects.append(.log("positions cleared"))
+        return .accepted
+    }
+
     /// Hidden windows get their release frames again: the write at hide time may have failed.
     fileprivate mutating func release(group id: UInt32, _ pass: inout Pass) {
         let hidden = (groups[id]?.hidden ?? [:]).sorted { $0.key.rawValue < $1.key.rawValue }
@@ -681,6 +734,7 @@ extension World {
     /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them. Each one's
     /// column, or its floating, and its release frame are remembered.
     fileprivate mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
+        hideOnSavedStrips(Set(tiles).filter { groups[id]?.windows[$0] == nil }, at: pass.now)
         let writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
         for tile in tiles {
             guard let group = groups[id], let window = group.windows[tile] else { continue }
@@ -693,6 +747,18 @@ extension World {
                                                   frame: writes.first { $0.tile == tile }?.frame)
         }
         write(writes, group: id, &pass)
+    }
+
+    /// An app that hid while its windows were on another Space hid them there too: each keeps its place on that saved
+    /// strip, as an absent window does on return, so the strip is still listed whole when the rest comes back on screen.
+    private mutating func hideOnSavedStrips(_ tiles: Set<TileID>, at time: Double) {
+        for (key, saved) in spaces.live where saved.windows.contains(where: { tiles.contains($0.id) }) {
+            guard let display = topology.groups.first(where: { $0.id == key.group }) else { continue }
+            let rest = saved.windows.filter { !tiles.contains($0.id) }
+            let group = restoredGroup(display: display, config: config, key: key.space, epoch: 0, windows: rest, saved: saved,
+                                      hidesMissing: true, time: time)
+            spaces.live[key] = snapshot(group, id: key.group, time: time)
+        }
     }
 
     private mutating func write(_ writes: [(tile: TileID, pid: Int32, frame: AXRect)], group id: UInt32, _ pass: inout Pass) {
@@ -821,6 +887,12 @@ extension Sequence where Element == TileID {
 
 func shouldFloat(_ window: ObservedWindow, config: EngineConfig) -> Bool {
     config.rules.last(where: { window.bundleID == $0.bundleID })?.floating ?? window.floating
+}
+
+/// A window that floated only for its facts (it registered untitled) tiles once new facts say it tiles. One the user
+/// floated never had floating facts, so it stays.
+func joinsStrip(was old: ObservedWindow, now new: ObservedWindow, config: EngineConfig) -> Bool {
+    shouldFloat(old, config: config) && !shouldFloat(new, config: config)
 }
 
 private func distance(_ lhs: CGRect, _ rhs: CGRect) -> Double {

@@ -16,6 +16,9 @@ public struct EngineConfig: Sendable {
     public static let crossingTTL = 0.5
     public static let frameRetryDelay = 0.1
     public static let censusSettle = 0.5
+    /// A settled mixed fingerprint read commits once it repeats, or on this many settled reads after the last Space
+    /// notification.
+    public static let censusReads = 4
     public static let gestureQuiet = 0.3
     public static let flickVelocity = 50.0
     public static let defaultGap = 8.0
@@ -86,6 +89,15 @@ public struct DeferredCensus: Equatable, Sendable {
     public let since: Double
     /// Set only when a same-Space read deferred a group that had not been torn down.
     public var holds = false
+    /// Reads deferred a full settle after the last Space notification, and the last of them.
+    public var settledReads = 0
+    public var lastSettled: SpaceKey?
+
+    /// A fingerprint is built from the read, so every fingerprint read answers the one pending change; a Space id
+    /// answers only its own.
+    func covers(_ read: SpaceKey) -> Bool {
+        key == read || !(key.isAuthoritative || read.isAuthoritative)
+    }
 }
 
 public enum SpacePhase: Equatable, Sendable {
@@ -127,7 +139,7 @@ public enum SpacePhase: Equatable, Sendable {
         }
     }
 
-    var deferred: DeferredCensus? {
+    public var deferred: DeferredCensus? {
         switch self {
         case .unknown(let deferred), .changing(_, let deferred): deferred
         case .settled: nil
@@ -142,10 +154,9 @@ public struct GroupState: Sendable {
     public internal(set) var phase: SpacePhase = .unknown(deferred: nil)
     public internal(set) var epoch: UInt64 = 0
     public internal(set) var focus: FocusState = .none
-    /// Windows whose app hid, or that minimized, with the place they left. Dropped with the group on a Space change.
-    // ponytail: a window that closes while hidden keeps its entry until then (the observer reports no removal for an
-    // unmanaged window); prune on the observer's destroy if hidden-then-closed windows ever pile up.
-    var hidden: [TileID: HiddenTile] = [:]
+    /// Windows whose app hid, or that minimized, with the place they left. A Space change stashes them with the strip;
+    /// a close forgets them.
+    public internal(set) var hidden: [TileID: HiddenTile] = [:]
     public var space: SpaceKey? { phase.key }
 
     init(display: DisplayGroup, config: EngineConfig) {
@@ -156,6 +167,16 @@ public struct GroupState: Sendable {
     /// The place `window` left when it hid, if it is the same app's window coming back.
     func returning(_ window: ObservedWindow) -> HiddenTile? {
         hidden[window.id].flatMap { $0.window.hasSameOwner(as: window) ? $0 : nil }
+    }
+
+    /// A hidden window comes back to the place it left: its own column, or floating. One that floated only for its
+    /// facts tiles once they say it tiles.
+    mutating func putBack(_ window: ObservedWindow, from returning: HiddenTile, config: EngineConfig, at time: Double) {
+        hidden.removeValue(forKey: window.id)
+        windows[window.id] = window
+        if let column = returning.column { strip.restoreColumn(column, at: placeInStrip(returning.place), time: time) }
+        else if joinsStrip(was: returning.window, now: window, config: config) { strip.insertTile(window.id, at: time) }
+        else { floating.insert(window.id) }
     }
 
     /// A strip index as a place among the visible and hidden columns.
@@ -176,14 +197,33 @@ public struct GroupState: Sendable {
     }
 }
 
-/// A hidden window comes back as its own column, or floating when `column` is nil. `place` counts the other hidden
+/// A hidden window comes back as its own column, or floating when `width` is nil. `place` counts the other hidden
 /// columns too, so windows hidden one app at a time come back in their own order, whichever returns first. `frame` is
 /// the release frame computed when it hid (the write itself is dropped if Reel was paused); release writes it again.
-struct HiddenTile: Sendable {
-    let window: ObservedWindow
-    let column: Column?
-    let place: Int
-    let frame: AXRect?
+public struct HiddenTile: Codable, Sendable {
+    public let window: ObservedWindow
+    public let width: ColumnWidth?
+    public let presetIndex: Int?
+    public let isFullWidth: Bool
+    public let place: Int
+    public let frame: AXRect?
+
+    init(window: ObservedWindow, column: Column?, place: Int, frame: AXRect?) {
+        self.window = window
+        width = column?.width
+        presetIndex = column?.presetIndex
+        isFullWidth = column?.isFullWidth ?? false
+        self.place = place
+        self.frame = frame
+    }
+
+    var column: Column? {
+        width.map { Column(tiles: [window.id], width: $0, presetIndex: presetIndex, isFullWidth: isFullWidth) }
+    }
+
+    var isValid: Bool {
+        window.isValid && place >= 0 && (width?.isValid ?? true) && (presetIndex ?? 0) >= 0 && (frame?.rect.isFinite ?? true)
+    }
 }
 
 public enum ScheduledAction: Sendable {
@@ -218,6 +258,17 @@ public struct World: Sendable {
 
     public func scope(for group: UInt32) -> EventScope? {
         groups[group].map { EventScope(topologyRevision: topology.revision, group: group, spaceEpoch: $0.epoch) }
+    }
+
+    /// The strip on screen in `group`, as it would be stashed now.
+    public func currentSnapshot(group: UInt32) -> Snapshot? {
+        groups[group].flatMap { Engine.snapshot($0, id: group, time: time) }
+    }
+
+    /// Windows kept off the current strips, hidden or on a saved strip, so the Observer still hears them close.
+    public var trackedElsewhere: Set<UInt32> {
+        Set(groups.values.flatMap(\.hidden.keys).map(\.rawValue)
+            + spaces.live.values.flatMap { $0.fingerprint.union($0.hidden.map(\.window.id.rawValue)) })
     }
 
     /// The frame loop runs while any strip still animates.
@@ -260,6 +311,9 @@ public struct World: Sendable {
             if let focused = group.focus.decision?.tile, group.windows[focused] == nil { errors.append("stale focus") }
             if group.space == nil, !group.windows.isEmpty { errors.append("windows without a Space") }
             if group.hidden.keys.contains(where: { group.windows[$0] != nil }) { errors.append("hidden window managed") }
+            if let deferred = group.phase.deferred, !deferred.key.isAuthoritative, deferred.settledReads >= EngineConfig.censusReads {
+                errors.append("group \(id): fingerprint census deferred past \(EngineConfig.censusReads) settled reads")
+            }
         }
         if let owner = pointer.scope,
            scope(for: owner.group) != owner || pointer.tile.map({ groups[owner.group]?.windows[$0] == nil }) == true {
