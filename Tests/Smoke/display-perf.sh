@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=Tests/Smoke/lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# waitForSettle reads every group, so a sample ends only once every display has settled.
+AG='.groups[]'
 
 DRY="${SMOKE_DRY_RUN:-0}"
 SMOKE_TAG="$$"
