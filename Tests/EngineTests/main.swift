@@ -1297,6 +1297,7 @@ struct FuzzStream {
     var nextID: UInt32 = 200
     var priorScopes: [EventScope]
     var reached: [String: Int] = [:]
+    var hiddenWindows: [ObservedWindow] = []
 
     init(seed: UInt64) {
         rng = Random(state: seed)
@@ -1325,7 +1326,9 @@ struct FuzzStream {
         case 7:
             let actions: [Command] = [.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile)]
             h.send(.pointer(.menu(pick(actions)!)), group: id)
-        case 8: h.send(tile.rawValue % 2 == 0 ? .windowsHidden([tile]) : .windowRemoved(tile), group: id)
+        case 8:
+            if tile.rawValue % 2 == 0, let hidden = group.windows[tile] { hiddenWindows.append(hidden) }
+            h.send(tile.rawValue % 2 == 0 ? .windowsHidden([tile]) : .windowRemoved(tile), group: id)
         case 9:
             let stashed = pick(h.world.spaces.live.values.flatMap(\.windows).sorted { $0.id.rawValue < $1.id.rawValue })
             if rng.next(4) == 0, let known = rng.next(2) == 0 ? group.windows[tile] : stashed {
@@ -1334,6 +1337,13 @@ struct FuzzStream {
             }
             if rng.next(4) == 0, let stashed {
                 h.send(.windowAdded(stashed), group: id)
+                break
+            }
+            if rng.next(2) == 0, !hiddenWindows.isEmpty {
+                let hidden = hiddenWindows.remove(at: rng.next(hiddenWindows.count))
+                if rng.next(3) == 0 { h.send(.focus(FocusIntent(tile: hidden.id, pid: hidden.pid, source: rng.next(2) == 0 ? .appActivation : .axFocus)), group: id) }
+                h.send(.windowAdded(hidden), group: id)
+                reached["hidden return", default: 0] += 1
                 break
             }
             nextID += 1
@@ -1984,6 +1994,15 @@ struct FuzzStream {
             apart.send(.windowsHidden([tile])).lazy.compactMap { if case .setFrame(let request) = $0, request.tile == tile { request.frame.rect.origin } else { nil } }.first
         }
         check(origins.count == 2 && origins[0] != origins[1], "two hides in a row cascade from where the first stopped")
+        var failed = Harness()
+        failed.census(10, (1...6).map { window($0, app: 7) })
+        failed.send(.command(.focus(TileID(1)), .keyboard), advance: 1)
+        let off = failed.world.groups[1]!.strip.columns.compactMap(\.activeTile).last!
+        let hide = failed.send(.windowsHidden([off])).compactMap { if case .setFrame(let request) = $0, request.tile == off { request } else { nil } }.first
+        guard let hide else { return check(false, "hide writes a release frame") }
+        failed.send(.frameCompleted(tile: off, revision: hide.revision, result: .failed), advance: 1)
+        let quit = failed.send(.command(.release, .ipc)).compactMap { if case .setFrame(let request) = $0, request.tile == off { request.frame } else { nil } }
+        check(quit == [hide.frame], "quitting writes a hidden window's release frame again, so a failed hide write cannot strand it")
     }
     section("R3 floating: a window that registered with no title joins the strip once its title arrives") {
         var h = Harness()
@@ -2041,7 +2060,7 @@ struct FuzzStream {
         check(deferred.world.check().isEmpty, "refused join invariants")
     }
     section("R3 hide: an unhidden app's windows come back as the user left them, without taking focus") {
-        func hidden() -> Harness {
+        func hidden(hide: Bool = true) -> Harness {
             var h = Harness()
             h.census(10, [window(1, app: 5), window(2, app: 7), window(3, app: 7), window(4, app: 9)])
             h.send(.command(.focus(TileID(2)), .keyboard))
@@ -2050,7 +2069,7 @@ struct FuzzStream {
             h.send(.command(.toggleFloating(TileID(3)), .keyboard))
             h.send(.command(.setWidth(TileID(4), 200), .keyboard))
             h.send(.command(.focus(TileID(1)), .keyboard), advance: 1)
-            h.send(.windowsHidden([TileID(2), TileID(3)]), advance: 1)
+            if hide { h.send(.windowsHidden([TileID(2), TileID(3)]), advance: 1) }
             return h
         }
         func focuses(_ effects: [Effect]) -> [String] {
@@ -2072,11 +2091,13 @@ struct FuzzStream {
         check(shown.world.frames[TileID(1)]?.frame == frame, "the view does not move")
         check(shown.world.groups[1]!.floating == [TileID(3)], "the floated window floats again")
         let columns = shown.world.groups[1]!.strip.columns
-        check(columns[1].isFullWidth && columns[1].presetIndex == 0 && columns[2].width == .fixed(200), "full width, presets and widths survive")
+        let width = hidden(hide: false).world.groups[1]!.strip.columns[1].width
+        check(columns[1].isFullWidth && columns[1].presetIndex == 0 && columns[1].width == width && columns[2].width == .fixed(200),
+              "full width, presets and widths survive")
         check(shown.world.check().isEmpty, "unhide invariants")
         var activated = hidden()
         let crossing = activated.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .appActivation)))
-        let added = activated.send(.windowAdded(window(2, app: 7))) + activated.send(.windowAdded(window(3, app: 7)))
+        let added = activated.send(.windowAdded(window(3, app: 7))) + activated.send(.windowAdded(window(2, app: 7)))
         activated.advance(1)
         check(focuses(crossing + added) == ["focus 2 appActivation", "raise 2"], "only the activated window is focused: \(focuses(crossing + added))")
         check(activated.world.groups[1]!.focus.decision?.tile == TileID(2) && activated.active == TileID(2), "the activation decides focus")
@@ -2104,6 +2125,18 @@ struct FuzzStream {
             check(others.tiles == (1...5).map { TileID($0) } && others.active == TileID(5),
                   "Hide Others, then Show All in order \(order), puts every column back in its place: \(others.tiles.map(\.rawValue))")
         }
+        var lone = Harness()
+        lone.census(10, [window(1)])
+        lone.send(.windowsHidden([TileID(1)]))
+        lone.send(.windowAdded(window(1)))
+        check(lone.world.check().isEmpty && lone.active == TileID(1), "a lone window hidden and shown again: \(lone.world.check())")
+        var titled = Harness()
+        titled.census(10, [window(1), window(2), window(3, floating: true)])
+        titled.send(.windowsHidden([TileID(3)]))
+        titled.send(.windowChanged(window(3)))
+        titled.send(.windowAdded(window(3)))
+        check(titled.world.groups[1]!.floating.isEmpty && titled.tiles.contains(TileID(3)),
+              "a window that floated untitled and got its title while hidden tiles when it comes back")
         var merged = Harness(displays: [display(1), display(2, x: 1000)])
         merged.census(10, [window(1)], group: 1)
         merged.census(10, [window(3)], group: 2)
@@ -2112,6 +2145,32 @@ struct FuzzStream {
         merged.send(.topologyChanged(Topology(revision: 2, groups: [display(1)], primaryScreenHeight: 900)))
         check(merged.world.groups[1]!.windows[TileID(1)] != nil && merged.world.check().isEmpty,
               "a window hidden on one display and shown on another forgets its hidden place when the displays merge")
+    }
+    section("R3 hide: a window focused before it comes back takes focus when it does") {
+        for source in [FocusSource.axFocus, .appActivation] {
+            for focusFirst in [true, false] {
+                var h = Harness()
+                h.census(10, [window(1), window(2, app: 7), window(3, app: 7), window(4), window(5), window(6)])
+                h.send(.command(.focus(TileID(3)), .keyboard), advance: 1)
+                h.send(.windowsHidden([TileID(2)]), advance: 1)
+                h.send(.command(.focus(TileID(6)), .keyboard), advance: 1)
+                h.send(.focus(FocusIntent(tile: TileID(6), pid: 6, source: .axFocus)), advance: 1)
+                if focusFirst { h.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: source))) }
+                h.send(.windowAdded(window(2, app: 7)))
+                if !focusFirst { h.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: source))) }
+                h.advance(1)
+                let area = h.world.topology.groups[0].frame
+                let onScreen = h.world.frames[TileID(2)].map { area.intersection($0.frame.rect).width > 100 } ?? false
+                check(h.world.groups[1]!.focus.decision?.tile == TileID(2) && h.active == TileID(2) && onScreen,
+                      "\(source) focusFirst=\(focusFirst): the returned window is focused and on screen")
+            }
+        }
+        var minimized = Harness()
+        minimized.census(10, [window(1), window(2), window(3)])
+        minimized.send(.windowsHidden([TileID(2)]), advance: 1)
+        minimized.send(.focus(FocusIntent(tile: TileID(2), pid: 2, source: .axFocus)))
+        minimized.send(.windowAdded(window(2)))
+        check(minimized.world.groups[1]!.focus.decision?.tile == TileID(2), "a focus report before the window is restored lands")
     }
     section("R3 bounce: focus between columns moves the view without overshoot") {
         var h = Harness(animate: true)
@@ -2173,7 +2232,7 @@ struct FuzzStream {
             check(violations.isEmpty, "seed=\(seed) step=\(step): \(violations)")
             if !violations.isEmpty { break }
         }
-        let states = ["fingerprint key", "dock crossing", "multi-column restore", "group added or removed",
+        let states = ["hidden return", "fingerprint key", "dock crossing", "multi-column restore", "group added or removed",
                       "empty fingerprint key", "census window dropped"]
         print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
