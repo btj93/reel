@@ -159,12 +159,17 @@ public final class Loop {
         if !world.needsTicks && !indicator.isAnimating { frameLoop.pause() }
     }
 
+    /// A new working area or primary display. The census adopts windows into a group that just appeared (the first
+    /// display after a headless start), and recover rewrites every frame for the new area.
     private func screensChanged() {
         let next = Self.readTopology(revision: world.topology.revision + 1)
-        guard let id = next.groups.first?.id, next.groups.first?.frame != world.topology.groups.first?.frame || id != group else { return }
+        let id = next.groups.first?.id ?? 0
+        guard next.groups.first?.frame != world.topology.groups.first?.frame || id != group else { return }
         log("loop: topology rev=\(next.revision) group=\(id) area=\(next.groups.first?.frame ?? .zero)")
-        send(.topologyChanged(next))
+        let scope = world.scope(for: group) ?? EventScope(topologyRevision: world.topology.revision, group: group, spaceEpoch: 0)
+        reduceAndRun(Event(scope: scope, kind: .topologyChanged(next)))
         group = id
+        census(group: id)
         send(.command(.recover, .ipc))
     }
 
