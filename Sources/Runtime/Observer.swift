@@ -53,13 +53,16 @@ public struct SizeCache {
 
     public init() {}
 
-    /// Write `frame` and return the result with the frame the app kept, when known.
+    /// Write `frame` and return the result with the frame the app kept, when known. Only the read-back's size is
+    /// taken: an app clamps sizes, and a different origin is more likely the user dragging mid-write.
     public mutating func write(_ frame: CGRect, to window: AXWindow) -> (result: FrameResult, landed: CGRect?) {
         let id = window.windowID
         let kept = sizes[id].flatMap { $0.asked == frame.size ? $0.kept : nil }
         switch kept == nil ? window.setFrame(frame) : window.setPosition(frame.origin) {
         case .success:
-            let landed = if let kept { CGRect(origin: frame.origin, size: kept) } else { try? window.getFrame().get() }
+            let landed = if let kept { CGRect(origin: frame.origin, size: kept) } else {
+                (try? window.getFrame().get()).map { CGRect(origin: frame.origin, size: $0.size) }
+            }
             sizes[id] = (frame.size, landed?.size ?? frame.size)
             return (.applied, landed)
         case .failure(let error):
@@ -68,13 +71,16 @@ public struct SizeCache {
         }
     }
 
-    /// Someone else sized the window, so the next write must set the size again, not just the position. Height
-    /// is the app's, and a width within the ledger's slop is rounding.
+    /// Someone else sized the window, so the next write must set the size again, not just the position. A size within
+    /// the ledger's slop of the one the app kept is rounding.
     public mutating func observed(_ id: CGWindowID, frame: CGRect) {
-        if let size = sizes[id], abs(size.kept.width - frame.width) > EchoLedger.slop { sizes[id] = nil }
+        guard let kept = sizes[id]?.kept else { return }
+        if abs(kept.width - frame.width) > EchoLedger.slop || abs(kept.height - frame.height) > EchoLedger.slop { sizes[id] = nil }
     }
 
     public mutating func forget(_ id: CGWindowID) { sizes[id] = nil }
+
+    public mutating func forgetAll() { sizes = [:] }
 }
 
 /// One app's AX state. `windows` and every AX call live on the app's `AXApp` thread; the main loop only queues work.
@@ -87,6 +93,8 @@ final class AppWorker: @unchecked Sendable {
     private let lock = NSLock()
     private var queuedFrames: [TileID: (revision: UInt64, frame: CGRect)] = [:]
     private var drainQueued = false
+    private var forgetSizesQueued = false
+    private var rediscoveryQueued = false
 
     var pid: Int32 { app.pid }
 
@@ -104,6 +112,29 @@ final class AppWorker: @unchecked Sendable {
     func stop() { app.stopObserving() }
 
     private func post(_ observation: Observation) { send(observation, clock.current) }
+
+    /// Look again for windows the app did not list at registration (it was busy), and retry an app-level subscription
+    /// that failed then. At most one request waits on the app thread, so a hung app does not pile them up.
+    func rediscover() {
+        let first = lock.withLock { () -> Bool in
+            defer { rediscoveryQueued = true }
+            return !rediscoveryQueued
+        }
+        guard first else { return }
+        let queued = app.perform { [self] in
+            lock.withLock { rediscoveryQueued = false }
+            app.retryAppSubscriptions()
+            let fresh = getAppWindows(pid: pid).filter { windowID(for: $0).map { windows[$0] == nil } ?? false }
+            post(.discovered(pid: pid, fresh.compactMap(register)))
+        }
+        if !queued { lock.withLock { rediscoveryQueued = false } }
+    }
+
+    /// The next drain writes every size in full: nothing can tell the cache what changed while no one was listening.
+    /// A flag read by the drain, not queued work, so a drain already queued with the recover's frames still sees it.
+    func forgetSizes() {
+        lock.withLock { forgetSizesQueued = true }
+    }
 
     /// Coalesced per window: a write still queued when the next one arrives is replaced, never run late.
     func write(_ tile: TileID, revision: UInt64, frame: CGRect) {
@@ -137,7 +168,10 @@ final class AppWorker: @unchecked Sendable {
     }
 
     func reportFocus(activation: Bool) {
-        app.perform { [self] in post(.focused(pid: pid, app.focusedWindowID(), activation: activation)) }
+        app.perform { [self] in
+            let stamp = clock.current
+            send(.focused(pid: pid, app.focusedWindowID(), activation: activation), stamp)
+        }
     }
 
     private func drain() {
@@ -145,7 +179,10 @@ final class AppWorker: @unchecked Sendable {
         let batch = queuedFrames.sorted { $0.key.rawValue < $1.key.rawValue }
         queuedFrames = [:]
         drainQueued = false
+        let forget = forgetSizesQueued
+        forgetSizesQueued = false
         lock.unlock()
+        if forget { sizes.forgetAll() }
         for (tile, write) in batch {
             let id = CGWindowID(tile.rawValue)
             guard let window = windows[id] else {
@@ -157,7 +194,10 @@ final class AppWorker: @unchecked Sendable {
         }
     }
 
+    /// Stamped before any AX read, so an observation that straddles a Space change carries the scope it began under.
     private func handle(_ name: String, _ element: AXUIElement) {
+        let stamp = clock.current
+        func post(_ observation: Observation) { send(observation, stamp) }
         switch name {
         case kAXWindowCreatedNotification:
             if let facts = register(element) { post(.created(facts)) }
@@ -226,16 +266,19 @@ public final class Observer {
     private var healthTimer: Timer?
     private var awaitingDiscovery = Set<Int32>()
     private var onDiscovered: (() -> Void)?
+    /// On-screen windows their app classified `.ignore`, so the health check does not ask about them every pass.
+    private var ignored = Set<CGWindowID>()
     /// While paused, the engine hears only removals; the registry still tracks everything for the resume census.
-    var paused = false
+    private let paused: () -> Bool
 
     public static let healthInterval = 0.5
 
-    init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
+    init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
          emit: @escaping (Event.Kind, EventScope?) -> Void, log: @escaping (String) -> Void) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
+        self.paused = paused
         self.emit = emit
         self.log = log
     }
@@ -254,6 +297,8 @@ public final class Observer {
         observe(NSWorkspace.didActivateApplicationNotification) { [weak self] in
             self?.workers[$0.processIdentifier]?.reportFocus(activation: true)
         }
+        observe(NSWorkspace.didHideApplicationNotification) { [weak self] in self?.hide($0.processIdentifier) }
+        observe(NSWorkspace.didUnhideApplicationNotification) { [weak self] _ in self?.healthCheck() }
         onDiscovered = discovered
         for app in NSWorkspace.shared.runningApplications { register(app) }
         awaitingDiscovery = Set(workers.keys)
@@ -288,12 +333,25 @@ public final class Observer {
         for id in managed.sorted() where alive.contains(id) && !visible.contains(id) {
             known[id].flatMap { workers[$0.pid] }?.validate(id)
         }
-        guard !paused else { return }
-        // An app can turn regular after its launch notification; its first on-screen window registers it.
-        for pid in Set(onScreen.filter { $0.layer == 0 }.map(\.ownerPID)) where workers[pid] == nil {
-            NSRunningApplication(processIdentifier: pid).map(register)
+        ignored.formIntersection(visible)
+        guard !paused() else { return }
+        let unknown = onScreen.filter { $0.layer == 0 && known[$0.windowID] == nil && !ignored.contains($0.windowID) }
+        for pid in Set(unknown.map(\.ownerPID)).sorted() {
+            // An app can turn regular after its launch notification; its first on-screen window registers it. One that
+            // was busy when it registered lists its windows now.
+            if let worker = workers[pid] { worker.rediscover() } else { NSRunningApplication(processIdentifier: pid).map(register) }
         }
         for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window), nil) }
+    }
+
+    /// A hidden app's windows leave the strip but stay known, so the health check adds them back once they are on
+    /// screen again. A window that only orders out (closing to the Dock in some apps) stays until R4 can ask SkyLight
+    /// whether it is on another Space.
+    private func hide(_ pid: Int32) {
+        let managed = managed()
+        for id in known.values.filter({ $0.pid == pid }).map(\.id).sorted() where managed.contains(id) {
+            emit(.windowRemoved(TileID(id)), nil)
+        }
     }
 
     private func register(_ app: NSRunningApplication) {
@@ -334,7 +392,13 @@ public final class Observer {
     }
 
     private func learn(_ facts: WindowFacts) {
-        if facts.classification == .ignore { known.removeValue(forKey: facts.id) } else { known[facts.id] = facts }
+        if facts.classification == .ignore {
+            known.removeValue(forKey: facts.id)
+            ignored.insert(facts.id)
+        } else {
+            known[facts.id] = facts
+            ignored.remove(facts.id)
+        }
     }
 
     /// Facts that hold whatever the epoch (a window died, a write finished) go out under the current scope; what an
@@ -351,7 +415,7 @@ public final class Observer {
         case .created(let facts):
             learn(facts)
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
-            if !paused, facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed)) }
+            if !paused(), facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed)) }
         case .destroyed(let id):
             let wasManaged = managed().contains(id)
             forget(id)
@@ -361,15 +425,15 @@ public final class Observer {
             if managed().contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         case .restored(let facts):
             learn(facts)
-            if !paused, facts.classification != .ignore { emitObserved(.windowAdded(facts.observed)) }
+            if !paused(), facts.classification != .ignore { emitObserved(.windowAdded(facts.observed)) }
         case .retitled(let facts):
             learn(facts)
-            if !paused, facts.classification != .ignore { emit(.windowChanged(facts.observed), nil) }
+            if !paused(), facts.classification != .ignore { emit(.windowChanged(facts.observed), nil) }
         case .moved(let id, let frame):
-            guard !paused, stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
+            guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
         case .focused(let pid, let id, let activation):
-            guard !paused else { return }
+            guard !paused() else { return }
             emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus)))
         case .wrote(let tile, let revision, let frame, let landed, let result):
             executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)

@@ -275,14 +275,12 @@ extension World {
             guard !group.strip.columns.isEmpty else { return .refused("empty strip") }
             let delta = if case .focusLeft = command { -1 } else { 1 }
             let index = max(0, min(group.strip.columns.count - 1, group.strip.activeColumnIndex + delta))
-            // At the strip's edge the view stretches past it and springs back.
-            if index == group.strip.activeColumnIndex, config.animate, !pointer.isSwiping(group: id) {
-                group.strip.createRubberBandAnimation(direction: Double(delta), at: now)
-                groups[id] = group
-                pass.layout.insert(id)
-                return .accepted
-            }
             focus(FocusIntent(tile: group.strip.columns[index].activeTile, source: source), group: id, &pass)
+            // At the strip's edge the view stretches past it and springs back, from wherever the focus left it.
+            if index == group.strip.activeColumnIndex, config.animate, !pointer.isSwiping(group: id), var focused = groups[id] {
+                focused.strip.createRubberBandAnimation(direction: Double(delta), at: now)
+                groups[id] = focused
+            }
             return .accepted
         case .moveLeft, .moveRight:
             guard !group.strip.columns.isEmpty else { return .refused("empty strip") }
@@ -318,7 +316,7 @@ extension World {
             pass.effects.append(.close(tile))
             return .accepted
         case .recover, .release:
-            return .accepted
+            preconditionFailure("run handles recover and release")
         }
         if recenter, !group.strip.columns.isEmpty {
             if case .gesture = group.strip.viewOffset {} else {
@@ -643,18 +641,23 @@ extension World {
         return .accepted
     }
 
-    /// Off-screen tiles come back on screen at their own size, cascaded so none hides another completely.
+    /// Off-screen tiles come back on screen at their own size, cascaded so none hides another completely. Columns the
+    /// raise style lowered come back up to full height.
     fileprivate mutating func release(group id: UInt32, _ pass: inout Pass) {
         guard let group = groups[id], let scope = scope(for: id),
-              let area = topology.groups.first(where: { $0.id == id })?.frame else { return }
+              let display = topology.groups.first(where: { $0.id == id }) else { return }
+        let area = display.frame
         var step = 0.0
-        for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) where target.isOffScreen {
+        for target in computeTargetFrames(strip: group.strip, time: pass.now) where target.isOffScreen || config.raiseHeight > 0 {
             guard let pid = group.windows[target.tileID]?.pid else { continue }
-            let size = target.frame.size
-            let origin = CGPoint(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
-                                 y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)))
-            step += 30
-            let frame = AXRect(CGRect(origin: origin, size: size))
+            var frame = axRect(ViewportRect(target.frame), on: display)
+            if target.isOffScreen {
+                let size = target.frame.size
+                frame = AXRect(CGRect(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
+                                      y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)),
+                                      width: size.width, height: size.height))
+                step += 30
+            }
             let request = FrameRequest(tile: target.tileID, pid: pid, frame: frame, revision: nextRevision(), scope: scope)
             frames[target.tileID] = request
             pass.effects.append(.setFrame(request))

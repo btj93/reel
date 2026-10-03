@@ -47,10 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.ipc = ipc
     }
 
+    /// Later, not cancel: a cancel would also cancel a logout or restart that asked this app to quit.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let loop else { return .terminateNow }
         ipc?.stop()
-        loop?.quit()
-        return loop == nil ? .terminateNow : .terminateCancel
+        loop.quit { NSApp.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
     }
 }
 

@@ -71,6 +71,7 @@ public final class Loop {
         executor = Executor(worker: { [unowned self] in observer.workers[$0] }, log: logLine)
         observer = Observer(executor: executor, allowedPids: allowedPids,
                             managed: { [unowned self] in Set(world.groups[group]?.windows.keys.map(\.rawValue) ?? []) },
+                            paused: { [unowned self] in paused },
                             emit: { [unowned self] in send($0, stamp: $1) }, log: logLine)
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },
                               deliver: { [unowned self] in run($0) }, log: logLine)
@@ -81,6 +82,8 @@ public final class Loop {
     public func start() {
         logLine("loop: group=\(group) area=\(world.topology.groups.first?.frame ?? .zero) managedPids=\(allowedPids.map { $0.sorted().description } ?? "all")")
         observer.clock.current = world.scope(for: group)
+        // The defaults go live first, so a file the schema rejects leaves hotkeys working and the error in the menu bar.
+        apply(config)
         reloadConfig()
         frameLoop.start()
         screenToken = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
@@ -172,7 +175,7 @@ public final class Loop {
         // A config loaded while no display existed was dropped for want of a scope.
         send(.configChanged(config.engine))
         census(group: id)
-        send(.command(.recover, .ipc))
+        recover()
     }
 
     /// The primary display only; multi-display grouping arrives with R5.
@@ -195,6 +198,13 @@ public final class Loop {
     public var focusedTile: TileID? {
         guard let state = world.groups[group] else { return nil }
         return state.focus.decision?.tile ?? state.strip.activeColumn?.activeTile
+    }
+
+    /// Every frame written again in full, over whatever moved while nothing was listening.
+    @discardableResult
+    public func recover() -> CommandOutcome {
+        observer.workers.values.forEach { $0.forgetSizes() }
+        return request(.recover)
     }
 
     /// Run a command as an IPC request and return the engine's answer.
@@ -225,7 +235,6 @@ public final class Loop {
     public func setPaused(_ value: Bool) {
         guard value != paused else { return }
         paused = value
-        observer.paused = value
         logLine("loop: paused=\(value)")
         if value {
             indicator.hide()
@@ -233,7 +242,7 @@ public final class Loop {
         } else {
             // Windows opened during the pause join, and every frame is written again over whatever moved meanwhile.
             observer.healthCheck()
-            send(.command(.recover, .ipc))
+            recover()
         }
         onChange?()
     }
@@ -291,13 +300,20 @@ public final class Loop {
         send(.configChanged(next.engine))
     }
 
-    /// Bring off-screen windows back, let each app thread finish its writes (at most a second), then exit.
-    public func quit() {
+    /// Bring off-screen windows back, let each app thread finish its writes (at most a second), then call `done` once.
+    /// GCD, not a Timer: AppKit waits for a terminate reply outside the default run-loop mode.
+    public func quit(then done: @escaping @MainActor () -> Void) {
         guard !quitting else { return }
         paused = false
         send(.command(.release, .ipc))
         quitting = true
         hotkeys.stop()
+        var finished = false
+        let finish = { @MainActor in
+            guard !finished else { return }
+            finished = true
+            done()
+        }
         // Queued behind the release writes on each app thread, and ahead of the stop.
         let drained = DispatchGroup()
         for worker in observer.workers.values {
@@ -305,8 +321,8 @@ public final class Loop {
             if !worker.app.perform({ drained.leave() }) { drained.leave() }
         }
         observer.stop()
-        drained.notify(queue: .main) { exit(0) }
-        Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { _ in exit(0) }
+        drained.notify(queue: .main) { MainActor.assumeIsolated { finish() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { finish() } }
     }
 
     // MARK: Focus indicator

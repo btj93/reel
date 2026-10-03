@@ -39,5 +39,5 @@ final class MenuBar: NSObject {
 
     @objc private func togglePause() { loop.setPaused(!loop.paused) }
     @objc private func reloadConfig() { loop.reloadConfig() }
-    @objc private func quit() { loop.quit() }
+    @objc private func quit() { NSApp.terminate(nil) }
 }

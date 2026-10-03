@@ -1520,32 +1520,17 @@ struct FuzzStream {
         }, "every action name is one the hotkey manager binds")
     }
     section("R3 config: the smoke harness's ReelNext file parses") {
-        let smoke = """
-        [layout]
-        gap = 64
-        snap = ["middle"]
-
-        [animation]
-        enabled = true
-        stiffness = 800
-        damping_ratio = 1.0
-        bounce_distance = 40
-        bounce_damping_ratio = 0.6
-
-        [keys]
-        focus_left = ""
-        focus_right = ""
-        move_left = ""
-        move_right = ""
-        cycle_width = ""
-        toggle_full_width = ""
-        toggle_floating = ""
-        close_window = ""
-
-        [indicator]
-        style = "none"
-        """
-        let config = try? AppConfig.parse(smoke)
+        // Written by lib.sh itself, so the harness and this check cannot drift apart.
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
+        let dir = NSTemporaryDirectory() + "reel-engine-tests-\(getpid())"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let bash = Process()
+        bash.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        bash.arguments = ["bash", "-c", "source \"$0/Tests/Smoke/lib.sh\" && write_test_config \"$1\" 64", root, dir]
+        bash.environment = ["BIN_REEL": ".build/debug/ReelNext", "PATH": environment["PATH"] ?? "/usr/bin:/bin"]
+        try? bash.run()
+        bash.waitUntilExit()
+        let config = (try? String(contentsOfFile: dir + "/config.toml", encoding: .utf8)).flatMap { try? AppConfig.parse($0) }
         check(config?.engine.gap == 64 && config?.keys.values.allSatisfy(\.isEmpty) == true && config?.indicator.style == IndicatorStyle.none,
               "Tests/Smoke/lib.sh write_test_config for ReelNext")
     }
@@ -1912,14 +1897,15 @@ struct FuzzStream {
         for _ in 0..<300 { h.send(.tick, advance: 0.02) }
         check(!h.world.needsTicks, "no ticks once the raise settled")
     }
-    section("R3 release: quitting levels a column the raise style lowered") {
+    section("R3 release: quitting gives back the height and place the raise style took") {
         var h = Harness()
         h.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
         h.census(10, [window(1), window(2)])
-        guard let active = h.world.frames[TileID(1)]?.frame.rect else { return check(false, "the active column is written") }
+        guard let raised = h.world.frames[TileID(1)]?.frame.rect else { return check(false, "the active column is written") }
         h.send(.command(.release, .ipc))
-        let lowered = h.requests.first { $0.tile == TileID(2) }?.frame.rect
-        check(lowered?.minY == active.minY && lowered?.height == active.height, "the lowered column comes back up at full height")
+        let released = Dictionary(uniqueKeysWithValues: h.requests.map { ($0.tile, $0.frame.rect) })
+        check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minY == raised.minY && released[$0]?.height == raised.height + 20 },
+              "every column comes back up at full height")
     }
     section("R3 lane 8: cycle, toggle full width, toggle back, toggle, cycle") {
         var h = Harness()

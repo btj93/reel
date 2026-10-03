@@ -44,6 +44,17 @@ func runRuntimeWriteTests() {
         assertEq(w.currentFrame, tiled, "the height is restored")
     }
 
+    section("recover after a missed notification writes the size again")
+    do {
+        let w = FakeAXWindow(windowID: 7, pid: 99001, frame: .zero)
+        var cache = SizeCache()
+        _ = cache.write(tiled, to: w)
+        w.currentFrame.size.height = 500
+        cache.forgetAll()
+        _ = cache.write(tiled, to: w)
+        assertEq(w.currentFrame, tiled, "the size is restored")
+    }
+
     section("a width change seen in a notification makes the next write set the size")
     do {
         let w = FakeAXWindow(windowID: 4, pid: 99001, frame: .zero)

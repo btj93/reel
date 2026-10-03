@@ -30,6 +30,8 @@ open class AXApp: @unchecked Sendable {
     /// `CFRunLoopRun`, so the thread self-terminates instead of blocking forever.
     private var stopRequested = false
     private var pendingWork: [@Sendable () -> Void] = []
+    /// App-level subscriptions that failed (a busy or just-launched app). Touched only where subscribing runs.
+    private var failedAppNotifications: [String] = []
 
     /// When set, notifications are handled here on the app thread instead of hopping to main with `onEvent`, so the
     /// handler can read the window's state where a hung app only stalls its own thread. Set before `startObserving`.
@@ -105,15 +107,22 @@ open class AXApp: @unchecked Sendable {
         t.start()
     }
 
-    private func subscribeToApp(_ observer: AXObserver) {
+    private func subscribeToApp(_ observer: AXObserver, _ notifications: [String] = appNotifications) {
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        for notification in Self.appNotifications {
+        failedAppNotifications = notifications.filter { notification in
             let addErr = AXObserverAddNotification(observer, appElement, notification as CFString, refcon)
             if addErr != .success {
                 print("[AXApp] app AXObserverAddNotification failed pid=\(pid) note=\(notification) err=\(addErr.rawValue)")
                 fflush(stdout)
             }
+            return addErr != .success
         }
+    }
+
+    /// Subscribe again to the app-level notifications that failed. Call on this app's thread (inside `perform`).
+    public func retryAppSubscriptions() {
+        guard !failedAppNotifications.isEmpty, let observer = lock.withLock({ self.observer }) else { return }
+        subscribeToApp(observer, failedAppNotifications)
     }
 
     /// Stop observing and tear down the thread.
@@ -160,10 +169,10 @@ open class AXApp: @unchecked Sendable {
             return
         }
         runLoop = rl
-        let queued = pendingWork
+        // Queued before unlocking, so a `perform` from another thread cannot run ahead of earlier work.
+        for work in pendingWork { CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode.rawValue, work) }
         pendingWork = []
         lock.unlock()
-        for work in queued { CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode.rawValue, work) }
 
         // Run the loop — blocks until stopped
         CFRunLoopRun()

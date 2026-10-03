@@ -1,3 +1,4 @@
+import AppKit
 import Core
 import Engine
 import Foundation
@@ -16,9 +17,10 @@ public final class IPCBridge {
         server.onCommand = { [weak self] command in
             MainActor.assumeIsolated { self?.handle(command) ?? ReelResponse(success: false, message: "shutting down") }
         }
-        server.onFlushed = { [weak self] command in
+        // Through AppKit, so the delegate stops this server and releases windows before the app exits.
+        server.onFlushed = { command in
             guard command == .quit else { return }
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.loop.quit() } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { NSApp.terminate(nil) } }
         }
     }
 
@@ -37,7 +39,7 @@ public final class IPCBridge {
         case .toggleFullWidth: return onFocused(Command.toggleFullWidth)
         case .toggleFloating: return onFocused(Command.toggleFloating)
         case .closeWindow: return onFocused(Command.close)
-        case .recover: return reply(loop.request(.recover))
+        case .recover: return reply(loop.recover())
         case .focusUp, .focusDown: return ReelResponse(success: false, message: "one display until R5")
         case .getLayouts, .listPositions, .clearPositions: return ReelResponse(success: false, message: "saved Spaces arrive with R4")
         case .listWindows: return json(listWindows())
