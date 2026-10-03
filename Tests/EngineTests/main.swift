@@ -1994,6 +1994,80 @@ struct FuzzStream {
         ruled.send(.windowChanged(window(2)))
         check(ruled.world.groups[1]!.floating.contains(TileID(2)), "a floating rule still floats it")
     }
+    section("R3 floating: a late title focuses the window it tiles, and a refused join retries") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.windowAdded(window(4, floating: true)))
+        h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .axFocus)), advance: 1)
+        h.advance(1)
+        h.send(.windowChanged(window(4)))
+        let focused = h.effects.contains { if case .focus(TileID(4), .adoption) = $0 { true } else { false } }
+        check(focused && h.active == TileID(4) && h.world.groups[1]!.focus.decision?.tile == TileID(4),
+              "the titled window is focused, and is the active column")
+        let area = h.world.topology.groups[0].frame
+        check(h.world.frames[TileID(4)].map { area.contains($0.frame.rect) } ?? false, "the titled window is on screen")
+        var clicked = Harness()
+        clicked.census(10, [window(1), window(2), window(3), window(4, floating: true)])
+        clicked.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .axFocus)), advance: 1)
+        clicked.send(.windowChanged(window(4)))
+        clicked.advance(1)
+        check(clicked.active == TileID(4) && clicked.world.groups[1]!.focus.decision?.tile == TileID(4),
+              "a click still pending when the title lands is dropped, as a new window drops it")
+        var deferred = Harness()
+        deferred.census(10, [window(1), window(2, floating: true)])
+        deferred.send(.spaceChanged(key: .skylight(11), epoch: deferred.world.groups[1]!.epoch + 1, windows: []))
+        deferred.send(.windowChanged(window(2)))
+        check(deferred.world.groups[1]!.floating == [TileID(2)], "a join refused mid Space change leaves the window floating")
+        deferred.census(10, [window(1), window(2)])
+        check(Set(deferred.tiles) == [TileID(1), TileID(2)] && deferred.world.groups[1]!.floating.isEmpty,
+              "the next census of the same facts joins it")
+        check(deferred.world.check().isEmpty, "refused join invariants")
+    }
+    section("R3 hide: an unhidden app's windows come back as the user left them, without taking focus") {
+        func hidden() -> Harness {
+            var h = Harness()
+            h.census(10, [window(1, app: 5), window(2, app: 7), window(3, app: 7), window(4, app: 9)])
+            h.send(.command(.toggleFullWidth(TileID(2)), .keyboard))
+            h.send(.command(.toggleFloating(TileID(3)), .keyboard))
+            h.send(.command(.setWidth(TileID(4), 200), .keyboard))
+            h.send(.command(.focus(TileID(1)), .keyboard), advance: 1)
+            h.send(.windowsHidden([TileID(2), TileID(3)]), advance: 1)
+            return h
+        }
+        func focuses(_ effects: [Effect]) -> [String] {
+            effects.compactMap {
+                switch $0 {
+                case .focus(let tile, let source): "focus \(tile.rawValue) \(source)"
+                case .raise(let tile): "raise \(tile.rawValue)"
+                default: nil
+                }
+            }
+        }
+        var shown = hidden()
+        let frame = shown.world.frames[TileID(1)]?.frame
+        let effects = shown.send(.windowAdded(window(2, app: 7))) + shown.send(.windowAdded(window(3, app: 7)))
+        shown.advance(1)
+        check(focuses(effects).isEmpty, "Show All focuses and raises nothing: \(focuses(effects))")
+        check(shown.world.groups[1]!.focus.decision?.tile == TileID(1) && shown.active == TileID(1), "focus stays where the user left it")
+        check(shown.tiles == [TileID(1), TileID(2), TileID(4)], "the column comes back in its place: \(shown.tiles)")
+        check(shown.world.frames[TileID(1)]?.frame == frame, "the view does not move")
+        check(shown.world.groups[1]!.floating == [TileID(3)], "the floated window floats again")
+        let columns = shown.world.groups[1]!.strip.columns
+        check(columns[1].isFullWidth && columns[2].width == .fixed(200), "full width and widths survive")
+        check(shown.world.check().isEmpty, "unhide invariants")
+        var activated = hidden()
+        let crossing = activated.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .appActivation)))
+        let added = activated.send(.windowAdded(window(2, app: 7))) + activated.send(.windowAdded(window(3, app: 7)))
+        activated.advance(1)
+        check(focuses(crossing + added) == ["focus 2 appActivation", "raise 2"], "only the activated window is focused: \(focuses(crossing + added))")
+        check(activated.world.groups[1]!.focus.decision?.tile == TileID(2) && activated.active == TileID(2), "the activation decides focus")
+        var late = hidden()
+        late.send(.windowAdded(window(2, app: 7)))
+        late.send(.windowAdded(window(3, app: 7)))
+        late.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .appActivation)))
+        late.advance(1)
+        check(late.world.groups[1]!.focus.decision?.tile == TileID(2), "an activation after the windows return decides focus too")
+    }
     section("R3 bounce: focus between columns moves the view without overshoot") {
         var h = Harness(animate: true)
         h.census(10, [window(1), window(2), window(3)])
