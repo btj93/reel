@@ -72,6 +72,10 @@ public final class Loop {
         executor = Executor(worker: { [unowned self] in observer.workers[$0] }, log: logLine)
         observer = Observer(executor: executor, allowedPids: allowedPids,
                             managed: { [unowned self] in Set(world.groups[group]?.windows.keys.map(\.rawValue) ?? []) },
+                            hidden: { [unowned self] in
+                                Set(world.groups.values.flatMap(\.hidden.keys).map(\.rawValue)
+                                    + world.spaces.live.values.flatMap(\.hidden).map(\.window.id.rawValue))
+                            },
                             paused: { [unowned self] in paused },
                             emit: { [unowned self] in send($0, stamp: $1) }, log: logLine)
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },

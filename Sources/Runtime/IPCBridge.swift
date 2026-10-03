@@ -106,8 +106,7 @@ public final class IPCBridge {
                            "spaceKey": saved.space.debugDescription, "windows": entries(saved)])
         }
         let session = world.spaces.live.filter { !current.contains($0.key) }.map(\.value)
-        let disk = world.spaces.disk.filter { world.spaces.lookupExact(group: $0.group, space: $0.space) == nil }
-        for (source, saved) in session.map({ ("session", $0) }) + disk.map({ ("disk", $0) }) {
+        for (source, saved) in session.map({ ("session", $0) }) + world.spaces.disk.map({ ("disk", $0) }) {
             spaces.append(["groupID": saved.group, "isActiveGroup": false, "isCurrentSpace": false, "source": source,
                            "spaceKey": saved.space.debugDescription, "windows": entries(saved)])
         }

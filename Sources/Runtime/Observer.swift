@@ -265,6 +265,8 @@ public final class Observer {
     private let emit: (Event.Kind, EventScope?) -> Void
     let clock = ScopeClock()
     private let managed: () -> Set<CGWindowID>
+    /// Windows the engine keeps a hidden place for, here or in a saved strip: not managed, but removed when they die.
+    private let hidden: () -> Set<CGWindowID>
     private let log: (String) -> Void
     private var tokens: [NSObjectProtocol] = []
     private var healthTimer: Timer?
@@ -277,11 +279,13 @@ public final class Observer {
 
     public static let healthInterval = 0.5
 
-    init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
+    init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
+         hidden: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
          emit: @escaping (Event.Kind, EventScope?) -> Void, log: @escaping (String) -> Void) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
+        self.hidden = hidden
         self.paused = paused
         self.emit = emit
         self.log = log
@@ -326,10 +330,10 @@ public final class Observer {
 
     /// Removals for windows that died without a notification, additions for on-screen windows the engine lacks.
     func healthCheck() {
-        let managed = managed()
-        guard let alive = existingWindows(managed.union(known.keys)) else { return log("observer: window list unavailable, health check skipped") }
+        let managed = managed(), tracked = managed.union(hidden())
+        guard let alive = existingWindows(tracked.union(known.keys)) else { return log("observer: window list unavailable, health check skipped") }
         for id in known.keys where !alive.contains(id) { forget(id) }
-        for id in managed.sorted() where !alive.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
+        for id in tracked.sorted() where !alive.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         let onScreen = getAllWindowInfo()
         let visible = Set(onScreen.map(\.windowID))
         // A managed window that is alive but on no Space at all was ordered out (some apps close to the Dock that
@@ -389,10 +393,10 @@ public final class Observer {
         guard let worker = workers.removeValue(forKey: pid) else { return }
         worker.stop()
         let gone = known.values.filter { $0.pid == pid }.map(\.id)
-        let managed = managed()
+        let tracked = managed().union(hidden())
         for id in gone.sorted() {
             forget(id)
-            if managed.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
+            if tracked.contains(id) { emit(.windowRemoved(TileID(id)), nil) }
         }
         log("observer: app exited pid=\(pid) windows=\(gone.count)")
     }
@@ -439,9 +443,9 @@ public final class Observer {
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
             if !paused(), facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed)) }
         case .destroyed(let id):
-            let wasManaged = managed().contains(id)
+            let tracked = managed().contains(id) || hidden().contains(id)
             forget(id)
-            if wasManaged { emit(.windowRemoved(TileID(id)), nil) }
+            if tracked { emit(.windowRemoved(TileID(id)), nil) }
         case .minimized(let id):
             known.removeValue(forKey: id)
             if managed().contains(id) { emit(.windowsHidden([TileID(id)]), nil) }

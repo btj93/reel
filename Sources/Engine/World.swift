@@ -148,9 +148,8 @@ public struct GroupState: Sendable {
     public internal(set) var phase: SpacePhase = .unknown(deferred: nil)
     public internal(set) var epoch: UInt64 = 0
     public internal(set) var focus: FocusState = .none
-    /// Windows whose app hid, or that minimized, with the place they left. A Space change stashes them with the strip.
-    // ponytail: a window that closes while hidden keeps its entry until then (the observer reports no removal for an
-    // unmanaged window); prune on the observer's destroy if hidden-then-closed windows ever pile up.
+    /// Windows whose app hid, or that minimized, with the place they left. A Space change stashes them with the strip;
+    /// a close forgets them.
     public internal(set) var hidden: [TileID: HiddenTile] = [:]
     public var space: SpaceKey? { phase.key }
 
@@ -260,7 +259,7 @@ public struct World: Sendable {
         groups[group].flatMap { Engine.snapshot($0, id: group, time: time) }
     }
 
-        /// The frame loop runs while any strip still animates.
+    /// The frame loop runs while any strip still animates.
     public var needsTicks: Bool {
         groups.values.contains { group in
             if case .static = group.strip.viewOffset {

@@ -51,9 +51,11 @@ public struct SpaceBook: Sendable {
         }
     }
 
+    /// A disk entry's Space id is never matched exactly: a reboot hands it to another Space. So one under a live key
+    /// is still written, and is only gone once a census adopts it.
+    // ponytail: a disk entry no Space ever matches is written back forever; cap entries per group if the file grows.
     public var persisted: [Snapshot] {
-        let pending = disk.filter { lookupExact(group: $0.group, space: $0.space) == nil }
-        return (Array(live.values) + pending).map { ($0, SpaceOrder($0.group, $0.space)) }.sorted { $0.1 < $1.1 }.map(\.0)
+        (Array(live.values) + disk).map { ($0, SpaceOrder($0.group, $0.space)) }.sorted { $0.1 < $1.1 }.map(\.0)
     }
 
     private func tolerantMatch(group: UInt32, windows: [ObservedWindow]) -> SpaceMatch? {

@@ -254,6 +254,7 @@ extension World {
     /// Disk entries keep closed ids: after a reboot an id can name another window, and restore skips absent ones anyway.
     fileprivate mutating func remove(_ tile: TileID, from id: UInt32, _ pass: inout Pass) {
         prune([tile.rawValue], from: spaces.live)
+        for group in groups.keys { groups[group]!.hidden[tile] = nil }
         guard groups[id]?.windows[tile] != nil else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
         if pointer.tile == tile { cancelPointer(&pass) }
@@ -465,7 +466,8 @@ extension World {
         guard var group = groups[id] else { return }
         for tile in group.windows.keys.ordered() { invalidate(tile, &pass) }
         if group.phase.awaitsTeardown, let key = group.phase.key {
-            // A pending re-read keeps its settle clock but no longer holds: focus from here on is an echo.
+            // A pending re-read no longer holds: focus from here on is an echo. A Space notification also restarts its
+            // settle clock (onSpaceWillChange); a deferred read keeps it.
             group.phase = .changing(from: key, deferred: group.phase.deferred.map { DeferredCensus(key: $0.key, since: $0.since) })
         }
         groups[id] = group
@@ -492,9 +494,6 @@ extension World {
         let verdict = censusVerdict(windows, group: id)
         let deferred = group.phase.deferred.flatMap { $0.covers(key) ? $0 : nil }
         let settled = deferred.map { pass.now - $0.since >= EngineConfig.censusSettle } ?? false
-        // A read that still lists another Space's windows a settle after the last notification commits. Under a Space
-        // id a census never prunes another Space's stash, so a stale one costs gaps that heal on the next visit.
-        let confirmed = settled
         let ids = Set(windows.map { $0.id.rawValue })
         if key == group.space {
             let moved = stashedElsewhere(ids, group: id)
@@ -506,8 +505,8 @@ extension World {
             }
             groups[id]!.phase = .settled(key)
             if case .crossing(_, _, let previous) = group.focus { groups[id]!.focus = previous.map(FocusState.resolved) ?? .none }
-            if verdict == .trusted || (verdict == .mixed && (confirmed || moved.isEmpty)) {
-                let skipped = confirmed ? [] : moved
+            if verdict == .trusted || (verdict == .mixed && (settled || moved.isEmpty)) {
+                let skipped = settled ? [] : moved
                 for window in visualOrder(windows) where !skipped.contains(window.id.rawValue) { add(window, to: id, &pass) }
                 if !skipped.isEmpty { pass.effects.append(.log("same-Space census skipped windows stashed elsewhere")) }
             } else if !windows.isEmpty {
@@ -521,7 +520,9 @@ extension World {
         switch verdict {
         case .trusted: break
         case .empty where group.windows.isEmpty || settled: break
-        case .mixed where confirmed: break
+        // A read still mixed a settle after the last notification commits under a Space id, which never prunes another
+        // Space's stash. A fingerprint read commits only onto a Space it matches: one that moved a window there.
+        case .mixed where settled && (key.isAuthoritative || spaces.lookup(group: id, space: key, windows: windows) != nil): break
         case .mixed where settled, .invalid where settled:
             groups[id]!.phase = SpacePhase(space: group.space, deferred: nil)
             pass.effects.append(.log("\(verdict) space census dropped after settle"))
@@ -531,10 +532,10 @@ extension World {
             if group.phase.awaitsTeardown { beginSpaceChange(group: id, &pass) }
             return deferCensus(key, since: deferred?.since, reason: "\(verdict) space census", group: id, &pass)
         }
-        commitSpace(key, epoch: epoch, windows: windows, group: id, &pass)
+        commitSpace(key, epoch: epoch, windows: windows, began: deferred?.since ?? pass.now, group: id, &pass)
         // A fingerprint is matched by overlap, so a window that moved here must leave the Space it came from, or that
-        // Space's stash stops matching its own windows.
-        if !key.isAuthoritative { prune(Set(windows.map { $0.id.rawValue }), from: otherSpaces(than: id)) }
+        // Space's stash stops matching its own windows. A window on every Space is in a trusted read, and stays.
+        if !key.isAuthoritative, verdict == .mixed { prune(ids, from: otherSpaces(than: id)) }
     }
 
     private mutating func deferCensus(_ key: SpaceKey, since: Double?, holds: Bool = false, reason: String, group id: UInt32,
@@ -545,7 +546,9 @@ extension World {
         pass.effects.append(.requestCensus(group: id, after: since + EngineConfig.censusSettle - pass.now))
     }
 
-    private mutating func commitSpace(_ key: SpaceKey, epoch: UInt64, windows: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
+    /// `began` is when the change was first read, so a deferred read still honors a Dock click made just before it.
+    private mutating func commitSpace(_ key: SpaceKey, epoch: UInt64, windows: [ObservedWindow], began: Double, group id: UInt32,
+                                      _ pass: inout Pass) {
         let departing = groups[id]!
         stash(departing, id: id, time: pass.now)
         beginSpaceChange(group: id, &pass)
@@ -559,7 +562,7 @@ extension World {
         var source: FocusSource = .restore
         // Only an activation of an app with no window here is a Dock click across Spaces; a focus held for a hidden
         // window of an app that is still here is not.
-        if case .crossing(let intent, let time, _) = departing.focus, pass.now - time <= EngineConfig.crossingTTL,
+        if case .crossing(let intent, let time, _) = departing.focus, began - time <= EngineConfig.crossingTTL,
            intent.source == .appActivation, let pid = intent.pid, !departing.windows.values.contains(where: { $0.pid == pid }) {
             let appWindows = windows.filter { $0.pid == pid }
             if let tile = intent.tile, appWindows.contains(where: { $0.id == tile }) { restore = tile; source = .appActivation }
