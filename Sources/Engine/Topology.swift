@@ -115,3 +115,111 @@ public struct Topology: Sendable {
             && displays.allSatisfy { $0.id != 0 && $0.frame.isFinite && $0.area.isFinite }
     }
 }
+
+extension World {
+    /// Content follows its display: to the group now holding it, else to the nearest group. A column goes by the display
+    /// it centers on; hidden and floating windows and saved strips by their group's own display. A group that gains or
+    /// loses a column is rebuilt from its arrivals in left-to-right order of where they came from; one that keeps exactly
+    /// its own columns only takes the new area. With no display left, every strip is saved until one returns.
+    mutating func onTopology(_ next: Topology, _ pass: inout Pass) {
+        guard next.revision > topology.revision, next.isValid else { return }
+        cancelPointer(&pass)
+        for id in groups.keys.sorted() { cancelTimers(group: id, &pass) }
+        for tile in frames.keys.ordered() { invalidate(tile, &pass) }
+        let previous = groups, before = topology
+        topology = next
+        func destination(_ display: UInt32) -> UInt32? {
+            if let group = next.group(of: display) { return group.id }
+            let frame = before.displays.first { $0.id == display }?.frame ?? .zero
+            return next.nearestGroup(to: CGPoint(x: frame.midX, y: frame.midY))?.id
+        }
+        var arrivals: [UInt32: [Arrival]] = [:]
+        for old in before.groups {
+            guard let state = previous[old.id] else { continue }
+            guard let home = destination(old.id) else {
+                stash(state, id: old.id, time: pass.now)
+                continue
+            }
+            // Its strip on screen moves with its windows, so its own saved copy would list them twice.
+            if next.group(id: old.id) == nil, let space = state.space { spaces.live[GroupSpace(group: old.id, space: space)] = nil }
+            var routed: [UInt32: [Column]] = [home: []]
+            for index in state.strip.columns.indices {
+                routed[destination(state.strip.regionForColumn(index, at: pass.now).displayID) ?? home, default: []]
+                    .append(state.strip.columns[index])
+            }
+            for (id, columns) in routed {
+                arrivals[id, default: []].append(Arrival(from: old.id, source: state, columns: columns, home: id == home))
+            }
+        }
+        groups = [:]
+        for display in next.groups {
+            let incoming = arrivals[display.id] ?? []
+            var group: GroupState
+            if let kept = previous[display.id], incoming.count == 1, incoming[0].from == display.id, incoming[0].home,
+               incoming[0].columns.count == kept.strip.columns.count {
+                group = kept
+                group.strip.groupArea = GroupState.area(for: display)
+                group.strip.recalculateWidths(at: pass.now)
+            } else {
+                group = rebuilt(display, kept: previous[display.id], from: incoming, at: pass.now)
+            }
+            if case .changing(let from, _) = group.phase { group.phase = .settled(from) }
+            group.focus = group.focus.decision.flatMap { group.windows[$0.tile] == nil ? nil : FocusState.resolved($0) } ?? .none
+            groups[display.id] = group
+            pass.layout.insert(display.id)
+        }
+        if let fallback = next.groups.first?.id {
+            for key in spaces.live.keys.sorted(by: { SpaceOrder($0.group, $0.space) < SpaceOrder($1.group, $1.space) })
+            where groups[key.group] == nil {
+                let saved = spaces.live.removeValue(forKey: key)!
+                let target = GroupSpace(group: destination(key.group) ?? fallback, space: key.space)
+                spaces.live[target] = saved.moved(to: target.group, after: spaces.live[target])
+            }
+        }
+        pass.persist = true
+    }
+
+    private func rebuilt(_ display: DisplayGroup, kept: GroupState?, from arrivals: [Arrival], at time: Double) -> GroupState {
+        var group = kept ?? GroupState(display: display, config: config)
+        if group.space == nil, let donor = arrivals.first(where: { $0.source.space != nil })?.source {
+            group.phase = donor.phase
+            group.epoch = donor.epoch
+            if kept == nil { group.focus = donor.focus }
+        }
+        let active = (kept ?? arrivals.first?.source)?.strip.activeColumn?.activeTile
+        group.strip = GroupState(display: display, config: config).strip
+        group.windows = [:]
+        group.floating = []
+        group.hidden = [:]
+        for arrival in arrivals {
+            let base = group.placeAmongHidden(group.strip.columns.count)
+            for column in arrival.columns {
+                group.strip.insertColumn(column, at: time, atIndex: group.strip.columns.count)
+                for tile in column.tiles { group.windows[tile] = arrival.source.windows[tile] }
+            }
+            guard arrival.home else { continue }
+            for tile in arrival.source.floating {
+                group.windows[tile] = arrival.source.windows[tile]
+                group.floating.insert(tile)
+            }
+            for (tile, hidden) in arrival.source.hidden { group.hidden[tile] = hidden.placed(at: hidden.place + base) }
+        }
+        guard !group.strip.columns.isEmpty else { return group }
+        if let index = [active, group.focus.decision?.tile].compactMap({ $0.flatMap(group.strip.columnIndex) }).first {
+            group.strip.activeColumnIndex = index
+        }
+        group.strip.recenter(animated: false, at: time)
+        group.strip.recalculateWidths(at: time)
+        group.strip.recenter(animated: false, at: time)
+        return group
+    }
+}
+
+/// What one old group hands a new one when the topology changes: some of its columns, and with `home` its hidden and
+/// floating windows too.
+struct Arrival {
+    let from: UInt32
+    let source: GroupState
+    let columns: [Column]
+    let home: Bool
+}

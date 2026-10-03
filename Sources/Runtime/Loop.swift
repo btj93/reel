@@ -193,7 +193,6 @@ public final class Loop {
         if !world.needsTicks && !indicator.isAnimating { frameLoop.pause() }
     }
 
-    /// Every group is read again for the new displays, and recover rewrites every frame for the new areas.
     private func topologyChanged(_ next: Topology) {
         sendGlobal(.topologyChanged(next))
         // A config loaded while no display existed was dropped for want of a scope.
@@ -220,7 +219,6 @@ public final class Loop {
         return everyGroup(.recover)
     }
 
-    /// Run a command in every group; the first refusal is the answer.
     @discardableResult
     private func everyGroup(_ command: Command) -> CommandOutcome {
         let outcomes = world.groups.keys.sorted().map { request(command, group: $0) }
