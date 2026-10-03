@@ -31,6 +31,9 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
     }
 
     var isValid: Bool { id.rawValue != 0 && pid > 0 && (initialFrame?.rect.isFinite ?? true) }
+
+    /// Bundle-less windows share no app identity, so they never match each other by app alone.
+    var knownBundleID: String? { bundleID?.isEmpty == false ? bundleID : nil }
 }
 
 public enum Command: Sendable {
@@ -81,7 +84,7 @@ public struct Event: Sendable {
 
         var isGlobal: Bool {
             switch self {
-            case .topologyChanged, .configChanged, .loadSnapshots: true
+            case .topologyChanged, .configChanged, .loadSnapshots, .query: true
             default: false
             }
         }

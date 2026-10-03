@@ -54,7 +54,7 @@ public struct Snapshot: Codable, Sendable {
         windows = columns.flatMap(\.windows) + floating
         fingerprint = Set(windows.map { $0.id.rawValue })
         identities = Set(windows.map(WindowIdentity.init))
-        bundles = Set(identities.map(\.bundleID))
+        bundles = Set(windows.compactMap(\.knownBundleID))
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -148,6 +148,18 @@ func removing(_ tile: TileID, from saved: Snapshot) -> Snapshot {
                     focusedTile: saved.focusedTile == tile ? nil : saved.focusedTile)
 }
 
+func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
+    func fresh(_ old: ObservedWindow) -> ObservedWindow {
+        old.id == window.id && old.pid == window.pid && old.bundleID == window.bundleID ? window : old
+    }
+    let columns = saved.columns.map {
+        SnapshotColumn(windows: $0.windows.map(fresh), width: $0.width, activeTileIndex: $0.activeTileIndex,
+                       snapIndex: $0.snapIndex, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
+    }
+    return Snapshot(group: saved.group, space: saved.space, columns: columns, floating: saved.floating.map(fresh),
+                    activeColumnIndex: saved.activeColumnIndex, offset: saved.offset, focusedTile: saved.focusedTile)
+}
+
 func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, epoch: UInt64, windows: [ObservedWindow],
                    saved: Snapshot?, time: Double) -> GroupState {
     var group = GroupState(display: display, config: config)
@@ -159,7 +171,7 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     let tiers: [(_ saved: ObservedWindow, _ live: ObservedWindow) -> Bool] = [
         { $0.id == $1.id && $0.bundleID == $1.bundleID },
         { WindowIdentity($0) == WindowIdentity($1) },
-        { $0.bundleID == $1.bundleID },
+        { $0.knownBundleID != nil && $0.knownBundleID == $1.knownBundleID },
     ]
     for matches in tiers {
         for old in saved?.windows ?? [] where mappedIDs[old.id] == nil {

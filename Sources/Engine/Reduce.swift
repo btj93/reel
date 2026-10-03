@@ -145,6 +145,11 @@ extension World {
 
     fileprivate mutating func onWindowAdded(_ window: ObservedWindow, group id: UInt32, _ pass: inout Pass) {
         let known = groups.values.contains { $0.windows[window.id] != nil }
+        if !known, spaces.live.values.contains(where: { $0.fingerprint.contains(window.id.rawValue) }) {
+            for (key, saved) in spaces.live { spaces.live[key] = refreshing(window, in: saved) }
+            pass.persist = true
+            return
+        }
         add(window, to: id, &pass)
         if !known { focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass) }
         pass.persist = true
@@ -154,12 +159,14 @@ extension World {
         guard window.isValid, var group = groups[id], case .settled = group.phase else { return }
         if let known = group.windows[window.id] {
             if known.pid == window.pid, known.bundleID == window.bundleID { groups[id]!.windows[window.id] = window }
+            else { pass.effects.append(.log("window identity changed tile=\(window.id.rawValue)")) }
             return
         }
         guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
-        endGesture(in: id, &pass)
+        cancelGesture(in: id, &pass)
         group = groups[id]!
+        if group.space?.isEmpty == true { group.phase = .settled(.fingerprint([window.id.rawValue])) }
         group.windows[window.id] = window
         if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
@@ -167,15 +174,22 @@ extension World {
         pass.layout.insert(id)
     }
 
-    private mutating func endGesture(in id: UInt32, _ pass: inout Pass) {
+    private mutating func cancelGesture(in id: UInt32, _ pass: inout Pass) {
         if case .gesture(let session) = pointer, session.scope.group == id { cancelPointer(&pass) }
     }
 
     fileprivate mutating func remove(_ tile: TileID, from id: UInt32, _ pass: inout Pass) {
+        for (key, saved) in spaces.live where saved.fingerprint.contains(tile.rawValue) {
+            let pruned = removing(tile, from: saved)
+            spaces.live[key] = pruned.windows.isEmpty ? nil : pruned
+        }
+        if spaces.disk.contains(where: { $0.fingerprint.contains(tile.rawValue) }) {
+            spaces.disk = spaces.disk.map { $0.fingerprint.contains(tile.rawValue) ? removing(tile, from: $0) : $0 }.filter { !$0.windows.isEmpty }
+        }
         guard groups[id]?.windows[tile] != nil else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
         if pointer.tile == tile { cancelPointer(&pass) }
-        endGesture(in: id, &pass)
+        cancelGesture(in: id, &pass)
         var group = groups[id]!
         group.strip.removeTile(tile, at: pass.now)
         group.windows.removeValue(forKey: tile)
@@ -183,10 +197,6 @@ extension World {
         if group.focus.decision?.tile == tile { group.focus = .none }
         groups[id] = group
         invalidate(tile, &pass)
-        for (key, saved) in spaces.live where saved.windows.contains(where: { $0.id == tile }) {
-            let pruned = removing(tile, from: saved)
-            spaces.live[key] = pruned.windows.isEmpty ? nil : pruned
-        }
         pass.layout.insert(id)
     }
 
@@ -384,8 +394,10 @@ extension World {
         if key == group.space {
             groups[id]!.phase = .settled(key)
             if case .crossing(_, _, let previous) = group.focus { groups[id]!.focus = previous.map(FocusState.resolved) ?? .none }
-            if verdict == .trusted, !listsOtherSpaces(windows, group: id) {
-                for window in visualOrder(windows) { add(window, to: id, &pass) }
+            if verdict == .trusted {
+                let elsewhere = stashedElsewhere(windows, group: id)
+                for window in visualOrder(windows) where !elsewhere.contains(window.id.rawValue) { add(window, to: id, &pass) }
+                if !elsewhere.isEmpty { pass.effects.append(.log("same-Space census skipped windows stashed elsewhere")) }
             } else if !windows.isEmpty {
                 pass.effects.append(.log("same-Space census not adopted"))
             }
@@ -394,21 +406,20 @@ extension World {
             return
         }
         guard epoch > group.epoch else { return pass.effects.append(.log("stale space census ignored")) }
-        let deferred = group.phase.deferred
+        let deferred = group.phase.deferred.flatMap { $0.key == key ? $0 : nil }
         let settled = deferred.map { pass.now - $0.since >= EngineConfig.censusSettle } ?? false
         switch verdict {
         case .trusted: break
-        case .empty where group.windows.isEmpty || (settled && deferred?.key == key): break
+        case .empty where group.windows.isEmpty || settled: break
         case .mixed where settled, .invalid where settled:
-            groups[id]!.phase = group.space.map(SpacePhase.settled) ?? .unknown(deferred: nil)
+            groups[id]!.phase = SpacePhase(space: group.space, deferred: nil)
             pass.effects.append(.log("\(verdict) space census dropped after settle"))
             pass.layout.insert(id)
             return
         case .empty, .mixed, .invalid:
             if case .settled = group.phase { beginSpaceChange(group: id, &pass) }
-            let since = deferred.flatMap { verdict != .empty || $0.key == key ? $0.since : nil } ?? pass.now
-            let pending = DeferredCensus(key: key, since: since)
-            groups[id]!.phase = groups[id]!.space.map { .changing(from: $0, deferred: pending) } ?? .unknown(deferred: pending)
+            let since = deferred?.since ?? pass.now
+            groups[id]!.phase = SpacePhase(space: groups[id]!.space, deferred: DeferredCensus(key: key, since: since))
             pass.effects.append(.log("\(verdict) space census deferred"))
             pass.effects.append(.requestCensus(group: id, after: since + EngineConfig.censusSettle - pass.now))
             return
@@ -451,10 +462,12 @@ extension World {
         return spansMultipleSpaces(onScreenIDs: Set(windows.map { $0.id.rawValue }), knownFingerprints: fingerprints) ? .mixed : .trusted
     }
 
-    private func listsOtherSpaces(_ windows: [ObservedWindow], group id: UInt32) -> Bool {
+    private func stashedElsewhere(_ windows: [ObservedWindow], group id: UInt32) -> Set<UInt32> {
         let group = groups[id]!
         let newcomers = Set(windows.lazy.filter { group.windows[$0.id] == nil }.map(\.id.rawValue))
-        return spaces.live.contains { $0.key.group == id && $0.key.space != group.space && !$0.value.fingerprint.isDisjoint(with: newcomers) }
+        return spaces.live.reduce(into: []) { found, entry in
+            if entry.key.group == id, entry.key.space != group.space { found.formUnion(entry.value.fingerprint.intersection(newcomers)) }
+        }
     }
 
     fileprivate mutating func onFrameCompleted(_ tile: TileID, revision: UInt64, result: FrameResult, _ pass: inout Pass) {

@@ -59,6 +59,14 @@ public enum SpacePhase: Equatable, Sendable {
         return false
     }
 
+    init(space: SpaceKey?, deferred: DeferredCensus?) {
+        switch (space, deferred) {
+        case (nil, _): self = .unknown(deferred: deferred)
+        case (let space?, nil): self = .settled(space)
+        case (let space?, let deferred?): self = .changing(from: space, deferred: deferred)
+        }
+    }
+
     var deferred: DeferredCensus? {
         switch self {
         case .unknown(let deferred), .changing(_, let deferred): deferred
