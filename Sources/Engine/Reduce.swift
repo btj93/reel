@@ -227,7 +227,7 @@ extension World {
         group.windows[window.id] = window
         group.hidden.removeValue(forKey: window.id)
         if let returning {
-            if let column = returning.column { group.strip.restoreColumn(column, at: returning.index, time: pass.now) }
+            if let column = returning.column { group.strip.restoreColumn(column, at: group.placeInStrip(returning.index), time: pass.now) }
             else { group.floating.insert(window.id) }
         } else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, at: pass.now) }
@@ -671,16 +671,15 @@ extension World {
     /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them. Each one's
     /// column, or its floating, is remembered for when it comes back.
     fileprivate mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
-        guard let group = groups[id] else { return }
         let writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
         for tile in tiles {
-            guard let window = group.windows[tile] else { continue }
+            guard let group = groups[id], let window = group.windows[tile] else { continue }
             let index = group.strip.columnIndex(of: tile)
             let column = index.map { group.strip.columns[$0] }.map {
                 Column(tiles: [tile], width: $0.width, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
             }
             remove(tile, from: id, &pass)
-            groups[id]!.hidden[tile] = HiddenTile(window: window, column: column, index: index ?? 0)
+            groups[id]!.hidden[tile] = HiddenTile(window: window, column: column, index: index.map(group.placeAmongHidden) ?? 0)
         }
         write(writes, group: id, &pass)
     }

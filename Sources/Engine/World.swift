@@ -158,13 +158,26 @@ public struct GroupState: Sendable {
         hidden[window.id].flatMap { $0.window.hasSameOwner(as: window) ? $0 : nil }
     }
 
+    /// A strip index as a place among the visible and hidden columns.
+    func placeAmongHidden(_ index: Int) -> Int {
+        hiddenPlaces.reduce(index) { place, hidden in hidden <= place ? place + 1 : place }
+    }
+
+    /// A place among the visible and hidden columns as a strip index.
+    func placeInStrip(_ place: Int) -> Int {
+        place - hiddenPlaces.filter { $0 < place }.count
+    }
+
+    private var hiddenPlaces: [Int] { hidden.values.filter { $0.column != nil }.map(\.index).sorted() }
+
     static func area(for display: DisplayGroup) -> GroupWorkingArea {
         let rect = CGRect(origin: .zero, size: display.frame.size)
         return GroupWorkingArea(regions: [DisplayRegion(displayID: 0, rect: rect)], referenceMidX: rect.midX)
     }
 }
 
-/// A hidden window comes back as its own column at `index`, or floating when `column` is nil.
+/// A hidden window comes back as its own column, or floating when `column` is nil. `index` counts the other hidden
+/// columns too, so windows hidden one app at a time come back in their own order, whichever returns first.
 struct HiddenTile: Sendable {
     let window: ObservedWindow
     let column: Column?
