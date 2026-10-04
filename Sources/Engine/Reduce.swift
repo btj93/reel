@@ -561,9 +561,8 @@ extension World {
         }
         let edge = swipe.edge != 0 ? swipe.edge : projected > bounds.upperBound ? 1 : projected < bounds.lowerBound ? -1 : 0
         if config.animate, edge != 0 {
-            let bounce = SpringParams(dampingRatio: config.bounceDampingRatio, stiffness: 600, epsilon: 0.5)
-            let kick = edge * max(abs(velocity), config.bounceDistance * 15)
-            strip.viewOffset = .animation(SpringAnimation(from: from, to: target, initialVelocity: kick, startTime: now, params: bounce))
+            let kick = edge * max(abs(velocity), strip.rubberBandKick)
+            strip.viewOffset = .animation(SpringAnimation(from: from, to: target, initialVelocity: kick, startTime: now, params: strip.rubberBandParams))
         } else {
             strip.viewOffset = config.animate && abs(target - from) >= 1
                 ? .animation(SpringAnimation(from: from, to: target, initialVelocity: velocity, startTime: now, params: strip.scrollSpringParams))
