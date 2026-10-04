@@ -1502,8 +1502,18 @@ struct FuzzStream {
         }
         let before = h.world.pointer
         let tail = h.tail
-        h.send(.pointer(input, session: token), group: route(input, id))
+        let target = route(input, id)
+        h.send(.pointer(input, session: token), group: target)
         let consumed = h.effects.contains { if case .consumeInput = $0 { true } else { false } }
+        if let before, before.token == token, before.scope.group == target, !consumed {
+            switch (before.phase, input) {
+            case (.titleArmed, .drag), (.titleArmed, .release), (.titleDragging(_, _, false), .drag), (.titleDragging(_, _, false), .release),
+                 (.reorderDragging(_, _, false), .drag), (.reorderDragging(_, _, false), .release),
+                 (.menuOpen, .drag), (.menuOpen, .release), (.menuOpen, .choose), (_, .cancel):
+                reached["a held button's input reached the app", default: 0] += 1
+            default: break
+            }
+        }
         if case .scroll = input, before?.press != nil, h.world.pointer?.token != before?.token { reached["a scroll ended a title-bar session", default: 0] += 1 }
         if consumed, before == nil, !tail, h.world.pointer == nil, !(input.isWheel) { reached["idle consumed a stray input", default: 0] += 1 }
         if case .scroll(let sample) = input, !sample.modifier, before == nil, !tail, consumed { reached["no-modifier scroll consumed", default: 0] += 1 }
@@ -3822,10 +3832,19 @@ struct FuzzStream {
         check(menu.press.tile == TileID(3), "the menu is for the pressed tile")
         h.send(.ipc(id: 1, command: .focus(TileID(1))))
         check(h.active == TileID(1) && h.overlay == .menu(menu), "focus moves and the menu stays")
+        h.send(.pointer(.drag(AXPoint(CGPoint(x: 600, y: 300)))))
+        check(h.consumed && h.overlay == .menu(menu), "a drag across the pills is swallowed")
         h.send(.pointer(.choose(.close(TileID(1)))))
+        check(h.consumed, "the choice is swallowed")
         check(h.effects.contains { if case .close(TileID(3)) = $0 { true } else { false } }, "close acts on the tile the menu opened for")
         check(!h.effects.contains { if case .close(TileID(1)) = $0 { true } else { false } }, "the focused tile stays")
         check(h.overlay == .hidden && h.world.pointer == nil, "the menu is gone")
+        h.openMenu(TileID(1))
+        h.send(.pointer(.release(AXPoint(.zero))))
+        check(h.consumed && h.world.pointer == nil, "a release off the pills closes the menu and is swallowed")
+        h.openMenu(TileID(1))
+        h.send(.pointer(.cancel))
+        check(h.consumed && h.world.pointer == nil, "Escape closes the menu and is swallowed")
     }
     section("eebb564: a press released before the long press is a click on the window") {
         var h = Harness()
@@ -3867,13 +3886,16 @@ struct FuzzStream {
             let origin = titleBar(TileID(1), in: h.world).point
             h.send(.pointer(.press(TileID(1), at: AXPoint(origin))))
             h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + EngineConfig.dragThreshold - 1, y: origin.y)))))
-            check(h.overlay == .hidden, "within the threshold nothing shows")
+            check(h.overlay == .hidden && h.consumed, "within the threshold nothing shows and the drag is swallowed")
             h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + 40, y: origin.y)))))
             if ready { h.send(.pointer(.overlayReady)) }
+            h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + 60, y: origin.y)))))
+            check(h.consumed, "a drag past the threshold is swallowed")
         }
         drag(&h, ready: false)
         guard case .reorder(let shown) = h.overlay, !shown.released else { return check(false, "the drag asks for the overlay") }
         h.send(.pointer(.release(AXPoint(.zero))))
+        check(h.consumed, "the release is swallowed")
         guard case .reorder(let waiting) = h.overlay else { return check(false, "a release before the overlay is ready waits") }
         check(waiting.session == shown.session && waiting.released, "a release before the overlay is ready waits for it")
         h.send(.pointer(.drop(3)))
@@ -3891,6 +3913,9 @@ struct FuzzStream {
         h.send(.pointer(.release(AXPoint(.zero))))
         h.advance(EngineConfig.dropDeadline + margin)
         check(h.overlay == .hidden && h.world.pointer == nil && h.logged("drop never came"), "a released drag whose drop never comes ends")
+        drag(&h, ready: true)
+        h.send(.pointer(.cancel))
+        check(h.consumed && h.overlay == .hidden && h.tiles == [TileID(2), TileID(3), TileID(1)], "Escape ends the drag, is swallowed and moves nothing")
         drag(&h, ready: true)
         h.send(.windowRemoved(TileID(2)))
         check(h.overlay == .hidden && h.world.pointer == nil, "a window leaving the strip ends the drag")
@@ -4088,6 +4113,7 @@ struct FuzzStream {
         check(stream.reached["window lost on a topology change", default: 0] == 0, "seed=\(seed) no topology change loses a window")
         check(stream.reached["idle consumed a stray input", default: 0] == 0, "seed=\(seed) an input no session took reaches the app")
         check(stream.reached["no-modifier scroll consumed", default: 0] == 0, "seed=\(seed) a scroll without the modifier reaches the app")
+        check(stream.reached["a held button's input reached the app", default: 0] == 0, "seed=\(seed) a session swallows every drag, release, choice and Escape of its button")
         check(stream.reached["a scroll ended a title-bar session", default: 0] == 0, "seed=\(seed) no scroll ends a title-bar session")
         check(stream.h.leakedTail == 0, "seed=\(seed) a released swipe's momentum is swallowed to its last sample: \(stream.h.leakedTail)")
         check(stream.h.rewoundFocus == 0, "seed=\(seed) a group's focusedAt never moves back: \(stream.h.rewoundFocus)")
