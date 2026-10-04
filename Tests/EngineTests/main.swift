@@ -42,6 +42,10 @@ let began = scroll(.began)
 let lift = scroll(.ended)
 func swipe(_ dx: Double) -> PointerInput { scroll(.changed, dx) }
 
+extension PointerInput {
+    var isWheel: Bool { if case .scroll(let sample) = self { sample.phase == .discrete } else { false } }
+}
+
 /// The middle of `tile`'s title bar.
 func titleBar(_ tile: TileID, in world: World) -> AXPoint {
     let frame = world.frames[tile]?.frame.rect ?? .zero
@@ -60,6 +64,7 @@ struct Harness {
     var effects: [Effect] = []
     var reduceTime: Duration = .zero
     var reduceCPU: Duration = .zero
+    var reduces = 0
     /// Restores that asked the OS for focus from a group other than the one commands acted on.
     var stolenFocus = 0
     /// Events after which a group's `focusedAt` moved back.
@@ -95,6 +100,7 @@ struct Harness {
         let leader = world.activeGroup
         let focusedAt = world.groups.mapValues(\.focusedAt)
         effects = reduce(&world, event, now: time)
+        reduces += 1
         for case .overlay(let shown) in effects { overlay = shown }
         if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
         if event.scope.group != leader, effects.contains(where: { if case .focus(_, .restore) = $0 { true } else { false } }) { stolenFocus += 1 }
@@ -1418,10 +1424,80 @@ struct FuzzStream {
         ]
         let next = topology(h.world.topology.revision + 1, pick(layouts)!, separateSpaces: rng.next(2) == 0)
         let known = h.world.knownWindows
+        if h.world.pointer != nil { reached["session ended by a topology change", default: 0] += 1 }
         h.send(.topologyChanged(next), scope: EventScope(topologyRevision: h.world.topology.revision, group: 0, spaceEpoch: 0))
         if !h.world.knownWindows.isSuperset(of: known) { reached["window lost on a topology change", default: 0] += 1 }
         if next.groups.contains(where: { $0.displays.count > 1 }) { reached["merged group", default: 0] += 1 }
         if next.groups.isEmpty { reached["no display", default: 0] += 1 }
+    }
+
+    /// Raw trackpad and mouse samples in any order, including ones from ended sessions and session deadlines.
+    mutating func pointerStep(group id: UInt32, tile: TileID) {
+        let x = Double(rng.next(3000) - 1000)
+        let modifier = rng.next(5) != 0
+        let dx = Double(rng.next(400) - 200), dy = Double(rng.next(3) == 0 ? rng.next(400) - 200 : 0)
+        let token = rng.next(6) == 0 ? PointerToken(UInt64(rng.next(50))) : h.world.pointer?.token
+        let point = h.world.frames[tile].map { AXPoint(CGPoint(x: $0.frame.rect.midX + Double(rng.next(40) - 20), y: $0.frame.rect.minY + 10)) }
+            ?? AXPoint(CGPoint(x: x, y: 400))
+        let input: PointerInput
+        switch rng.next(18) {
+        case 0: input = scroll(.began, modifier: modifier, x: x)
+        case 1, 2: input = scroll(.changed, dx, dy: dy, modifier: modifier, x: x)
+        case 3: input = scroll(rng.next(3) == 0 ? .cancelled : .ended, modifier: modifier, x: x)
+        case 4: input = scroll(rng.next(3) == 0 ? .momentumEnded : .momentum, dx, modifier: modifier, x: x)
+        case 5: input = scroll(.discrete, dx, dy: dy, modifier: modifier, x: x)
+        case 6: input = .press(tile, at: point)
+        case 7: input = .drag(AXPoint(CGPoint(x: point.point.x + Double(rng.next(30)), y: point.point.y)))
+        case 8: input = .release(point)
+        case 9: input = .overlayReady
+        case 10:
+            input = .choose(pick([.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile), .focusLeft])!)
+        case 11: input = .drop(rng.next(10) - 3)
+        case 12: input = .cancel
+        case 13:
+            h.openMenu(tile, group: id)
+            guard case .menuOpen? = h.world.pointer?.phase, rng.next(2) == 0 else { return }
+            if rng.next(2) == 0 { h.send(.command(.focus(pick(group(id))!), .ipc), group: id) }
+            h.send(.pointer(.choose(pick([.toggleFloating(tile), .setWidth(tile, 400), .close(tile), .toggleFullWidth(tile)])!)), group: id)
+            if h.logged("pointer: menu") { reached["menu chose", default: 0] += 1 }
+            return
+        case 14: return h.beginReorder(tile, group: id)
+        case 15:
+            h.send(.pointer(scroll(.began, x: x)), group: route(scroll(.began, x: x), id))
+            for _ in 0...rng.next(3) { h.send(.pointer(swipe(dx)), group: route(swipe(dx), id)) }
+            let swiped = h.gesture != nil
+            h.send(.pointer(lift), group: route(lift, id))
+            if swiped, case .momentum? = h.world.pointer?.phase { reached["swipe released", default: 0] += 1 }
+            return
+        case 16:
+            h.beginReorder(tile, group: id)
+            let dragging = if case .reorderDragging? = h.world.pointer?.phase { true } else { false }
+            h.drop(rng.next(10) - 3, group: h.world.pointer?.scope.group ?? id)
+            if dragging, h.logged("pointer: drop") { reached["reorder dropped", default: 0] += 1 }
+            return
+        default:
+            guard let session = h.world.pointer, let timer = session.timer else { return h.drop(rng.next(10) - 3, group: id) }
+            h.send(.timer(timer.token), scope: session.scope, advance: max(0, timer.deadline - h.time))
+            reached["session deadline", default: 0] += 1
+            return
+        }
+        let before = h.world.pointer
+        h.send(.pointer(input, session: token), group: route(input, id))
+        let consumed = h.effects.contains { if case .consumeInput = $0 { true } else { false } }
+        if consumed, before == nil, h.world.pointer == nil, !(input.isWheel) { reached["idle consumed a stray input", default: 0] += 1 }
+        if case .scroll(let sample) = input, !sample.modifier, before == nil, consumed { reached["no-modifier scroll consumed", default: 0] += 1 }
+        switch (before?.phase, h.world.pointer?.phase) {
+        case (.gestureTracking(.some)?, .momentum?): reached["swipe released", default: 0] += 1
+        case (.reorderDragging?, nil) where h.logged("pointer: drop"): reached["reorder dropped", default: 0] += 1
+        default: break
+        }
+    }
+
+    func group(_ id: UInt32) -> [TileID] { h.world.groups[id]!.windows.keys.sorted { $0.rawValue < $1.rawValue } }
+
+    /// The group the Loop would send `input` to.
+    func route(_ input: PointerInput, _ fallback: UInt32) -> UInt32 {
+        h.world.route(.pointer(input)).flatMap { h.world.groups[$0] == nil ? nil : $0 } ?? fallback
     }
 
     mutating func step() {
@@ -1434,13 +1510,7 @@ struct FuzzStream {
         case 0: h.send(.command(.focus(tile), .ipc), group: id)
         case 1: h.send(.focus(FocusIntent(tile: tile, source: .axFocus)), group: id)
         case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keyboard), group: id)
-        case 3: h.send(.pointer(began), group: id)
-        case 4: h.send(.pointer(swipe(Double(rng.next(400) - 200))), group: id)
-        case 5: h.send(.pointer(lift), group: id)
-        case 6: h.openMenu(tile, group: id)
-        case 7:
-            let actions: [Command] = [.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile)]
-            h.send(.pointer(.choose(pick(actions)!)), group: id)
+        case 3, 4, 5, 6, 7, 16, 17, 30: pointerStep(group: id, tile: tile)
         case 8:
             if tile.rawValue % 2 == 0, let hidden = group.windows[tile] { hiddenWindows.append(hidden) }
             h.send(tile.rawValue % 2 == 0 ? .windowsHidden([tile]) : .windowRemoved(tile), group: id)
@@ -1481,9 +1551,10 @@ struct FuzzStream {
         case 13: h.send(.windowRemoved(tile), group: id, scope: pick(priorScopes)!)
         case 14: h.send(.command(.toggleFloating(tile), .ipc), group: id)
         case 15: reconfigure()
-        case 16: h.beginReorder(tile, group: id)
-        case 17: h.drop(rng.next(10) - 3, group: id)
-        case 18: h.send(.spaceWillChange, group: id)
+        case 18:
+            let session = h.world.pointer?.scope.group == id
+            h.send(.spaceWillChange, group: id)
+            if session, h.world.pointer == nil { reached["session ended by a Space change", default: 0] += 1 }
         case 19:
             let all = h.world.groups.values.flatMap { $0.windows.values }.sorted { $0.id.rawValue < $1.id.rawValue }
             let target = pick(all)
@@ -1503,7 +1574,6 @@ struct FuzzStream {
             guard let visit = pick(saved) else { h.send(.tick, group: id); break }
             let key: SpaceKey = rng.next(2) == 0 ? .fingerprint(visit.fingerprint) : visit.space
             h.send(.spaceChanged(key: key.isEmpty ? .skylight(10) : key, epoch: epoch, windows: visit.windows), group: id)
-        case 30: h.send(.pointer(.cancel), group: id)
         case 31: h.send(.configChanged(EngineConfig(gap: Double(rng.next(20)), animate: rng.next(2) == 0, gestureSnap: rng.next(2) == 0,
                                                     snapPoints: pick([[.middle], [.left, .right], [.left, .middle, .right]])!,
                                                     raiseHeight: Double(rng.next(3) * 10))), group: id)
@@ -3548,17 +3618,22 @@ struct FuzzStream {
         var stream = FuzzStream(seed: seed)
         for step in 0..<10_000 {
             stream.step()
-            let violations = stream.h.world.check()
+            var violations = stream.h.world.check()
+            if stream.h.overlay != (stream.h.world.pointer?.overlay ?? .hidden) { violations.append("overlay shown \(stream.h.overlay) for \(String(describing: stream.h.world.pointer?.phase))") }
             check(violations.isEmpty, "seed=\(seed) step=\(step): \(violations)")
             if !violations.isEmpty { break }
         }
         let states = ["hidden return", "fingerprint key", "dock crossing", "multi-column restore", "group added or removed", "merged group", "no display",
                       "empty fingerprint key", "census window dropped", "hidden place stashed", "hidden place restored",
-                      "stashed late title", "dock crossing honored", "positions cleared", "mixed read committed"]
+                      "stashed late title", "dock crossing honored", "positions cleared", "mixed read committed",
+                      "swipe released", "reorder dropped", "menu chose", "session deadline", "session ended by a Space change",
+                      "session ended by a topology change"]
         print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
         check(stream.reached["mixed read frozen", default: 0] == 0, "seed=\(seed) every settled mixed fingerprint read commits within the bound")
         check(stream.reached["window lost on a topology change", default: 0] == 0, "seed=\(seed) no topology change loses a window")
+        check(stream.reached["idle consumed a stray input", default: 0] == 0, "seed=\(seed) an input no session took reaches the app")
+        check(stream.reached["no-modifier scroll consumed", default: 0] == 0, "seed=\(seed) a scroll without the modifier reaches the app")
         check(stream.h.rewoundFocus == 0, "seed=\(seed) a group's focusedAt never moves back: \(stream.h.rewoundFocus)")
         check(stream.h.stolenFocus == 0, "seed=\(seed) only the group commands act on restores OS focus: \(stream.h.stolenFocus)")
     }
@@ -3570,7 +3645,7 @@ struct FuzzStream {
     var cpu: [Duration] = []
     for _ in 0..<5 {
         var stream = FuzzStream(seed: 0)
-        for _ in 0..<10_000 { stream.step() }
+        while stream.h.reduces < 10_000 { stream.step() }
         check(stream.h.world.check().isEmpty, "benchmark invariants")
         wall.append(stream.h.reduceTime)
         cpu.append(stream.h.reduceCPU)
