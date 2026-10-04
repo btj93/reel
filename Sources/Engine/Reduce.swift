@@ -602,7 +602,8 @@ extension World {
     /// `gap` counts columns left of the drop; past either end clamps there. The dropped tile takes focus. A strip
     /// changing Space refuses the drop, as it refuses commands.
     private mutating func drop(_ tile: TileID, gap: Int, group id: UInt32, _ pass: inout Pass) {
-        guard var group = groups[id], !group.phase.isChanging, let source = group.strip.columnIndex(of: tile) else { return }
+        guard var group = groups[id], let source = group.strip.columnIndex(of: tile) else { return }
+        guard !group.phase.isChanging else { return pass.effects.append(.log("pointer: drop refused, strip changing Space")) }
         let count = group.strip.columns.count
         let gap = min(max(gap, 0), count)
         let destination = min(gap > source ? gap - 1 : gap, count - 1)

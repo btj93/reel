@@ -85,10 +85,7 @@ public final class PointerObserver {
         let input: PointerInput
         switch event {
         case .down(let point, let flags):
-            let hit = !flags.contains(modifier) ? nil : world().frames.values.first {
-                TitleBarInteraction.titleBarContains(point, frame: $0.frame.rect, height: Self.titleBarHeight, cornerInset: Self.cornerInset)
-            }
-            input = .press(hit?.tile, at: AXPoint(point))
+            input = Self.pressInput(at: point, flags: flags, modifier: modifier, frames: world().frames)
         case .dragged(let point):
             if !pills.isEmpty { menu.highlightPill(at: pill(at: point)) }
             reorder.cursor(AXPoint(point))
@@ -135,6 +132,15 @@ public final class PointerObserver {
     public nonisolated static func pillAnchor(press: TitlePress, frame: AXRect, in topology: Topology) -> CGRect {
         let point = screenPoint(AXPoint(CGPoint(x: press.origin.point.x, y: frame.rect.minY + titleBarHeight)), in: topology)
         return CGRect(origin: point.point, size: .zero)
+    }
+
+    /// A left press takes a title bar only with the modifier held; any other press only ends a live session.
+    public nonisolated static func pressInput(at point: CGPoint, flags: CGEventFlags, modifier: CGEventFlags,
+                                              frames: [TileID: FrameRequest]) -> PointerInput {
+        let hit = !flags.contains(modifier) ? nil : frames.values.first {
+            TitleBarInteraction.titleBarContains(point, frame: $0.frame.rect, height: titleBarHeight, cornerInset: cornerInset)
+        }
+        return .press(hit?.tile, at: AXPoint(point))
     }
 
     /// Scroll units become strip points: a trackpad's deltas double and flip so a swipe drags the strip with the

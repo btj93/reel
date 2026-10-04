@@ -1227,6 +1227,7 @@ struct Harness {
         check(h.censusRequest != nil && h.world.pointer != nil, "the hold keeps the drag")
         h.send(.pointer(.drop(3)))
         check(h.tiles == order && h.world.pointer == nil && h.overlay == .hidden, "the drop ends the drag and leaves the order")
+        check(h.logged("pointer: drop refused, strip changing Space"), "and says why")
     }
     section("Moved windows: focus lands during a same-Space hold") {
         var h = Harness()
@@ -3694,6 +3695,20 @@ struct FuzzStream {
             }
         }
     }
+    section("abf1b87: a swipe that stops before the lift lands where it stopped; a cancelled swipe lands like a lift") {
+        for phase in [ScrollPhase.ended, .cancelled] {
+            var h = Harness()
+            h.census(10, [window(1), window(2), window(3)])
+            h.send(.command(.focus(TileID(1)), .ipc))
+            h.send(.pointer(began))
+            for _ in 0..<3 { h.send(.pointer(swipe(60))) }
+            h.send(.pointer(scroll(phase)), advance: phase == .ended ? 0.2 : 0.01)
+            let strip = h.world.groups[1]!.strip
+            check(h.consumed && h.gesture == nil, "\(phase) is taken and ends the swipe")
+            check(h.offset == strip.snapTarget(forColumn: strip.activeColumnIndex, at: h.time), "\(phase) lands on a snap point")
+            if phase == .ended { check(h.active == TileID(1), "a pause before the lift spends the swipe's speed") }
+        }
+    }
     section("abf1b87 lane 4: a rejected swipe resets to idle, and the rest of that swipe reaches the app") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
@@ -3781,6 +3796,29 @@ struct FuzzStream {
         let flight = stride(from: 0.0, through: 2, by: 0.01).map { fling.evaluate(at: h.time + $0).value }
         check(flung < fling.to && flight.min()! < flung - 5, "a fling toward the strip's start keeps going past the first column")
         check(abs(flight.last! - fling.to) < 1, "and comes back to it")
+        h.send(.command(.focus(TileID(2)), .ipc))
+        h.send(.tick, advance: 5)
+        h.send(.pointer(began))
+        for _ in 0..<3 { h.send(.pointer(swipe(-60))) }
+        let inside = h.offset
+        h.send(.pointer(lift))
+        guard case .animation(let flick) = h.world.groups[1]!.strip.viewOffset else { return check(false, "flick spring") }
+        let arc = stride(from: 0.0, through: 2, by: 0.01).map { flick.evaluate(at: h.time + $0).value }
+        check(inside > bounds.lowerBound && arc.min()! < flick.to - 5 && abs(arc.last! - flick.to) < 1,
+              "a flick whose samples stayed inside the strip but whose projection passes its end overshoots the edge column and comes back")
+        var full = Harness(animate: true)
+        full.census(10, [window(1), window(2)])
+        full.send(.command(.toggleFullWidth(TileID(1)), .ipc))
+        full.send(.command(.focus(TileID(1)), .ipc))
+        full.send(.tick, advance: 5)
+        let rest = full.offset
+        check(rest == full.world.groups[1]!.strip.viewOffsetBounds(at: full.time).lowerBound, "a full-width edge column rests on the strip's end")
+        full.send(.pointer(began))
+        for _ in 0..<4 { full.send(.pointer(swipe(-5)), advance: 0.2) }
+        full.send(.pointer(lift))
+        guard case .animation(let push) = full.world.groups[1]!.strip.viewOffset else { return check(false, "push spring") }
+        let stretch = stride(from: 0.0, through: 2, by: 0.01).map { push.evaluate(at: full.time + $0).value }
+        check(stretch.min()! < rest - 5 && abs(stretch.last! - rest) < 1, "a slow push from that rest point still stretches past the end and comes back")
     }
     section("d227a21: the trackpad's momentum after a swipe is swallowed until it ends, and later momentum reaches the app") {
         var h = Harness(animate: true)
@@ -4024,6 +4062,17 @@ struct FuzzStream {
         h.openMenu(TileID(1))
         h.send(.configChanged(EngineConfig()))
         check(h.overlay == .hidden && h.world.pointer == nil, "a config reload ends a menu")
+    }
+    section("R6: a left press takes a title bar only with the modifier held; a plain press reaches the app") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        let bar = titleBar(TileID(1), in: h.world).point
+        let press = { (flags: CGEventFlags) in PointerObserver.pressInput(at: bar, flags: flags, modifier: .maskSecondaryFn, frames: h.world.frames) }
+        if case .press(let tile, _) = press(.maskSecondaryFn) { check(tile == TileID(1), "a modifier press on a title bar takes its tile") }
+        let plain = press([])
+        if case .press(let tile, _) = plain { check(tile == nil, "a plain press on a title bar takes nothing") }
+        h.send(.pointer(plain))
+        check(!h.consumed && h.world.pointer == nil, "and reaches the app")
     }
     section("R6: trackpad and wheel events become strip-point samples") {
         func sample(phase: Int64 = 0, momentum: Int64 = 0, continuous: Bool = true, dx: Double = 0, dy: Double = 0,
