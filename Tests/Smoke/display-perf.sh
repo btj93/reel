@@ -129,18 +129,20 @@ main() {
     for _ in $(seq 1 "$BLOCKS"); do
         for bin in "${BINS[@]}"; do measure "$bin" "$PER_BLOCK"; done
     done
-    section "display reconfiguration to settled layout (ms)"
-    local trunk head
-    trunk="$(basename "${BINS[0]}")"
-    head="$(basename "${BINS[${#BINS[@]}-1]}")"
-    for bin in "${BINS[@]}"; do
-        local name; name="$(side "$bin")"
-        info "$name: n=$(grep -c "^$name " "$SAMPLES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
-    done
-    if [ "$DRY" = 1 ]; then dry_note "rule: $head p95 <= $trunk p95 * 1.2"; return 0; fi
-    local limit; limit=$(( $(percentile "$trunk" 95) * 12 / 10 ))
-    [ "$(percentile "$head" 95)" -le "$limit" ] || fail "$head p95 above $trunk p95 * 1.2 ($limit)"
-    ok "$head p95 within $trunk p95 * 1.2"
+    report
 }
 
-main "$@"
+# Samples are tagged by side(), not by binary name: trunk and head are both called Reel since the cutover.
+report() {
+    section "display reconfiguration to settled layout (ms)"
+    local name
+    for name in trunk head; do
+        info "$name: n=$(grep -c "^$name " "$SAMPLES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
+    done
+    if [ "$DRY" = 1 ]; then dry_note "rule: head p95 <= trunk p95 * 1.2"; return 0; fi
+    local limit; limit=$(( $(percentile trunk 95) * 12 / 10 ))
+    [ "$(percentile head 95)" -le "$limit" ] || fail "head p95 above trunk p95 * 1.2 ($limit)"
+    ok "head p95 within trunk p95 * 1.2"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

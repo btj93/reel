@@ -162,18 +162,20 @@ main() {
     for run in $(seq 1 "$RUNS"); do
         for bin in "${BINS[@]}"; do run_once "$bin" "$run"; done
     done
-    section "main-thread ms per frame during a two-second swipe"
-    local trunk head
-    trunk="$(basename "${BINS[0]}")"
-    head="$(basename "${BINS[${#BINS[@]}-1]}")"
-    for bin in "${BINS[@]}"; do
-        local name; name="$(side "$bin")"
-        info "$name: frames=$(grep -c "^$name " "$FRAMES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
-    done
-    if [ "$DRY" = 1 ]; then dry_note "rule: $head p95 <= $trunk p95 * 1.1 and <= 8 ms"; return 0; fi
-    awk -v h="$(percentile "$head" 95)" -v t="$(percentile "$trunk" 95)" 'BEGIN { exit !(h <= t * 1.1 && h <= 8) }' \
-        || fail "$head p95 $(percentile "$head" 95) ms is above $trunk p95 $(percentile "$trunk" 95) ms * 1.1 or 8 ms"
-    ok "$head p95 within $trunk p95 * 1.1 and 8 ms"
+    report
 }
 
-main "$@"
+# Samples are tagged by side(), not by binary name: trunk and head are both called Reel since the cutover.
+report() {
+    section "main-thread ms per frame during a two-second swipe"
+    local name
+    for name in trunk head; do
+        info "$name: frames=$(grep -c "^$name " "$FRAMES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
+    done
+    if [ "$DRY" = 1 ]; then dry_note "rule: head p95 <= trunk p95 * 1.1 and <= 8 ms"; return 0; fi
+    awk -v h="$(percentile head 95)" -v t="$(percentile trunk 95)" 'BEGIN { exit !(h <= t * 1.1 && h <= 8) }' \
+        || fail "head p95 $(percentile head 95) ms is above trunk p95 $(percentile trunk 95) ms * 1.1 or 8 ms"
+    ok "head p95 within trunk p95 * 1.1 and 8 ms"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
