@@ -3706,6 +3706,10 @@ struct FuzzStream {
         check(h.consumed && h.gesture != nil, "the next swipe with the modifier tracks")
         h.send(.pointer(scroll(.changed, 50, modifier: false)))
         check(h.gesture == nil && h.consumed, "letting go of the modifier mid-swipe releases the swipe")
+        h.send(.pointer(scroll(.changed, 50, modifier: false)))
+        check(h.consumed, "the rest of a swipe let go of the modifier stays out of the app")
+        h.send(.pointer(scroll(.ended, modifier: false)))
+        check(h.consumed, "so does its end")
         check(h.world.check().isEmpty, "rejection invariants")
     }
     section("abf1b87: a swipe that has not moved yet leaves external focus live, then tracks from where focus left the view") {
@@ -4063,34 +4067,42 @@ struct FuzzStream {
         h.openMenu(TileID(2))
         check(stray(&h) && h.world.pointer?.press?.tile == TileID(2), "an open menu outlives every scroll")
     }
-    section("d227a21: a released swipe's momentum is swallowed until it ends, whatever ends the session meanwhile") {
+    section("d227a21: once a swipe is taken, the rest of that gesture and its momentum are swallowed, whatever ends the session meanwhile") {
         let enders: [(String, (inout Harness) -> Void)] = [
             ("a hotkey focus", { $0.send(.command(.focus(TileID(1)), .keyboard)) }),
             ("a new window", { $0.send(.windowAdded(window(4))) }),
+            ("a closed window", { $0.send(.windowRemoved(TileID(3))) }),
             ("a plain click", { $0.send(.pointer(.press(nil, at: AXPoint(CGPoint(x: 10, y: 10))))) }),
+            ("a wheel notch", { $0.send(.pointer(scroll(.discrete, 120))) }),
             ("a Space change", { $0.census(20, [window(5)]) }),
             ("a config reload", { $0.send(.configChanged(EngineConfig(animate: true))) }),
         ]
         for (name, end) in enders {
-            var h = Harness(animate: true)
-            h.census(10, [window(1), window(2), window(3)])
-            h.send(.pointer(began))
-            h.send(.pointer(swipe(300)))
-            h.send(.pointer(lift))
-            end(&h)
-            check(h.world.pointer == nil, "\(name) ends the momentum session")
-            let later = h.time + 10
-            let rest = h.world.groups[1]!.strip.viewOffset.current(at: later)
-            var swallowed = true
-            for _ in 0..<5 {
-                h.send(.pointer(scroll(.momentum, 40, modifier: false)), advance: 0.05)
-                swallowed = swallowed && h.consumed
+            for midTrack in [false, true] {
+                let when = midTrack ? "mid-swipe" : "after the lift"
+                var h = Harness(animate: true)
+                h.census(10, [window(1), window(2), window(3)])
+                h.send(.pointer(began))
+                h.send(.pointer(swipe(100)))
+                if !midTrack { h.send(.pointer(lift)) }
+                end(&h)
+                check(h.world.pointer?.isSwiping != true, "\(name) \(when) ends the swipe")
+                let later = h.time + 10
+                let rest = h.world.groups[1]!.strip.viewOffset.current(at: later)
+                var swallowed = true
+                let remainder = midTrack ? [swipe(60), scroll(.changed, 60, modifier: false), lift] : []
+                for input in remainder + Array(repeating: scroll(.momentum, 40, modifier: false), count: 5) {
+                    h.send(.pointer(input), advance: 0.05)
+                    swallowed = swallowed && h.consumed
+                }
+                check(swallowed && h.world.groups[1]!.strip.viewOffset.current(at: later) == rest,
+                      "after \(name) \(when) the rest of the gesture is swallowed and moves nothing")
+                h.send(.pointer(scroll(.momentumEnded, modifier: false)))
+                check(h.consumed, "after \(name) \(when) the tail's last sample is swallowed")
+                h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+                check(!h.consumed, "after \(name) \(when) the next gesture's momentum reaches the app")
+                check(h.world.check().isEmpty, "after \(name) \(when) invariants hold")
             }
-            check(swallowed && h.world.groups[1]!.strip.viewOffset.current(at: later) == rest, "after \(name) the tail is still swallowed and moves nothing")
-            h.send(.pointer(scroll(.momentumEnded, modifier: false)))
-            check(h.consumed, "after \(name) the tail's last sample is swallowed")
-            h.send(.pointer(scroll(.momentum, 5, modifier: false)))
-            check(!h.consumed, "after \(name) the next gesture's momentum reaches the app")
         }
         var h = Harness(animate: true)
         h.census(10, [window(1), window(2), window(3)])
@@ -4100,6 +4112,22 @@ struct FuzzStream {
         h.send(.pointer(scroll(.began, modifier: false)))
         h.send(.pointer(scroll(.momentum, 5, modifier: false)))
         check(!h.consumed, "a new gesture's began hands momentum back to the app")
+        for (name, hand) in [("a pause", { (h: inout Harness) in h.send(.pointer(.cancel)) }),
+                             ("a quiet gesture", { (h: inout Harness) in h.advance(EngineConfig.gestureQuiet + margin) }),
+                             ("a began during a press", { (h: inout Harness) in
+                                 h.send(.pointer(.press(TileID(1), at: titleBar(TileID(1), in: h.world))))
+                                 h.send(.pointer(scroll(.began, modifier: false)))
+                             })] {
+            var h = Harness(animate: true)
+            h.census(10, [window(1), window(2), window(3)])
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(300)))
+            h.send(.pointer(lift))
+            h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+            hand(&h)
+            h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+            check(!h.consumed, "\(name) hands later momentum to the app")
+        }
     }
 }
 
