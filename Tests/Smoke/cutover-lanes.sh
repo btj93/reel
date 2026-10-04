@@ -59,7 +59,7 @@ fresh() {
     host_start MAIN
     host_create MAIN 4 >/dev/null
     write_test_config "$CFG" 16
-    gesture_config "$CFG" "$BIN_REEL"
+    gesture_config "$CFG"
     launch_reel
     if [ "$DRY" != 1 ]; then poll_until 10 "REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-status >/dev/null" || fail "no signed runtime"; fi
     waitForSettle 10

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Tests/Smoke/pointer-perf.sh — the R6 perf lane: main-thread time per frame during a two-second swipe, trunk `Reel`
-# against head `ReelNext`, five interleaved runs per side recorded with the Time Profiler.
+# against head `Reel`, five interleaved runs per side recorded with the Time Profiler.
 #
 # Lane hosts only: it opens real windows and posts synthetic input through InputPoster. It refuses to run without
 # REEL_E2E_CONFIRM=1 and while any Reel or ReelNext is running.
@@ -53,7 +53,7 @@ launch_reel() {  # <binary>
     write_test_config "$CFG" 16
     if [ "$1" = "${BINS[0]}" ]; then cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"; fi
     if [ "$1" = "${BINS[0]}" ]; then cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"
-    else gesture_config "$CFG" "$1"; fi
+    else gesture_config "$CFG"; fi
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
     REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" \
         "$1" >> "$REEL_LOG" 2>&1 &
@@ -107,10 +107,10 @@ write_fixture_trace() {  # <path>
     cat > "$1" <<'EOF'
 <?xml version="1.0"?>
 <trace-query-result><node><schema name="time-profile"/>
-<row><sample-time id="1" fmt="00:01.000.000">1000000000</sample-time><thread id="2" fmt="Main Thread  0x1 (ReelNext, pid: 1)"/><weight id="3" fmt="1.00 ms">1000000</weight></row>
+<row><sample-time id="1" fmt="00:01.000.000">1000000000</sample-time><thread id="2" fmt="Main Thread  0x1 (Reel, pid: 1)"/><weight id="3" fmt="1.00 ms">1000000</weight></row>
 <row><sample-time id="4" fmt="00:01.001.000">1001000000</sample-time><thread ref="2"/><weight ref="3"/></row>
 <row><sample-time id="5" fmt="00:01.040.000">1040000000</sample-time><thread ref="2"/><weight ref="3"/></row>
-<row><sample-time id="6" fmt="00:01.041.000">1041000000</sample-time><thread id="7" fmt="AXApp 0x2 (ReelNext, pid: 1)"/><weight ref="3"/></row>
+<row><sample-time id="6" fmt="00:01.041.000">1041000000</sample-time><thread id="7" fmt="AXApp 0x2 (Reel, pid: 1)"/><weight ref="3"/></row>
 </node></trace-query-result>
 EOF
 }

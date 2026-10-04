@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Tests/Smoke/space-perf.sh — the R4 perf lane: time from a Space switch key to a settled strip on the destination
-# Space, trunk `Reel` against head `ReelNext`, in interleaved blocks.
+# Space, trunk `Reel` against head `Reel`, in interleaved blocks.
 #
 # Lane hosts only: it opens real windows and posts Ctrl-Left/Right through System Events, which must be bound to
 # "Move left/right a space", with at least two Spaces. It refuses to run while any Reel or ReelNext is running.
@@ -50,7 +50,7 @@ trap cleanup EXIT INT TERM
 
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 
-# The active group's Space: `space` from ReelNext, the fingerprint from trunk.
+# The active group's Space: `space` from head Reel, the fingerprint from trunk.
 space_id() { reel_msg get-layout | jq -c "$AG | (.space // .currentSpaceFingerprint)"; }
 
 switch_space() {  # left|right

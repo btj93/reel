@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Tests/Smoke/display-perf.sh — the R5 perf lane: time from a display reconfiguration to a settled layout on every
-# display, trunk `Reel` against head `ReelNext`, in interleaved blocks.
+# display, trunk `Reel` against head `Reel`, in interleaved blocks.
 #
 # Lane hosts only: it opens real windows and changes a display's resolution through `displayplacer`. It refuses to
 # run while any Reel or ReelNext is running, and puts the display back in mode A on exit.

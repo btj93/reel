@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
 # Tests/Smoke/pointer-lanes.sh — the R6 live lanes: swipes, the pill menu and reorder drags posted through InputPoster
-# to a sandboxed ReelNext (and, in lane 1, trunk Reel) managing TestWindowHost windows.
+# to a sandboxed Reel managing TestWindowHost windows.
 #
 # Lane hosts only: it opens real windows, posts synthetic input and, in lane 10, switches Spaces. It refuses to run
 # without REEL_E2E_CONFIRM=1 and while any Reel or ReelNext is running.
 #
 #   REEL_E2E_CONFIRM=1 bash Tests/Smoke/pointer-lanes.sh [lane ...]    lanes 1 to 10, all by default
-#   BIN_HEAD=.build/debug/Reel BIN_TRUNK=.build/debug/Reel          the binaries under test
+#   BIN_HEAD=.build/debug/Reel          the head binary under test
 #   LANE_OUT=/tmp/swarm-r6/worker-1                                     where screenshots go
 #   SMOKE_DRY_RUN=1                                                     walk every lane against fixtures; InputPoster
 #                                                                       parses each script and posts nothing
@@ -29,7 +29,6 @@ BIN_DIR="$REPO_ROOT/.build/debug"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
 BIN_HEAD="${BIN_HEAD:-$BIN_DIR/Reel}"
-BIN_TRUNK="${BIN_TRUNK:-$BIN_DIR/Reel}"
 BIN_REEL="$BIN_HEAD"
 NS="/tmp/reel-pointer-lanes-$$"
 SOCK="$NS/reel.sock"
@@ -49,7 +48,7 @@ trap cleanup EXIT INT TERM
 launch_reel() {  # <binary>
     BIN_REEL=$1
     write_test_config "$CFG" 16
-    gesture_config "$CFG" "$1"
+    gesture_config "$CFG"
     : > "$REEL_LOG"
     [ "$DRY" = 1 ] && write_fixture_log
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
@@ -84,7 +83,7 @@ shot() {  # <slug>
     ok "saved $OUT/$1.png"
 }
 
-# The fixture log a dry run reads instead of ReelNext's, so every parser below runs against the real line shapes.
+# The fixture log a dry run reads instead of Reel's, so every parser below runs against the real line shapes.
 write_fixture_log() {
     cat >> "$REEL_LOG" <<'EOF'
 pointer: scroll tap=true mouse tap=true

@@ -66,8 +66,7 @@ cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
 cp "${BUILD_DIR}/reel-msg" "${BUNDLE_DIR}/Contents/MacOS/"
 
 # Copy SwiftPM resource bundle into the .app.
-# Place in Contents/Resources/ (standard .app location). The Engine module's
-# resourceBundle accessor checks both this path and SwiftPM's default path.
+# Runtime reads this resource from Contents/Resources or the SwiftPM output directory.
 CONFIG_BUNDLE="${BUNDLE_DIR}/Contents/Resources/Reel_Engine.bundle"
 mkdir -p "${CONFIG_BUNDLE}"
 cp "${SCRIPT_DIR}/../Sources/Engine/config.default.toml" "${CONFIG_BUNDLE}/"
