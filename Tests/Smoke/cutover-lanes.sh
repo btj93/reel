@@ -66,9 +66,10 @@ fresh() {
 }
 
 switch_space() {
+    local before; before=$(reel_msg get-layout | jq -c "$AG | (.space // .currentSpaceFingerprint)")
     if [ "$DRY" = 1 ]; then dry_echo "Ctrl key $1 then Space settle"; return; fi
     osascript -e "tell application \"System Events\" to key code $1 using control down"
-    sleep 1.5
+    poll_until 10 "[ \"\$(REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-layout | jq -c '$AG | (.space // .currentSpaceFingerprint)')\" != '$before' ] && [ \"\$(REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-layout | jq -c '$AG | (.space // .currentSpaceFingerprint)')\" != null ]" || fail "Space identity did not change"
 }
 
 lane1() {

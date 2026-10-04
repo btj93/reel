@@ -51,16 +51,23 @@ fresh() {
     waitForSettle 10
 }
 
+physical_settle() {
+    if [ "$DRY" = 1 ]; then assertFramesAgree MAIN 2; return; fi
+    poll_until 10 "(assertFramesAgree MAIN 2) > '$NS/physical-last.log' 2>&1" || fail "$(cat "$NS/physical-last.log")"
+}
+
 now_ms() { perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.3f\n", clock_gettime(CLOCK_MONOTONIC)*1000'; }
 
 space_settle() {
     local key=$1 expected=$2
+    local before; before=$(reel_msg get-layout | jq -c "$AG | (.space // .currentSpaceFingerprint)")
     if [ "$DRY" = 1 ]; then
         reel_msg get-layout | jq -e '.groups | map(select(.isActive)) | .[0].currentColumns | length >= 0' >/dev/null
         dry_echo "Ctrl key $key, wait for $expected columns, then settle"
         return
     fi
     osascript -e "tell application \"System Events\" to key code $key using control down"
+    poll_until 10 "[ \"\$(REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-layout | jq -c '$AG | (.space // .currentSpaceFingerprint)')\" != '$before' ] && [ \"\$(REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-layout | jq -c '$AG | (.space // .currentSpaceFingerprint)')\" != null ]" || fail "Space identity did not change"
     poll_until 10 "[ \$(REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-layout | jq -r '.groups | map(select(.isActive)) | .[0].currentColumns | length') -eq '$expected' ]" || fail "Space never changed to expected census"
     waitForSettle 10
 }
@@ -70,9 +77,11 @@ sample() {
     fresh "$side" "$bin"
     reel_msg focus-left >/dev/null
     waitForSettle 10
+    physical_settle
     start=$(now_ms)
     reel_msg focus-right >/dev/null
     waitForSettle 10
+    physical_settle
     stop=$(now_ms)
     if [ "$DRY" = 1 ]; then printf '%s\tfocus\t100\n' "$side" >> "$SAMPLES"
     else awk -v s="$side" -v a="$start" -v b="$stop" 'BEGIN { printf "%s\tfocus\t%.3f\n", s, b-a }' >> "$SAMPLES"; fi
