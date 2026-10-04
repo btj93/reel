@@ -424,7 +424,7 @@ extension World {
             guard scroll.dx != 0 || scroll.dy != 0 else { return }
             guard scroll.isHorizontal, var group = groups[id], !group.strip.columns.isEmpty else { return cancelPointer(&pass) }
             session.startOffset = group.strip.viewOffset.current(at: pass.now)
-            session.phase = .gestureTracking(Swipe(snapTargets: snapTargets(group.strip, at: pass.now)))
+            session.phase = .gestureTracking(Swipe())
             group.strip.viewOffset = .gesture(GestureState(currentOffset: session.startOffset, isTouchpad: true))
             groups[id] = group
             pointer = session
@@ -513,12 +513,16 @@ extension World {
         pointer = PointerSession(token: session.token, scope: session.scope, startOffset: session.startOffset, phase: .menuOpen(press))
     }
 
-    /// Snap targets are taken with every width at its target, in the basis of the active column at the start.
-    private func snapTargets(_ strip: Strip, at now: Double) -> [Double] {
+    /// Each column's snap point with every width at its target: `target` in the active column's basis, `rest` in the
+    /// column's own.
+    private func snapPoints(_ strip: Strip, at now: Double) -> [(target: Double, rest: Double)] {
         var settled = strip
         for i in settled.columnData.indices { settled.columnData[i].widthAnimation = nil }
         let activeX = settled.columnX(at: settled.activeColumnIndex, time: now)
-        return settled.columns.indices.map { settled.columnX(at: $0, time: now) - activeX + settled.snapTarget(forColumn: $0, at: now) }
+        return settled.columns.indices.map {
+            let rest = settled.snapTarget(forColumn: $0, at: now)
+            return (settled.columnX(at: $0, time: now) - activeX + rest, rest)
+        }
     }
 
     private mutating func track(_ delta: Double, group id: UInt32, _ pass: inout Pass) {
@@ -538,7 +542,8 @@ extension World {
         pass.layout.insert(id)
     }
 
-    /// The release projects from the start offset, the tracker's origin. A swipe that pushed or was flung past the
+    /// The release projects from the start offset, the tracker's origin, and lands the column whose snap point is
+    /// nearest there at that snap point once every width settles. A swipe that pushed or was flung past the
     /// strip's end lands on the end column with an underdamped spring kicked outward, so it overshoots and comes back.
     private func release(_ gesture: GestureState, swipe: Swipe, from start: Double, strip: inout Strip, at now: Double) {
         var from = gesture.currentOffset
@@ -546,12 +551,11 @@ extension World {
         let projected = abs(velocity) < EngineConfig.flickVelocity ? from : start + gesture.tracker.projectedEndPosition(isTouchpad: true)
         let bounds = strip.viewOffsetBounds(at: now)
         var target: Double
-        if config.gestureSnap, swipe.snapTargets.count == strip.columns.count,
-           let column = swipe.snapTargets.indices.min(by: { abs(swipe.snapTargets[$0] - projected) < abs(swipe.snapTargets[$1] - projected) }) {
-            let shift = strip.columnX(at: strip.activeColumnIndex, time: now) - strip.columnX(at: column, time: now)
+        let snaps = config.gestureSnap ? snapPoints(strip, at: now) : []
+        if let column = snaps.indices.min(by: { abs(snaps[$0].target - projected) < abs(snaps[$1].target - projected) }) {
+            from += strip.columnX(at: strip.activeColumnIndex, time: now) - strip.columnX(at: column, time: now)
             strip.activeColumnIndex = column
-            from += shift
-            target = swipe.snapTargets[column] + shift
+            target = snaps[column].rest
         } else {
             target = min(max(projected, bounds.lowerBound), bounds.upperBound)
         }

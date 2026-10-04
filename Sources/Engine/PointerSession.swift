@@ -16,9 +16,8 @@ public struct TitlePress: Equatable, Sendable {
     }
 }
 
-/// A swipe once its direction is known: snap targets in the start basis, and the edge the last delta pushed past.
+/// A swipe once its direction is known: the edge the last delta pushed past.
 public struct Swipe: Sendable {
-    public let snapTargets: [Double]
     public var edge: Double = 0
 }
 
