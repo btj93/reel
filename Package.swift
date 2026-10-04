@@ -80,6 +80,12 @@ let package = Package(
             name: "TestWindowHost",
             path: "Tests/E2E/TestWindowHost"
         ),
+
+        // Lane-only: posts scroll phases and mouse events from a JSON script; refuses without REEL_E2E_CONFIRM=1.
+        .executableTarget(
+            name: "InputPoster",
+            path: "Tests/E2E/InputPoster"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

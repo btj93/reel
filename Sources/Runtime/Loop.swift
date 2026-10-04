@@ -96,7 +96,7 @@ public final class Loop {
         reloadConfig()
         frameLoop.start()
         displays.start()
-        pointer.start(log: logLine)
+        pointer.start()
         observer.start(timeout: 1.5) { [weak self] in
             guard let self else { return }
             world.groups.keys.sorted().forEach(census(group:))

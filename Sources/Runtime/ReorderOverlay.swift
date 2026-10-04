@@ -165,7 +165,10 @@ public final class ReorderOverlay {
         ready = true
         panel.orderFrontRegardless()
         post(.overlayReady, session)
-        log("reorder: ready session=\(session.rawValue) reason=\(reason) elapsedMs=\(Int(started.duration(to: .now) / .milliseconds(1)))")
+        let band = Self.band(in: panel.frame.size)
+        let slots = Self.slots(midpoints).enumerated().map { slot, x in "\(slot < dragged + 1 ? slot : slot + 1):\(Int(panel.frame.minX + x))" }
+        log("reorder: ready session=\(session.rawValue) reason=\(reason) elapsedMs=\(Int(started.duration(to: .now) / .milliseconds(1))) "
+            + "slots=\(slots.joined(separator: ",")) y=\(Int(world().topology.primaryScreenHeight - panel.frame.minY - band.midY))")
         if let latest { move(to: latest) }
         if request?.released == true { answer() }
     }
@@ -228,6 +231,12 @@ public final class ReorderOverlay {
     public nonisolated static func band(in size: CGSize) -> CGRect {
         let height = thumbnailHeight + 40
         return CGRect(x: 20, y: size.height - height - 40, width: max(0, size.width - 40), height: height)
+    }
+
+    /// A cursor x inside each gap between thumbnails centred at `midpoints`, the ends included.
+    public nonisolated static func slots(_ midpoints: [Double]) -> [Double] {
+        guard let first = midpoints.first, let last = midpoints.last else { return [] }
+        return [first - 40] + zip(midpoints, midpoints.dropFirst()).map { ($0 + $1) / 2 } + [last + 40]
     }
 
     /// Left edges of thumbnails `widths` wide, `spacing` apart, centred in a band `bandWidth` wide.

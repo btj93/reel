@@ -63,6 +63,8 @@ struct WindowReport: Encodable, Equatable {
     let frameChangeCount: Int
     /// Whether this window is currently the key window.
     let isKey: Bool
+    /// Scroll-wheel events this window received: a manager that swallows a gesture leaves it unchanged.
+    let scrollCount: Int
 }
 
 /// Every response is one of these; nil fields are omitted from the JSON (synthesized
@@ -201,6 +203,8 @@ func cgToAppKit(_ frame: CGRect, primaryScreenHeight: CGFloat) -> CGRect {
 final class WindowHost {
     private var windows: [Int: NSWindow] = [:]
     private var frameChangeCounts: [Int: Int] = [:]
+    private var scrollCounts: [Int: Int] = [:]
+    private var scrollMonitor: Any?
     private var observers: [Int: [NSObjectProtocol]] = [:]
     private var nextID = 1
 
@@ -210,6 +214,12 @@ final class WindowHost {
     init(primaryScreenHeight: CGFloat, titlePrefix: String) {
         self.primaryScreenHeight = primaryScreenHeight
         self.titlePrefix = titlePrefix
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            MainActor.assumeIsolated {
+                if let self, let id = self.windows.first(where: { $0.value === event.window })?.key { self.scrollCounts[id, default: 0] += 1 }
+            }
+            return event
+        }
     }
 
     /// Titles embed the launch prefix + the window id so a run's windows are uniquely
@@ -330,7 +340,8 @@ final class WindowHost {
                 cgWindowID: window.windowNumber,
                 frameCG: FrameJSON(x: cg.minX, y: cg.minY, w: cg.width, h: cg.height),
                 frameChangeCount: frameChangeCounts[id] ?? 0,
-                isKey: window.isKeyWindow
+                isKey: window.isKeyWindow,
+                scrollCount: scrollCounts[id] ?? 0
             )
         }
     }

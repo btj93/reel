@@ -18,6 +18,7 @@ public final class PointerObserver {
     private let world: () -> World
     private let send: (PointerInput, PointerToken?) -> [Effect]
     private let paused: () -> Bool
+    private let log: (String) -> Void
     let reorder: ReorderOverlay
     private var pills: [(item: PillItem, command: Command)] = []
     var modifier: CGEventFlags = .maskSecondaryFn {
@@ -29,10 +30,11 @@ public final class PointerObserver {
         self.world = world
         self.paused = paused
         self.send = send
+        self.log = log
         reorder = ReorderOverlay(world: world, send: { _ = send($0, $1) }, log: log)
     }
 
-    func start(log: (String) -> Void) {
+    func start() {
         scroll.onScroll = { [weak self] event in MainActor.assumeIsolated { self?.handle(event) ?? false } }
         mouse.onMouse = { [weak self] event in self?.handle(event) ?? .pass }
         log("pointer: scroll tap=\(scroll.start()) mouse tap=\(mouse.start())")
@@ -62,6 +64,11 @@ public final class PointerObserver {
         menu.mode = .menu(pills: pills.map(\.item), anchorFrame: Self.pillAnchor(press: open.press, frame: frame, in: topology),
                           selectedIndex: nil)
         menu.show()
+        let targets = zip(pills, menu.pillFrames()).map { pill, frame in
+            let point = axPoint(ScreenPoint(CGPoint(x: frame.midX, y: frame.midY)), in: topology).point
+            return "\(pill.item.label)@\(Int(point.x)),\(Int(point.y))"
+        }
+        log("pointer: menu tile=\(open.press.tile.rawValue) pills=\(targets.joined(separator: ";"))")
     }
 
     func sync(_ session: PointerSession?) {

@@ -83,6 +83,12 @@ public class OverlayWindow {
         return overlayView?.pillIndexAt(screenPoint: point, pills: pills, anchorFrame: anchorFrame)
     }
 
+    /// Each pill's frame in AppKit global coordinates, so a lane can aim the cursor at one.
+    public func pillFrames() -> [CGRect] {
+        guard case .menu(let pills, let anchorFrame, _) = mode, let view = overlayView, let window = panel else { return [] }
+        return view.pillRects(pills: pills, anchorFrame: anchorFrame).map { window.convertToScreen($0) }
+    }
+
     public func highlightPill(at index: Int?) {
         if case .menu(let pills, let frame, _) = mode {
             mode = .menu(pills: pills, anchorFrame: frame, selectedIndex: index)
@@ -204,26 +210,22 @@ class OverlayView: NSView {
 
     func pillIndexAt(screenPoint: NSPoint, pills: [PillItem], anchorFrame: CGRect) -> Int? {
         let localPoint = screenPointToViewLocal(screenPoint)
+        let rects = pillRects(pills: pills, anchorFrame: anchorFrame)
+        return rects.indices.first { pills[$0].isEnabled && rects[$0].contains(localPoint) }
+    }
+
+    /// Pill frames in view-local coordinates, laid out as `drawPillBar` draws them.
+    func pillRects(pills: [PillItem], anchorFrame: CGRect) -> [CGRect] {
         let localAnchor = anchorInViewLocal(anchorFrame)
         let pillWidths = pills.map { estimatePillWidth($0.label) }
-        let totalPillWidth = pillWidths.reduce(0, +)
-            + CGFloat(max(0, pills.count - 1)) * pillSpacing
+        let totalPillWidth = pillWidths.reduce(0, +) + CGFloat(max(0, pills.count - 1)) * pillSpacing
         let containerWidth = totalPillWidth + containerPadding * 2
         let containerHeight = pillHeight + containerPadding * 2
-        let containerX = localAnchor.midX - containerWidth / 2
-        let containerY = localAnchor.minY - 8 - containerHeight
-
-        var x = containerX + containerPadding
-        let pillY = containerY + containerPadding
-
-        for (i, _) in pills.enumerated() {
-            let w = pillWidths[i]
-            let pillRect = CGRect(x: x, y: pillY, width: w, height: pillHeight)
-            if pillRect.contains(localPoint) && pills[i].isEnabled {
-                return i
-            }
-            x += w + pillSpacing
+        var x = localAnchor.midX - containerWidth / 2 + containerPadding
+        let pillY = localAnchor.minY - 8 - containerHeight + containerPadding
+        return pillWidths.map { width in
+            defer { x += width + pillSpacing }
+            return CGRect(x: x, y: pillY, width: width, height: pillHeight)
         }
-        return nil
     }
 }
