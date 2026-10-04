@@ -11,12 +11,16 @@ import Platform
 public final class IPCBridge {
     private let loop: Loop
     private let server = SocketServer()
-    public static let version = "next-r6"
+    public static let version = "r7"
 
     public init(loop: Loop) {
         self.loop = loop
-        server.onCommand = { [weak self] command in
-            MainActor.assumeIsolated { self?.handle(command) ?? ReelResponse(success: false, message: "shutting down") }
+        server.onAsyncCommand = { [weak self] command, completion in
+            MainActor.assumeIsolated {
+                guard let self else { return completion(ReelResponse(success: false, message: "shutting down")) }
+                if command == .getLayouts { self.readLayouts(completion: completion) }
+                else { completion(self.handle(command)) }
+            }
         }
         // Through AppKit, so the delegate stops this server and releases windows before the app exits.
         server.onFlushed = { command in
@@ -43,13 +47,13 @@ public final class IPCBridge {
         case .recover: return reply(loop.recover())
         case .focusUp: return reply(loop.request(.focusUp))
         case .focusDown: return reply(loop.request(.focusDown))
-        case .listPositions: return json(Self.positions(loop.world.spaces.persisted))
+        case .listPositions: return json(Self.positions(loop.store.list()))
         case .clearPositions:
             let outcome = loop.request(.clearPositions)
             guard outcome == .accepted else { return reply(outcome) }
-            loop.store.flush()
+            loop.store.clear()
             return ReelResponse(success: true, message: "Cleared all saved positions")
-        case .getLayouts: return json(Self.layouts(world: loop.world, active: loop.group, windows: windowServerFrames()))
+        case .getLayouts: return ReelResponse(success: false, message: "get-layouts requires an asynchronous read")
         case .listWindows: return json(listWindows())
         case .getLayout: return json(Self.layout(world: loop.world, active: loop.group, now: TimeUtil.now()))
         case .getStatus: return json(status())
@@ -78,12 +82,27 @@ public final class IPCBridge {
         }
     }
 
-    /// Every Space the engine knows, the current one first, with where each window is now. Frames come from the
-    /// window server, not AX, so a hung app cannot stall the reply. A window less than 10 points on its display is
-    /// `slivered`: parked off screen, or stuck there.
+    /// Every known Space, with expected placement beside a bounded, fresh AX read. Missing reads are unreadable.
     public static func layouts(world: World, active: UInt32, windows: [UInt32: (frame: CGRect, onScreen: Bool)]) -> [String: Any] {
         func entries(_ saved: Snapshot) -> [[String: Any]] {
             let area = world.topology.group(id: saved.group)?.frame
+            let displayGroup = world.topology.group(id: saved.group)
+            let expected: [TileID: CGRect] = displayGroup.map { group in
+                var strip = Strip(gap: world.config.gap, workingArea: group.frame)
+                strip.groupArea = GroupWorkingArea(regions: group.displays.map { DisplayRegion(displayID: $0.id, rect: $0.area) },
+                                                   referenceMidX: group.displays[0].area.midX)
+                strip.columns = saved.columns.map { column in
+                    Column(tiles: column.windows.map(\.id), activeTileIndex: column.activeTileIndex, width: column.width,
+                           presetIndex: column.presetIndex, isFullWidth: column.isFullWidth)
+                }
+                strip.activeColumnIndex = min(saved.activeColumnIndex, max(0, strip.columns.count - 1))
+                strip.viewOffset = .static(saved.offset)
+                strip.defaultWidth = .proportion(world.config.defaultWidth)
+                strip.columnData = strip.columns.map { _ in ColumnData(cachedWidth: 1) }
+                strip.snapIndices = saved.columns.map(\.snapIndex)
+                strip.recalculateWidths(at: world.time)
+                return Dictionary(uniqueKeysWithValues: computeTargetFrames(strip: strip, time: world.time).map { ($0.tileID, $0.frame) })
+            } ?? [:]
             let columns = saved.columns.flatMap { column in column.windows.map { ($0, Optional(column)) } }
             return (columns + saved.floating.map { ($0, nil) }).map { window, column in
                 let now = windows[window.id.rawValue]
@@ -91,6 +110,7 @@ public final class IPCBridge {
                     "windowID": window.id.rawValue, "bundleID": window.bundleID ?? "", "title": window.title,
                     "savedWidth": column.map { "\($0.width)" } ?? "floating", "isFullWidth": column?.isFullWidth ?? false,
                     "isOnScreen": now?.onScreen ?? false, "currentFrame": NSNull(), "slivered": false,
+                    "unreadable": now == nil, "expectedFrame": expected[window.id].map(Self.frameJSON) ?? NSNull(),
                 ]
                 if let frame = now?.frame {
                     entry["currentFrame"] = ["x": frame.minX, "y": frame.minY, "w": frame.width, "h": frame.height]
@@ -116,9 +136,32 @@ public final class IPCBridge {
     }
 
     /// Where the window server has every window now, on any Space.
-    private func windowServerFrames() -> [UInt32: (frame: CGRect, onScreen: Bool)] {
-        Dictionary(windowInfo(onScreenOnly: false).map { ($0.windowID, (frame: $0.bounds, onScreen: $0.isOnScreen)) },
-                   uniquingKeysWith: { first, _ in first })
+    private func readLayouts(completion: @escaping @Sendable (ReelResponse) -> Void) {
+        let world = loop.world
+        let active = loop.group
+        let snapshots = world.groups.keys.compactMap(world.currentSnapshot)
+            + Array(world.spaces.live.values) + world.spaces.disk
+        let windows = snapshots.flatMap { $0.columns.flatMap(\.windows) + $0.floating }
+        let unique = Dictionary(windows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let probe = FrameProbe(ids: Set(unique.keys)) { frames in
+            let fresh = frames.mapValues { frame in
+                (frame: frame, onScreen: world.topology.displays.contains { frame.intersects($0.frame) })
+            }
+            completion(self.json(Self.layouts(world: world, active: active, windows: fresh)))
+        }
+        for window in unique.values {
+            guard let worker = loop.observer.workers[window.pid] else {
+                probe.receive(window.id, frame: nil)
+                continue
+            }
+            worker.run(window.id) { ax in
+                let frame: CGRect?
+                if case .success(let point) = ax.getPosition(), case .success(let size) = ax.getSize() {
+                    frame = CGRect(origin: point, size: size)
+                } else { frame = nil }
+                DispatchQueue.main.async { MainActor.assumeIsolated { probe.receive(window.id, frame: frame) } }
+            }
+        }
     }
 
     private func onFocused(_ command: (TileID) -> Command) -> ReelResponse {
@@ -132,6 +175,10 @@ public final class IPCBridge {
         case .refused(let reason): ReelResponse(success: false, message: reason)
         case .unknownWindow(let tile): ReelResponse(success: false, message: "unknown window \(tile.rawValue)")
         }
+    }
+
+    private static func frameJSON(_ frame: CGRect) -> [String: Double] {
+        ["x": frame.minX, "y": frame.minY, "w": frame.width, "h": frame.height]
     }
 
     private func json(_ object: Any) -> ReelResponse {

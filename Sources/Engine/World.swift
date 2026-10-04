@@ -2,12 +2,22 @@ import Core
 import Foundation
 
 public struct Rule: Equatable, Sendable {
-    public let bundleID: String
+    public let bundleID: String?
+    public let bundleIDRegex: String?
+    public let titleRegex: String?
     public let floating: Bool
 
-    public init(bundleID: String, floating: Bool) {
+    public init(bundleID: String? = nil, bundleIDRegex: String? = nil, titleRegex: String? = nil, floating: Bool) {
         self.bundleID = bundleID
+        self.bundleIDRegex = bundleIDRegex
+        self.titleRegex = titleRegex
         self.floating = floating
+    }
+
+    func matches(_ window: ObservedWindow) -> Bool {
+        (bundleID == nil || window.bundleID == bundleID)
+            && (bundleIDRegex == nil || window.bundleID?.range(of: bundleIDRegex!, options: .regularExpression) != nil)
+            && (titleRegex == nil || window.title.range(of: titleRegex!, options: .regularExpression) != nil)
     }
 }
 

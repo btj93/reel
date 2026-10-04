@@ -24,6 +24,8 @@ public final class SocketServer: @unchecked Sendable {
     private static let connectionTimeoutSeconds = 2
 
     /// Called when a command is received. Returns a response.
+    public var onAsyncCommand: (@Sendable (ReelCommand, @escaping @Sendable (ReelResponse) -> Void) -> Void)?
+
     public var onCommand: ((ReelCommand) -> ReelResponse)?
 
     public var onMessage: ((IPCMessage) -> ReelResponse)?
@@ -248,6 +250,9 @@ public final class SocketServer: @unchecked Sendable {
         if let jsonData = rawStr.data(using: .utf8),
            let message = try? JSONDecoder().decode(IPCMessage.self, from: jsonData) {
             let resolved = ReelCommand(rawValue: message.command)
+            if let command = resolved, onAsyncCommand != nil {
+                return (executeAsync(command), command)
+            }
             let response = executeOnMain {
                 self.onMessage?(message) ?? self.onCommand.flatMap { handler in
                     resolved.map { handler($0) }
@@ -257,6 +262,7 @@ public final class SocketServer: @unchecked Sendable {
         }
         // Fall back to raw string for backward compatibility
         if let command = ReelCommand(rawValue: rawStr) {
+            if onAsyncCommand != nil { return (executeAsync(command), command) }
             let response = executeOnMain {
                 self.onCommand?(command) ?? ReelResponse(success: false, message: "No handler")
             }
@@ -265,9 +271,37 @@ public final class SocketServer: @unchecked Sendable {
         return (ReelResponse(success: false, message: "Unknown command: \(rawStr)"), nil)
     }
 
+    private func executeAsync(_ command: ReelCommand) -> ReelResponse {
+        let box = ResponseBox()
+        DispatchQueue.main.async { self.onAsyncCommand?(command) { box.complete($0) } }
+        return box.wait()
+    }
+
     /// Synchronously run `work` on the main thread and return its result.
     private func executeOnMain(_ work: () -> ReelResponse) -> ReelResponse {
         if Thread.isMainThread { return work() }
         return DispatchQueue.main.sync(execute: work)
+    }
+}
+
+private final class ResponseBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private let ready = DispatchSemaphore(value: 0)
+    private var response: ReelResponse?
+
+    func complete(_ response: ReelResponse) {
+        lock.lock()
+        self.response = response
+        lock.unlock()
+        ready.signal()
+    }
+
+    func wait() -> ReelResponse {
+        guard ready.wait(timeout: .now() + 2) == .success else {
+            return ReelResponse(success: false, message: "diagnostic read timed out")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        return response!
     }
 }

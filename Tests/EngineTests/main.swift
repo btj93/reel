@@ -1,4 +1,3 @@
-import Config
 import Core
 import CoreGraphics
 import Engine
@@ -2221,6 +2220,41 @@ struct FuzzStream {
               "an empty file gives the defaults")
         let ring = try? AppConfig.parse("[indicator]\nstyle = \"ring\"\nraise_height = 24")
         check(ring?.engine.raiseHeight == 0, "raise_height lowers columns only in raise style")
+    }
+    section("R7: packaged defaults, struts and add-time regex rules") {
+        check(!AppConfig.defaultSource.isEmpty, "the shipped default config resource exists")
+        guard let config = try? AppConfig.parse(AppConfig.defaultSource) else { return check(false, "bundled defaults parse") }
+        check(config.engine.gap == EngineConfig().gap && config.keys == AppConfig().keys, "bundled defaults match code defaults")
+        var insets = WorkingInsets()
+        insets.top = 10; insets.bottom = 20; insets.left = 30; insets.right = 40
+        check(insets.apply(to: CGRect(x: -100, y: 50, width: 1000, height: 700)) == CGRect(x: -70, y: 60, width: 930, height: 670), "per-display working area has CG insets")
+        insets.left = 2000
+        check(insets.apply(to: CGRect(x: 0, y: 0, width: 100, height: 100)).width == 1, "struts cannot make an invalid area")
+        let parsed = try? AppConfig.parse("[[rules]]\nbundle_id_regex = \"com[.]example[.].*\"\ntitle_regex = \"^Dialog\"\nfloating = true")
+        check(parsed?.engine.rules.count == 1, "bundle/title regex rules parse")
+        do { _ = try AppConfig.parse("[[rules]]\ntitle_regex = \"[\"\nfloating = true"); check(false, "invalid regex rejected") }
+        catch { check(String(describing: error).contains("title_regex"), "invalid regex names its key") }
+    }
+    section("R7: SnapshotStore lists pending writes and clear survives restart") {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = SnapshotStore(directory: dir, log: { _ in })
+        let snapshot = Snapshot(group: 1, space: .skylight(42), columns: [])
+        store.save([snapshot])
+        check(store.list().count == 1, "pending snapshot is listed before disk flush")
+        store.clear()
+        check(store.list().isEmpty && SnapshotStore(directory: dir, log: { _ in }).load().isEmpty, "clear persists empty book")
+    }
+    section("R7: fresh frame reads finish once, deadline reports missing reads as unreadable") {
+        var results: [[UInt32: CGRect]] = []
+        let probe = FrameProbe(ids: [TileID(1), TileID(2)], timeout: 60) { results.append($0) }
+        let fresh = CGRect(x: 1, y: 2, width: 300, height: 400)
+        probe.receive(TileID(1), frame: fresh)
+        check(results.isEmpty, "waits for remaining read without blocking")
+        probe.finish()
+        probe.receive(TileID(2), frame: fresh)
+        probe.finish()
+        check(results.count == 1 && results[0][1] == fresh && results[0][2] == nil, "one bounded result with missing frame omitted")
     }
     section("R3 config: unknown keys and bad values are load errors that name the key") {
         func error(_ text: String) -> String? {

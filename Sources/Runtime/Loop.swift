@@ -1,5 +1,4 @@
 import AppKit
-import Config
 import Core
 import Engine
 import Foundation
@@ -292,7 +291,11 @@ public final class Loop {
     public func reloadConfig() -> String? {
         let path = paths.configFile
         do {
-            let text = FileManager.default.fileExists(atPath: path) ? try String(contentsOfFile: path, encoding: .utf8) : ""
+            if !FileManager.default.fileExists(atPath: path) {
+                try FileManager.default.createDirectory(atPath: paths.configDir, withIntermediateDirectories: true)
+                try AppConfig.defaultSource.write(toFile: path, atomically: true, encoding: .utf8)
+            }
+            let text = try String(contentsOfFile: path, encoding: .utf8)
             let next = try AppConfig.parse(text)
             configError = Self.bindingError(next.keys)
             if configError == nil {
@@ -320,6 +323,10 @@ public final class Loop {
     }
 
     private func apply(_ next: AppConfig) {
+        if config.struts != next.struts {
+            displays.struts = next.struts
+            topologyChanged(DisplayObserver.read(revision: world.topology.revision + 1, struts: next.struts))
+        }
         config = next
         var focus = FocusIndicatorConfig()
         focus.style = switch next.indicator.style {

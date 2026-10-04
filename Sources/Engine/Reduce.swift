@@ -1042,7 +1042,7 @@ extension Sequence where Element == TileID {
 }
 
 func shouldFloat(_ window: ObservedWindow, config: EngineConfig) -> Bool {
-    config.rules.last(where: { window.bundleID == $0.bundleID })?.floating ?? window.floating
+    config.rules.last(where: { $0.matches(window) })?.floating ?? window.floating
 }
 
 /// A window that floated only for its facts (it registered untitled) tiles once new facts say it tiles. One the user
