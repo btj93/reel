@@ -576,7 +576,7 @@ extension World {
     /// `onto` names the saved strip to restore, by key or by overlap; nil restores none.
     private mutating func commitSpace(_ key: SpaceKey, onto: SpaceKey?, epoch: UInt64, windows: [ObservedWindow],
                                       group id: UInt32, _ pass: inout Pass) {
-        let leads = activeGroup == id
+        let leads = activeGroup == id && groups[id]!.focusedAt > -.infinity
         beginSpaceChange(group: id, &pass)
         let departing = groups[id]!
         stash(departing, id: id, time: pass.now)

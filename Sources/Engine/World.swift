@@ -312,10 +312,13 @@ public struct World: Sendable {
         EventScope(topologyRevision: stamp.revision, group: group, spaceEpoch: stamp.epochs[group] ?? .max)
     }
 
-    /// The group commands act on: the one focused last, else the leftmost.
+    /// The group commands act on: the one focused last (on a tie, one still holding a decision), else the leftmost.
     public var activeGroup: UInt32? {
         let focused = groups.filter { $0.value.focusedAt > -.infinity }
-        return focused.max { ($0.value.focusedAt, $1.key) < ($1.value.focusedAt, $0.key) }?.key ?? topology.groups.first?.id
+        func rank(_ entry: (key: UInt32, value: GroupState)) -> (Double, Int, Int64) {
+            (entry.value.focusedAt, entry.value.focus.decision == nil ? 0 : 1, -Int64(entry.key))
+        }
+        return focused.max { rank($0) < rank($1) }?.key ?? topology.groups.first?.id
     }
 
     public func owner(of tile: TileID) -> UInt32? { groups.first { $0.value.windows[tile] != nil }?.key }

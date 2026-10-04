@@ -1914,6 +1914,28 @@ struct FuzzStream {
         swapped.advance(EngineConfig.focusDebounce + margin)
         check(swapped.world.groups[2]!.focus.decision?.tile == TileID(3) && swapped.world.activeGroup == 2,
               "a read racing the leading display's fresh restore does not override it")
+
+        func asksFocus(_ effects: [Effect]) -> Bool { effects.contains { if case .focus = $0 { true } else { false } } }
+        var launch = Harness(displays: [display(), display(2, x: 1000)])
+        launch.census(10, [window(1, x: 10)])
+        let first = asksFocus(launch.effects)
+        launch.census(20, [window(3, x: 1010)], group: 2)
+        check(!first && !asksFocus(launch.effects), "at launch no display takes OS focus before anything was focused")
+        launch.advance(0.2)
+        launch.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus)), group: 2)
+        launch.advance(1)
+        check(launch.world.activeGroup == 2, "so a late frontmost read alone picks the display commands act on")
+
+        var split = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        split.census(10, [window(1, x: 10), window(2, x: 300), window(3, x: 1010), window(4, x: 1300)])
+        split.send(.command(.focus(TileID(1)), .keyboard))
+        split.advance(1)
+        split.send(.command(.focus(TileID(4)), .keyboard))
+        split.advance(1)
+        for _ in 0..<5 { split.send(.tick, advance: 0.5) }
+        split.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)], separateSpaces: true)))
+        check(split.world.activeGroup.flatMap { split.world.groups[$0]?.focus.decision?.tile } == TileID(4),
+              "after a split commands act on the display holding the focused window")
     }
     section("R5 disk: a display restores its own saved strip; another display's only by window id") {
         func term(_ id: UInt32, x: Double) -> ObservedWindow {
