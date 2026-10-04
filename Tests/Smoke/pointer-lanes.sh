@@ -115,10 +115,15 @@ title_y() { column_field "$1" '(.y + 10 | floor)'; }
 center_y() { column_field "$1" '(.y + .h / 2 | floor)'; }
 active() { reel_msg get-layout | jq "$AG.activeColumnIndex"; }
 view_pos() { reel_msg get-layout | jq "$AG.viewPos"; }
+# How far the active column's centre sits from the centre of the display region holding it: the middle snap point.
+off_snap() { reel_msg get-layout | jq "$AG | (.currentColumns[.activeColumnIndex].frame | .x + .w / 2) as \$c
+    | ([.regions[] | select(\$c >= .minX and \$c < .maxX)] + .regions)[0] | \$c - (.minX + .width / 2) | fabs"; }
 
+# Head lands a flick by its projected velocity, trunk on the column under the cursor, so only head is judged; trunk's
+# column is recorded for comparison.
 lane1() {
-    section "lane 1: the same flick from column 1 of 4 settles on the same column on trunk and head"
-    local results=() bin
+    section "lane 1: a flick from column 1 of 4 toward the strip's end moves head there and settles on a snap point"
+    local results=() bin off
     for bin in "$BIN_TRUNK" "$BIN_HEAD"; do
         fresh 4 "$bin"
         focus_column 1
@@ -128,11 +133,13 @@ lane1() {
         results+=("$(active)")
         shot "flick-$(basename "$bin")"
     done
-    [ "$DRY" = 1 ] && return 0
+    off=$(off_snap)
+    [ "$DRY" = 1 ] && { dry_note "pass when head's column is past 1 and ${off} pt is at most 2"; return 0; }
     cp "$OUT/flick-$(basename "$BIN_HEAD").png" "$OUT/flick.png"
-    [ "${results[1]}" != 1 ] || fail "the flick left head on column 1"
-    [ "${results[0]}" = "${results[1]}" ] || fail "trunk settled on column ${results[0]}, head on ${results[1]}"
-    ok "both settled on column ${results[1]}"
+    info "trunk settled on column ${results[0]} (recorded only: trunk lands on the column under the cursor)"
+    [ "${results[1]}" -gt 1 ] || fail "the flick toward the strip's end left head on column ${results[1]}"
+    awk -v d="$off" 'BEGIN { exit !(d <= 2) }' || fail "head settled ${off} pt off its snap point"
+    ok "head moved from column 1 to ${results[1]} and rests on its snap point (${off} pt)"
 }
 
 lane2() {
@@ -142,8 +149,7 @@ lane2() {
     post "lane2-slow-drag" "$(slow_drag_script "$(title_x "$index")" "$(center_y "$index")" -8)"
     waitForSettle 10
     shot slow-drag
-    local off
-    off=$(reel_msg get-layout | jq "$AG | (.currentColumns[.activeColumnIndex].frame | .x + .w / 2) - (.regions[0].minX + .regions[0].width / 2) | fabs")
+    local off; off=$(off_snap)
     [ "$DRY" = 1 ] || awk -v d="$off" 'BEGIN { exit !(d <= 2) }' || fail "the active column sits ${off} pt off centre"
     ok "the active column is centred (${off} pt)"
 }
