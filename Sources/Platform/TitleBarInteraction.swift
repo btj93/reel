@@ -2,9 +2,9 @@ import AppKit
 import CoreGraphics
 import Core
 
-/// One left-button event or an Escape press, in CG coordinates. `modifier` says the required modifier was held.
+/// One left-button event or an Escape press, in CG coordinates. A press carries the modifier flags held with it.
 public enum MouseEvent: Sendable {
-    case down(CGPoint, modifier: Bool)
+    case down(CGPoint, flags: CGEventFlags)
     case dragged(CGPoint)
     case up(CGPoint)
     case escape
@@ -158,7 +158,7 @@ public final class TitleBarInteraction {
 
         if let onMouse {
             let verdict: MouseVerdict = switch type {
-            case .leftMouseDown: onMouse(.down(location, modifier: event.flags.contains(requiredModifier)))
+            case .leftMouseDown: onMouse(.down(location, flags: event.flags))
             case .leftMouseDragged: onMouse(.dragged(location))
             case .leftMouseUp: onMouse(.up(location))
             default: .pass

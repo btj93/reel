@@ -21,9 +21,7 @@ public final class PointerObserver {
     private let log: (String) -> Void
     private let reorder: ReorderOverlay
     private var pills: [(item: PillItem, command: Command)] = []
-    var modifier: CGEventFlags = .maskSecondaryFn {
-        didSet { mouse.requiredModifier = modifier }
-    }
+    var modifier: CGEventFlags = .maskSecondaryFn
 
     init(world: @escaping () -> World, paused: @escaping () -> Bool, send: @escaping (PointerInput, PointerToken?) -> [Effect],
          log: @escaping (String) -> Void) {
@@ -88,8 +86,8 @@ public final class PointerObserver {
         guard !paused() else { return .pass }
         let input: PointerInput
         switch event {
-        case .down(let point, let modifier):
-            let hit = !modifier ? nil : world().frames.values.first {
+        case .down(let point, let flags):
+            let hit = !flags.contains(modifier) ? nil : world().frames.values.first {
                 TitleBarInteraction.titleBarContains(point, frame: $0.frame.rect, height: Self.titleBarHeight, cornerInset: Self.cornerInset)
             }
             input = .press(hit?.tile, at: AXPoint(point))
