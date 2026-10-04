@@ -278,6 +278,9 @@ public struct World: Sendable {
     public internal(set) var groups: [UInt32: GroupState]
     public internal(set) var spaces = SpaceBook()
     public internal(set) var pointer: PointerSession?
+    /// A released swipe's trackpad momentum is still arriving. It is swallowed to its last sample, whatever ends the
+    /// session meanwhile; a new gesture's began hands momentum back to the app.
+    public internal(set) var momentumTail = false
     public internal(set) var frames: [TileID: FrameRequest] = [:]
     public internal(set) var appliedFrames: [TileID: FrameRequest] = [:]
     public internal(set) var timers: [TimerToken: ScheduledWork] = [:]

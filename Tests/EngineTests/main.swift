@@ -72,6 +72,10 @@ struct Harness {
     var rewoundFocus = 0
     /// The overlay the runtime would show after the effects so far.
     var overlay = Overlay.hidden
+    /// A swipe was released and no began or last momentum sample has come since: its tail must be swallowed.
+    var tail = false
+    /// Momentum samples of a released swipe's tail that reached the app.
+    var leakedTail = 0
 
     init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [Display] = [display()],
          separateSpaces: Bool = true) {
@@ -100,8 +104,14 @@ struct Harness {
         let start = ContinuousClock.now
         let leader = world.activeGroup
         let focusedAt = world.groups.mapValues(\.focusedAt)
+        let swiping = world.pointer?.swipe != nil
         effects = reduce(&world, event, now: time)
         for case .overlay(let shown) in effects { overlay = shown }
+        if case .pointer(.scroll(let scroll), _) = event.kind {
+            if tail, scroll.phase == .momentum || scroll.phase == .momentumEnded, !consumed { leakedTail += 1 }
+            if scroll.phase == .began || scroll.phase == .momentumEnded { tail = false }
+        }
+        if swiping, case .momentum? = world.pointer?.phase { tail = true }
         if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
         if event.scope.group != leader, effects.contains(where: { if case .focus(_, .restore) = $0 { true } else { false } }) { stolenFocus += 1 }
         reduceTime += start.duration(to: .now)
@@ -1488,11 +1498,12 @@ struct FuzzStream {
             return
         }
         let before = h.world.pointer
+        let tail = h.tail
         h.send(.pointer(input, session: token), group: route(input, id))
         let consumed = h.effects.contains { if case .consumeInput = $0 { true } else { false } }
         if case .scroll = input, before?.press != nil, h.world.pointer?.token != before?.token { reached["a scroll ended a title-bar session", default: 0] += 1 }
-        if consumed, before == nil, h.world.pointer == nil, !(input.isWheel) { reached["idle consumed a stray input", default: 0] += 1 }
-        if case .scroll(let sample) = input, !sample.modifier, before == nil, consumed { reached["no-modifier scroll consumed", default: 0] += 1 }
+        if consumed, before == nil, !tail, h.world.pointer == nil, !(input.isWheel) { reached["idle consumed a stray input", default: 0] += 1 }
+        if case .scroll(let sample) = input, !sample.modifier, before == nil, !tail, consumed { reached["no-modifier scroll consumed", default: 0] += 1 }
         switch (before?.phase, h.world.pointer?.phase) {
         case (.gestureTracking(.some)?, .momentum?): reached["swipe released", default: 0] += 1
         case (.reorderDragging?, nil) where h.logged("pointer: drop"): reached["reorder dropped", default: 0] += 1
@@ -4072,6 +4083,7 @@ struct FuzzStream {
         check(stream.reached["idle consumed a stray input", default: 0] == 0, "seed=\(seed) an input no session took reaches the app")
         check(stream.reached["no-modifier scroll consumed", default: 0] == 0, "seed=\(seed) a scroll without the modifier reaches the app")
         check(stream.reached["a scroll ended a title-bar session", default: 0] == 0, "seed=\(seed) no scroll ends a title-bar session")
+        check(stream.h.leakedTail == 0, "seed=\(seed) a released swipe's momentum is swallowed to its last sample: \(stream.h.leakedTail)")
         check(stream.h.rewoundFocus == 0, "seed=\(seed) a group's focusedAt never moves back: \(stream.h.rewoundFocus)")
         check(stream.h.stolenFocus == 0, "seed=\(seed) only the group commands act on restores OS focus: \(stream.h.stolenFocus)")
     }

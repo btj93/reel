@@ -78,7 +78,9 @@ public final class PointerObserver {
     }
 
     private func handle(_ event: ScrollEvent) -> Bool {
-        guard !paused(), let input = Self.scrollInput(event, modifier: modifier) else { return false }
+        // A released swipe's momentum tail stays swallowed through a pause.
+        guard let input = Self.scrollInput(event, modifier: modifier),
+              !paused() || input.phase == .momentum || input.phase == .momentumEnded else { return false }
         return send(.scroll(input), world().pointer?.token).contains { if case .consumeInput = $0 { true } else { false } }
     }
 

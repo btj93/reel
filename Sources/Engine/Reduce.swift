@@ -393,8 +393,18 @@ extension World {
     }
 
     fileprivate mutating func onPointer(_ input: PointerInput, token: PointerToken?, group id: UInt32, _ pass: inout Pass) {
-        // Scroll input ends only swipes: a title-bar press, drag or menu outlives a scroll on any display.
-        if case .scroll = input, pointer?.press != nil { return }
+        if case .scroll(let scroll) = input {
+            if scroll.phase == .began { momentumTail = false }
+            if scroll.phase == .momentum || scroll.phase == .momentumEnded {
+                guard momentumTail else { return }
+                momentumTail = scroll.phase == .momentum
+                pass.effects.append(.consumeInput)
+                if case .momentum(let settled, _)? = pointer?.phase { pointer?.phase = .momentum(settledAt: settled, tail: momentumTail ? pass.now : nil) }
+                return
+            }
+            // Scroll input ends only swipes: a title-bar press, drag or menu outlives a scroll on any display.
+            if pointer?.press != nil { return }
+        }
         switch input {
         case .scroll(let scroll) where scroll.phase == .discrete: return wheel(scroll, group: id, &pass)
         case .scroll(let scroll) where scroll.phase == .began:
@@ -427,13 +437,10 @@ extension World {
             groups[id] = group
             session.phase = .momentum(settledAt: group.strip.viewOffset.isAnimating ? nil : pass.now, tail: nil)
             pointer = session
+            momentumTail = true
             pass.effects.append(.consumeInput)
             pass.layout.insert(id)
             pass.persist = true
-        case (.momentum(let settled, _), .scroll(let scroll)) where scroll.phase == .momentum || scroll.phase == .momentumEnded:
-            session.phase = .momentum(settledAt: settled, tail: scroll.phase == .momentum ? pass.now : nil)
-            pointer = session
-            pass.effects.append(.consumeInput)
         case (.titleArmed(let press), .drag(let point)):
             pass.effects.append(.consumeInput)
             guard hypot(point.point.x - press.origin.point.x, point.point.y - press.origin.point.y) > EngineConfig.dragThreshold,
