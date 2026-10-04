@@ -8,9 +8,9 @@ import Platform
 /// comes back with `consumeInput` and is swallowed, a press that stayed a click comes back with `replayPress`, and
 /// anything else reaches the app.
 @MainActor
-final class PointerObserver {
-    static let titleBarHeight = 28.0
-    static let cornerInset = 8.0
+public final class PointerObserver {
+    public nonisolated static let titleBarHeight = 28.0
+    public nonisolated static let cornerInset = 8.0
 
     private let scroll = GestureCapture()
     private let mouse = TitleBarInteraction()
@@ -108,7 +108,7 @@ final class PointerObserver {
     }
 
     /// One pill per width preset, then full width, float and close. Each command names the tile the menu opened for.
-    static func pills(presets: [Double], tile: TileID) -> [(item: PillItem, command: Command)] {
+    public nonisolated static func pills(presets: [Double], tile: TileID) -> [(item: PillItem, command: Command)] {
         let widths = presets.enumerated().map { index, share in
             let label = switch share {
             case ...0.34: "Third"
@@ -127,7 +127,7 @@ final class PointerObserver {
 
     /// The pill bar hangs from the bottom of the pressed tile's title bar, centred on the press, in AppKit global
     /// coordinates.
-    static func pillAnchor(press: TitlePress, frame: AXRect, in topology: Topology) -> CGRect {
+    public nonisolated static func pillAnchor(press: TitlePress, frame: AXRect, in topology: Topology) -> CGRect {
         let point = screenPoint(AXPoint(CGPoint(x: press.origin.point.x, y: frame.rect.minY + titleBarHeight)), in: topology)
         return CGRect(origin: point.point, size: .zero)
     }
@@ -135,7 +135,7 @@ final class PointerObserver {
     /// Scroll units become strip points: a trackpad's deltas double and flip so a swipe drags the strip with the
     /// fingers, a wheel notch moves the view by its dominant delta, and a shift-converted wheel counts as horizontal.
     /// Phases that start nothing (may-begin) are not the engine's.
-    static func scrollInput(_ event: ScrollEvent, modifier: CGEventFlags) -> ScrollInput? {
+    public nonisolated static func scrollInput(_ event: ScrollEvent, modifier: CGEventFlags) -> ScrollInput? {
         let held = event.flags.contains(modifier)
         let at = AXPoint(event.location)
         if event.momentumPhase != 0 { return ScrollInput(phase: event.momentumPhase == 3 ? .momentumEnded : .momentum, modifier: held, at: at) }

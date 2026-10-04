@@ -59,7 +59,7 @@ public enum Command: Sendable {
     /// Forget every saved strip, in this session and on disk.
     case clearPositions
 
-    var tile: TileID? {
+    public var tile: TileID? {
         switch self {
         case .focus(let tile), .setWidth(let tile, _), .setWidthPreset(let tile, _), .toggleFullWidth(let tile), .toggleFloating(let tile), .close(let tile): tile
         default: nil
@@ -81,7 +81,7 @@ public enum PointerInput: Sendable {
     case drop(Int)
     case cancel
 
-    var tile: TileID? {
+    public var tile: TileID? {
         if case .press(let tile, _) = self { tile } else { nil }
     }
 

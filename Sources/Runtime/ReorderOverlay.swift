@@ -15,9 +15,9 @@ private struct CaptureRequest: @unchecked Sendable {
 /// the drag began over, tells the engine when it is ready, and answers a released drag with the gap under the cursor.
 /// Cursor samples before it is ready only keep the latest one, which is all the gap and the ghost need.
 @MainActor
-final class ReorderOverlay {
-    static let thumbnailHeight = 160.0
-    static let spacing = 12.0
+public final class ReorderOverlay {
+    nonisolated static let thumbnailHeight = 160.0
+    nonisolated static let spacing = 12.0
     static let readyDeadline: Duration = .milliseconds(300)
 
     private let world: () -> World
@@ -225,13 +225,13 @@ final class ReorderOverlay {
     }
 
     /// The band runs along the top of the display, 40 points down, the full width less a margin.
-    static func band(in size: CGSize) -> CGRect {
+    public nonisolated static func band(in size: CGSize) -> CGRect {
         let height = thumbnailHeight + 40
         return CGRect(x: 20, y: size.height - height - 40, width: max(0, size.width - 40), height: height)
     }
 
     /// Left edges of thumbnails `widths` wide, `spacing` apart, centred in a band `bandWidth` wide.
-    static func origins(widths: [Double], bandWidth: Double, spacing: Double) -> [Double] {
+    public nonisolated static func origins(widths: [Double], bandWidth: Double, spacing: Double) -> [Double] {
         let total = widths.reduce(0, +) + spacing * Double(max(0, widths.count - 1))
         var x = (bandWidth - total) / 2
         return widths.map { width in
@@ -242,7 +242,7 @@ final class ReorderOverlay {
 
     /// A cursor in AX coordinates in the panel's own coordinates. The panel's origin is the display's AppKit origin,
     /// which is not zero on any display but the primary, so `NSView.convert(_:from: nil)` would be off by it.
-    static func local(_ point: AXPoint, panel: CGRect, in topology: Topology) -> CGPoint {
+    public nonisolated static func local(_ point: AXPoint, panel: CGRect, in topology: Topology) -> CGPoint {
         let screen = screenPoint(point, in: topology).point
         return CGPoint(x: screen.x - panel.minX, y: screen.y - panel.minY)
     }

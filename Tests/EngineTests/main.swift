@@ -1,4 +1,6 @@
+import Config
 import Core
+import CoreGraphics
 import Engine
 import Foundation
 import Platform
@@ -161,6 +163,8 @@ struct Harness {
     var requests: [FrameRequest] {
         effects.compactMap { if case .setFrame(let request) = $0 { return request }; return nil }
     }
+
+    var consumed: Bool { effects.contains { if case .consumeInput = $0 { true } else { false } } }
 
     var persisted: Bool { effects.contains { if case .persist = $0 { return true }; return false } }
 
@@ -3611,6 +3615,350 @@ struct FuzzStream {
     }
 }
 
+@MainActor func pointerTests() throws {
+    section("abf1b87: a swipe snaps a column onto the display it lands on, not across the seam of a shared strip") {
+        var h = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        h.census(10, (1...5).map { window($0) })
+        h.send(.command(.focus(TileID(1)), .ipc))
+        for distance in [700.0, 1400] {
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(distance)), advance: 0.2)
+            h.send(.pointer(lift))
+            let frame = h.world.frames[h.active!]!.frame.rect
+            let home = h.world.topology.displays.first { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }!
+            check(home.area.minX <= frame.minX && frame.maxX <= home.area.maxX, "a swipe of \(distance) lands its column inside one display")
+            check(abs(frame.midX - home.area.midX) < 1, "the middle snap centres the column on its own display, not the strip")
+        }
+    }
+    section("abf1b87 lane 2: a slow swipe released before any frame tick snaps; with snap off it stays where it was dropped") {
+        for snap in [true, false] {
+            var h = Harness(animate: true, gestureSnap: snap)
+            h.census(10, [window(1), window(2), window(3)])
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(130)), advance: 0.2)
+            let dropped = h.offset
+            h.send(.pointer(lift), advance: 0.001)
+            let strip = h.world.groups[1]!.strip
+            let target = if case .animation(let spring) = strip.viewOffset { spring.to } else { strip.viewOffset.current(at: h.time) }
+            if snap {
+                check(abs(target - strip.snapTarget(forColumn: strip.activeColumnIndex, at: h.time)) < 0.001, "the release snaps without a tick")
+            } else {
+                check(abs(target - dropped) < 0.001, "with snap off the drop stays")
+            }
+        }
+    }
+    section("abf1b87 lane 4: a rejected swipe resets to idle, and the rest of that swipe reaches the app") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        let start = h.offset
+        h.send(.pointer(began))
+        check(!h.consumed, "the began sample reaches the app: its direction is unknown")
+        h.send(.pointer(scroll(.changed, 10, dy: 60)))
+        check(h.world.pointer == nil && !h.consumed, "a vertical first move rejects to idle")
+        h.send(.pointer(swipe(200)))
+        check(h.world.pointer == nil && !h.consumed && h.offset == start, "later horizontal samples of the rejected swipe pass through")
+        h.send(.pointer(lift))
+        check(!h.consumed, "its end passes through too")
+        h.send(.pointer(scroll(.began, modifier: false)))
+        h.send(.pointer(scroll(.changed, 200, modifier: false)))
+        check(h.world.pointer == nil && !h.consumed && h.offset == start, "without the modifier the strip stays and the app gets the scroll")
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(200)))
+        check(h.consumed && h.gesture != nil, "the next swipe with the modifier tracks")
+        h.send(.pointer(scroll(.changed, 50, modifier: false)))
+        check(h.gesture == nil && h.consumed, "letting go of the modifier mid-swipe releases the swipe")
+        check(h.world.check().isEmpty, "rejection invariants")
+    }
+    section("2b2457b: a swipe onto a column of another width centres that column") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.setWidth(TileID(3), 700), .ipc))
+        h.send(.command(.focus(TileID(1)), .ipc))
+        let strip = h.world.groups[1]!.strip
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(strip.columnX(at: 2, time: h.time) - strip.columnX(at: 0, time: h.time))), advance: 0.2)
+        h.send(.pointer(lift))
+        let frame = h.world.frames[TileID(3)]!.frame.rect
+        check(h.active == TileID(3) && frame.width == 700, "the swipe lands on the wide column")
+        check(abs(frame.midX - 500) < 1, "the wide column is centred by its own width")
+    }
+    section("d227a21 lane 3: samples past the strip's end carry no velocity, and the release stretches past the end and springs back") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.tick, advance: 5)
+        let bounds = h.world.groups[1]!.strip.viewOffsetBounds(at: h.time)
+        h.send(.pointer(began))
+        for _ in 0..<6 { h.send(.pointer(swipe(-400))) }
+        check(h.offset == bounds.lowerBound, "the swipe stops at the strip's end")
+        guard case .gesture(let gesture) = h.world.groups[1]!.strip.viewOffset else { return check(false, "gesture view") }
+        check(gesture.tracker.velocity(at: h.time) == 0, "clamped samples add no velocity")
+        let from = h.offset
+        h.send(.pointer(lift))
+        guard case .animation(let spring) = h.world.groups[1]!.strip.viewOffset else { return check(false, "release spring") }
+        let path = stride(from: 0.0, through: 2, by: 0.01).map { spring.evaluate(at: h.time + $0).value }
+        check(from < spring.to && path.max()! > spring.to + 5, "the view passes the edge column's rest position")
+        check(abs(path.last! - spring.to) < 1, "and settles back on the edge column")
+        check(abs(spring.to - h.world.groups[1]!.strip.snapTarget(forColumn: 0, at: h.time)) < 0.001, "the edge column is the first")
+        h.send(.tick, advance: 5)
+        h.send(.command(.focus(TileID(2)), .ipc))
+        h.send(.tick, advance: 5)
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.tick, advance: 5)
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(-60)))
+        h.send(.pointer(swipe(-60)))
+        let flung = h.offset
+        h.send(.pointer(lift))
+        guard case .animation(let fling) = h.world.groups[1]!.strip.viewOffset else { return check(false, "fling spring") }
+        let flight = stride(from: 0.0, through: 2, by: 0.01).map { fling.evaluate(at: h.time + $0).value }
+        check(flung < fling.to && flight.min()! < flung - 5, "a fling toward the strip's start keeps going past the first column")
+        check(abs(flight.last! - fling.to) < 1, "and comes back to it")
+    }
+    section("d227a21: the trackpad's momentum after a swipe is swallowed until it ends, and later momentum reaches the app") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(300)))
+        h.send(.pointer(lift))
+        var swallowed = true
+        for _ in 0..<30 {
+            h.send(.pointer(scroll(.momentum, 5, modifier: false)), advance: 0.05)
+            swallowed = swallowed && h.consumed
+            h.send(.tick)
+        }
+        check(swallowed, "every momentum sample of the swipe is swallowed, with or without the modifier")
+        check(h.world.pointer?.isSwiping == true, "a momentum tail longer than the spring keeps external focus quiet")
+        h.send(.pointer(scroll(.momentumEnded, modifier: false)))
+        check(h.consumed, "the tail's last sample is swallowed")
+        h.advance(EngineConfig.gestureQuiet + margin)
+        h.send(.tick)
+        check(h.world.pointer == nil, "the session ends a quiet period after the tail")
+        h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+        check(!h.consumed, "momentum nobody owns reaches the app")
+    }
+    section("d227a21: a wheel notch with the modifier moves the strip; a vertical notch or one without the modifier reaches the app") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.focus(TileID(2)), .ipc))
+        let start = h.offset
+        h.send(.pointer(scroll(.discrete, 120)))
+        check(h.consumed && abs(h.offset - start - 120) < 0.001, "a notch moves the view by its delta")
+        h.send(.pointer(scroll(.discrete, 0, dy: 40)))
+        check(!h.consumed && abs(h.offset - start - 120) < 0.001, "a vertical notch reaches the app")
+        h.send(.pointer(scroll(.discrete, 120, modifier: false)))
+        check(!h.consumed && abs(h.offset - start - 120) < 0.001, "a notch without the modifier reaches the app")
+    }
+    try section("67240b9: [gesture] snap from the config file applies at start and on every reload; a reload ends the swipe") {
+        let off = try AppConfig.parse("[gesture]\nsnap = false\nmodifier = \"alt\"\n")
+        check(!off.engine.gestureSnap && off.gestureModifier == .alt, "the file sets snap and the modifier")
+        check(AppConfig().gestureModifier == .fn && AppConfig().engine.gestureSnap, "defaults are fn and snap")
+        check((try? AppConfig.parse("[gesture]\nmodifer = \"fn\"\n")) == nil, "a typo in [gesture] is an error")
+        check((try? AppConfig.parse("[gesture]\nmodifier = \"hyper\"\n")) == nil, "an unknown modifier is an error")
+        var h = Harness(gestureSnap: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(130)))
+        h.send(.configChanged(off.engine))
+        let gestureView = if case .gesture = h.world.groups[1]!.strip.viewOffset { true } else { false }
+        check(h.world.pointer == nil && !gestureView, "a reload ends the swipe and leaves no gesture view")
+        func slowSwipe(_ h: inout Harness) -> (dropped: Double, landed: Double) {
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(130)), advance: 0.2)
+            let dropped = h.offset
+            h.send(.pointer(lift))
+            return (dropped, h.offset)
+        }
+        let free = slowSwipe(&h)
+        check(abs(free.landed - free.dropped) < 0.001, "after a reload with snap off the drop stays")
+        h.send(.configChanged(try AppConfig.parse("[gesture]\nsnap = true\n").engine))
+        _ = slowSwipe(&h)
+        let strip = h.world.groups[1]!.strip
+        let target = if case .animation(let spring) = strip.viewOffset { spring.to } else { h.offset }
+        check(abs(target - strip.snapTarget(forColumn: strip.activeColumnIndex, at: h.time)) < 0.001, "after a reload with snap on it snaps")
+    }
+    section("eebb564 lane 5 lane 6: the pill menu opens on the pressed tile and closes it after focus moved to another") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(.press(TileID(3), at: titleBar(TileID(3), in: h.world))))
+        check(h.consumed && h.overlay == .hidden, "a press is swallowed and shows nothing yet")
+        h.advance(EngineConfig.longPress - margin)
+        check(h.overlay == .hidden, "no menu before the long press")
+        h.advance(2 * margin)
+        guard case .menu(let menu) = h.overlay else { return check(false, "the long press opens the menu") }
+        check(menu.press.tile == TileID(3), "the menu is for the pressed tile")
+        h.send(.ipc(id: 1, command: .focus(TileID(1))))
+        check(h.active == TileID(1) && h.overlay == .menu(menu), "focus moves and the menu stays")
+        h.send(.pointer(.choose(.close(TileID(1)))))
+        check(h.effects.contains { if case .close(TileID(3)) = $0 { true } else { false } }, "close acts on the tile the menu opened for")
+        check(!h.effects.contains { if case .close(TileID(1)) = $0 { true } else { false } }, "the focused tile stays")
+        check(h.overlay == .hidden && h.world.pointer == nil, "the menu is gone")
+    }
+    section("eebb564: a press released before the long press is a click on the window") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        let origin = titleBar(TileID(1), in: h.world)
+        h.send(.pointer(.press(TileID(1), at: origin)))
+        let timer = h.world.pointer!.timer!.token
+        h.send(.pointer(.release(origin)))
+        check(h.effects.contains { if case .replayPress(origin) = $0 { true } else { false } }, "the press is replayed")
+        check(h.effects.contains { if case .cancel(timer) = $0 { true } else { false } }, "the long press is cancelled")
+        h.advance(EngineConfig.longPress + margin)
+        check(h.overlay == .hidden && h.world.pointer == nil, "no menu opens later")
+    }
+    section("eebb564: a pill resizes the tile it opened on without moving focus or the focused window") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.focus(TileID(3)), .ipc))
+        let focused = h.world.frames[TileID(3)]!.frame.rect
+        h.openMenu(TileID(1))
+        h.send(.pointer(.choose(.setWidthPreset(TileID(3), 2))))
+        check(h.world.groups[1]!.strip.columns[0].presetIndex == 2, "the preset lands on the pressed tile's column")
+        check(h.world.groups[1]!.strip.columns[2].presetIndex == nil, "the focused column keeps its width")
+        check(h.active == TileID(3) && h.world.frames[TileID(3)]!.frame.rect.minX == focused.minX, "focus and the focused window stay put")
+    }
+    section("eebb564: a reorder drop waits for the overlay; an early, unreleased or late drop leaves the order unchanged") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        let order = h.tiles
+        @MainActor func drag(_ h: inout Harness, ready: Bool) {
+            let origin = titleBar(TileID(1), in: h.world).point
+            h.send(.pointer(.press(TileID(1), at: AXPoint(origin))))
+            h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + EngineConfig.dragThreshold - 1, y: origin.y)))))
+            check(h.overlay == .hidden, "within the threshold nothing shows")
+            h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + 40, y: origin.y)))))
+            if ready { h.send(.pointer(.overlayReady)) }
+        }
+        drag(&h, ready: false)
+        guard case .reorder(let shown) = h.overlay, !shown.released else { return check(false, "the drag asks for the overlay") }
+        h.send(.pointer(.release(AXPoint(.zero))))
+        guard case .reorder(let waiting) = h.overlay else { return check(false, "a release before the overlay is ready waits") }
+        check(waiting.session == shown.session && waiting.released, "a release before the overlay is ready waits for it")
+        h.send(.pointer(.drop(3)))
+        check(h.tiles == order && h.overlay == .hidden && h.world.pointer == nil, "a drop before the overlay was ready is refused")
+        drag(&h, ready: false)
+        h.send(.pointer(.release(AXPoint(.zero))))
+        h.send(.pointer(.overlayReady))
+        h.send(.pointer(.drop(3)))
+        check(h.tiles == [TileID(2), TileID(3), TileID(1)] && h.overlay == .hidden, "a released drag drops once the overlay is ready")
+        check(h.active == TileID(1), "the dropped tile takes focus")
+        drag(&h, ready: true)
+        h.send(.pointer(.drop(0)))
+        check(h.tiles == [TileID(2), TileID(3), TileID(1)] && h.overlay == .hidden, "a drop before the release is refused")
+        drag(&h, ready: true)
+        h.send(.pointer(.release(AXPoint(.zero))))
+        h.advance(EngineConfig.dropDeadline + margin)
+        check(h.overlay == .hidden && h.world.pointer == nil && h.logged("drop never came"), "a released drag whose drop never comes ends")
+        drag(&h, ready: true)
+        h.send(.windowRemoved(TileID(2)))
+        check(h.overlay == .hidden && h.world.pointer == nil, "a window leaving the strip ends the drag")
+        check(h.world.check().isEmpty, "reorder invariants")
+    }
+    section("eebb564: a finished focus flash stays finished when its window moves") {
+        let indicator = FocusIndicator()
+        indicator.overlaySuppressed = true
+        var config = FocusIndicatorConfig()
+        config.style = .flash
+        indicator.reloadConfig(config)
+        let frame = CGRect(x: 0, y: 0, width: 100, height: 100)
+        check(indicator.snapTo(frame: frame), "a flash starts")
+        indicator.tick(time: TimeUtil.now() + 1)
+        check(!indicator.isAnimating, "the flash ends")
+        indicator.trackFrame(frame.offsetBy(dx: 50, dy: 0))
+        check(!indicator.isAnimating && indicator.currentFrame == frame, "a later move does not revive it")
+    }
+    section("2be34bd: a drop past the last column lands last; the gap before the last lands before it") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.beginReorder(TileID(1))
+        h.drop(3)
+        check(h.tiles == [TileID(2), TileID(3), TileID(1)], "gap 3 of 3 is the end")
+        h.beginReorder(TileID(2))
+        h.drop(2)
+        check(h.tiles == [TileID(3), TileID(2), TileID(1)], "gap 2 of 3 is before the last")
+        h.beginReorder(TileID(1))
+        h.drop(-4)
+        check(h.tiles == [TileID(1), TileID(3), TileID(2)], "a gap before the first clamps to the first")
+    }
+    section("2be34bd: the pill bar hangs from the pressed tile's title bar, on a display that is not the primary") {
+        let topology = topology(1, [display(), display(2, x: 1000, y: -830)])
+        let press = TitlePress(tile: TileID(5), origin: AXPoint(CGPoint(x: 1300, y: -790)))
+        let anchor = PointerObserver.pillAnchor(press: press, frame: AXRect(CGRect(x: 1100, y: -800, width: 600, height: 500)), in: topology)
+        check(anchor == CGRect(x: 1300, y: 900 + 800 - PointerObserver.titleBarHeight, width: 0, height: 0), "AppKit y of the title bar's bottom edge")
+        let pills = PointerObserver.pills(presets: [0.33, 0.5, 0.67], tile: TileID(5))
+        check(pills.map(\.item.label) == ["Third", "Half", "Two-Thirds", "Full", "Float", "Close"], "presets, then full, float and close")
+        check(pills.allSatisfy { $0.command.tile == TileID(5) }, "every pill names the pressed tile")
+    }
+    section("R6 lane 9: the title bar's corners stay with macOS for the native resize") {
+        let frame = CGRect(x: 100, y: 50, width: 600, height: 500)
+        let contains = { (x: Double, y: Double) in
+            TitleBarInteraction.titleBarContains(CGPoint(x: x, y: y), frame: frame, height: PointerObserver.titleBarHeight,
+                                                 cornerInset: PointerObserver.cornerInset)
+        }
+        check(!contains(104, 60) && !contains(696, 60), "a press in either top corner is not a title-bar press")
+        check(contains(110, 60) && contains(690, 60) && contains(400, 77), "inside the corners and above 28 px it is")
+        check(!contains(400, 79), "below the title bar it is not")
+    }
+    section("R6 lane 8: the reorder overlay shows on the display under the cursor, also inside a shared strip") {
+        var h = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        h.census(10, (1...4).map { window($0) })
+        let onSecond = h.tiles.first { h.world.frames[$0]!.frame.rect.minX >= 1000 }!
+        h.beginReorder(onSecond)
+        guard case .reorder(let shown) = h.overlay else { return check(false, "the drag shows the overlay") }
+        check(shown.display == 2 && shown.scope.group == 1, "the overlay is on display 2 while the session belongs to the shared group")
+        var split = Harness(displays: [display(), display(2, x: 1000)])
+        split.census(10, [window(1)])
+        split.census(20, [window(2)], group: 2)
+        check(split.world.route(.pointer(.press(TileID(2), at: AXPoint(.zero)))) == 2, "a press goes to the group holding its tile")
+        check(split.world.route(.pointer(scroll(.began, x: 1500))) == 2, "a swipe begins on the strip under the cursor")
+        split.beginReorder(TileID(2), group: 2)
+        guard case .reorder(let second) = split.overlay else { return check(false, "the drag on display 2 shows the overlay") }
+        check(second.display == 2 && second.scope.group == 2, "the overlay is on display 2")
+        check(split.world.route(.pointer(.drop(0))) == 2, "later inputs go to the session's group")
+    }
+    section("R6 lane 10: a Space change or a topology change mid-drag hides the overlay and keeps the order") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1), window(2), window(3)])
+        h.census(20, [window(4)], group: 2)
+        let order = h.tiles
+        h.beginReorder(TileID(2))
+        h.send(.spaceWillChange, group: 2)
+        check(h.world.pointer != nil, "another display's Space change leaves the drag alone")
+        h.send(.spaceWillChange)
+        check(h.overlay == .hidden && h.world.pointer == nil && h.tiles == order, "this display's Space change ends it")
+        h.census(10, [window(1), window(2), window(3)])
+        h.beginReorder(TileID(2))
+        h.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)])), scope: EventScope(topologyRevision: 1, group: 0, spaceEpoch: 0))
+        check(h.overlay == .hidden && h.world.pointer == nil && h.tiles == order, "a topology change ends it")
+        h.openMenu(TileID(1))
+        h.send(.configChanged(EngineConfig()))
+        check(h.overlay == .hidden && h.world.pointer == nil, "a config reload ends a menu")
+    }
+    section("R6: trackpad and wheel events become strip-point samples") {
+        func sample(phase: Int64 = 0, momentum: Int64 = 0, continuous: Bool = true, dx: Double = 0, dy: Double = 0,
+                    flags: CGEventFlags = .maskSecondaryFn) -> ScrollInput? {
+            PointerObserver.scrollInput(ScrollEvent(phase: phase, momentumPhase: momentum, continuous: continuous, dx: dx, dy: dy, flags: flags,
+                                                    location: CGPoint(x: 10, y: 20)), modifier: .maskSecondaryFn)
+        }
+        check(sample(phase: 2, dx: 10, dy: 1) == ScrollInput(phase: .changed, dx: -20, dy: -2, modifier: true, at: AXPoint(CGPoint(x: 10, y: 20))),
+              "a trackpad delta doubles and follows the fingers")
+        check(sample(phase: 1, flags: [])?.modifier == false, "the modifier is read from the event's flags")
+        check(sample(phase: 128) == nil, "may-begin starts nothing")
+        check(sample(momentum: 2)?.phase == .momentum && sample(momentum: 3)?.phase == .momentumEnded, "momentum phases")
+        check(sample(continuous: false, dx: 3, dy: 1)?.dx == -3, "a wheel notch moves by its dominant delta")
+        check(sample(continuous: false, dx: 1, dy: 3).map { $0.dx == 0 && $0.dy == 3 } == true, "a vertical notch stays vertical")
+        check(sample(dx: 0, dy: 4, flags: [.maskShift, .maskSecondaryFn])?.dx == -4, "shift turns a vertical scroll horizontal")
+    }
+    section("R6: the reorder band maps a cursor on a display above the primary into its own coordinates") {
+        let topology = topology(1, [display(), display(2, y: -830)])
+        let panel = screenRect(AXRect(topology.displays[1].frame), in: topology).rect
+        check(panel.minY == 900, "the upper display's AppKit origin is not zero")
+        check(ReorderOverlay.local(AXPoint(CGPoint(x: 100, y: -800)), panel: panel, in: topology) == CGPoint(x: 100, y: 800),
+              "a cursor 30 points below the top lands 30 points below the panel's top")
+        check(ReorderOverlay.origins(widths: [100, 200], bandWidth: 1000, spacing: 10) == [345, 455], "thumbnails sit centred")
+    }
+}
+
 @MainActor func fuzzTests(seeds: [UInt64]) {
     guard only.isEmpty || only == "fuzz" else { return }
     print("▸ fuzz: \(seeds.count) seeds × 10,000 events, World.check() after every event")
@@ -3658,7 +4006,7 @@ struct FuzzStream {
 }
 
 MainActor.assumeIsolated {
-    do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests() }
+    do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests(); try pointerTests() }
     catch { check(false, "unexpected error: \(error)") }
     var seeds: [UInt64] = [0]
     for value in (environment["ENGINE_FUZZ_SEEDS"] ?? "").split(separator: ",") {

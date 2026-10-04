@@ -528,8 +528,8 @@ extension World {
         pass.layout.insert(id)
     }
 
-    /// The release projects from the start offset, the tracker's origin. A swipe that pushed past the strip's end
-    /// stretches past it and springs back.
+    /// The release projects from the start offset, the tracker's origin. A swipe that pushed or was flung past the
+    /// strip's end lands on the end column with an underdamped spring kicked outward, so it overshoots and comes back.
     private func release(_ gesture: GestureState, swipe: Swipe, from start: Double, strip: inout Strip, at now: Double) {
         var from = gesture.currentOffset
         let velocity = gesture.tracker.velocity(at: now)
@@ -545,10 +545,12 @@ extension World {
             let bounds = strip.viewOffsetBounds(at: now)
             target = min(max(projected, bounds.lowerBound), bounds.upperBound)
         }
-        if config.animate, swipe.edge != 0 {
+        let bounds = strip.viewOffsetBounds(at: now)
+        let edge = swipe.edge != 0 ? swipe.edge : projected > bounds.upperBound ? 1 : projected < bounds.lowerBound ? -1 : 0
+        if config.animate, edge != 0 {
             let bounce = SpringParams(dampingRatio: config.bounceDampingRatio, stiffness: 600, epsilon: 0.5)
-            strip.viewOffset = .animation(SpringAnimation(from: from, to: target, initialVelocity: config.bounceDistance * swipe.edge * 15,
-                                                          startTime: now, params: bounce))
+            let kick = edge * max(abs(velocity), config.bounceDistance * 15)
+            strip.viewOffset = .animation(SpringAnimation(from: from, to: target, initialVelocity: kick, startTime: now, params: bounce))
         } else {
             strip.viewOffset = config.animate && abs(target - from) >= 1
                 ? .animation(SpringAnimation(from: from, to: target, initialVelocity: velocity, startTime: now, params: strip.scrollSpringParams))

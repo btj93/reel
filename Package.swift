@@ -14,7 +14,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "Engine", dependencies: ["Core", "TOMLKit"]),
-        .executableTarget(name: "RunEngineTests", dependencies: ["Engine", "Core", "Runtime", "Platform"], path: "Tests/EngineTests"),
+        .executableTarget(name: "RunEngineTests", dependencies: ["Engine", "Core", "Runtime", "Platform", "Config"], path: "Tests/EngineTests"),
         // The new runtime: turns macOS observations into Engine events and executes its effects.
         .target(name: "Runtime", dependencies: ["Engine", "Core", "Platform", "IPC", "Config"]),
         .executableTarget(name: "ReelNext", dependencies: ["Runtime"]),

@@ -10,6 +10,11 @@ public struct PointerToken: Hashable, Sendable {
 public struct TitlePress: Equatable, Sendable {
     public let tile: TileID
     public let origin: AXPoint
+
+    public init(tile: TileID, origin: AXPoint) {
+        self.tile = tile
+        self.origin = origin
+    }
 }
 
 /// A swipe once its direction is known: snap targets in the start basis, and the edge the last delta pushed past.
