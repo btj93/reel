@@ -1490,6 +1490,7 @@ struct FuzzStream {
         let before = h.world.pointer
         h.send(.pointer(input, session: token), group: route(input, id))
         let consumed = h.effects.contains { if case .consumeInput = $0 { true } else { false } }
+        if case .scroll = input, before?.press != nil, h.world.pointer?.token != before?.token { reached["a scroll ended a title-bar session", default: 0] += 1 }
         if consumed, before == nil, h.world.pointer == nil, !(input.isWheel) { reached["idle consumed a stray input", default: 0] += 1 }
         if case .scroll(let sample) = input, !sample.modifier, before == nil, consumed { reached["no-modifier scroll consumed", default: 0] += 1 }
         switch (before?.phase, h.world.pointer?.phase) {
@@ -4070,6 +4071,7 @@ struct FuzzStream {
         check(stream.reached["window lost on a topology change", default: 0] == 0, "seed=\(seed) no topology change loses a window")
         check(stream.reached["idle consumed a stray input", default: 0] == 0, "seed=\(seed) an input no session took reaches the app")
         check(stream.reached["no-modifier scroll consumed", default: 0] == 0, "seed=\(seed) a scroll without the modifier reaches the app")
+        check(stream.reached["a scroll ended a title-bar session", default: 0] == 0, "seed=\(seed) no scroll ends a title-bar session")
         check(stream.h.rewoundFocus == 0, "seed=\(seed) a group's focusedAt never moves back: \(stream.h.rewoundFocus)")
         check(stream.h.stolenFocus == 0, "seed=\(seed) only the group commands act on restores OS focus: \(stream.h.stolenFocus)")
     }

@@ -393,6 +393,8 @@ extension World {
     }
 
     fileprivate mutating func onPointer(_ input: PointerInput, token: PointerToken?, group id: UInt32, _ pass: inout Pass) {
+        // Scroll input ends only swipes: a title-bar press, drag or menu outlives a scroll on any display.
+        if case .scroll = input, pointer?.press != nil { return }
         switch input {
         case .scroll(let scroll) where scroll.phase == .discrete: return wheel(scroll, group: id, &pass)
         case .scroll(let scroll) where scroll.phase == .began:
