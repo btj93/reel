@@ -1480,7 +1480,11 @@ struct FuzzStream {
             if dragging, h.logged("pointer: drop") { reached["reorder dropped", default: 0] += 1 }
             return
         default:
-            guard let session = h.world.pointer, let timer = session.timer else { return h.drop(rng.next(10) - 3, group: id) }
+            if h.world.pointer?.timer == nil {
+                h.beginReorder(tile, group: id)
+                h.send(.pointer(.release(point)), group: route(.release(point), id))
+            }
+            guard let session = h.world.pointer, let timer = session.timer else { return }
             h.send(.timer(timer.token), scope: session.scope, advance: max(0, timer.deadline - h.time))
             reached["session deadline", default: 0] += 1
             return
