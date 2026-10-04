@@ -29,6 +29,7 @@ smoke-check:
 	else \
 		echo "shellcheck not installed — skipping lint (bash -n passed)"; \
 	fi
+	bash Tests/Smoke/harness-check.sh
 	REEL_E2E_CONFIRM=1 SMOKE_DRY_RUN=1 bash Tests/Smoke/smoke.sh
 	swift build
 

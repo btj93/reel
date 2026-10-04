@@ -249,8 +249,12 @@ main() {
     write_fixtures
     local lanes=("$@")
     [ ${#lanes[@]} -gt 0 ] || lanes=(1 2 3 4 5 6 7 8 9 10 11)
-    for lane in "${lanes[@]}"; do "lane$lane"; done
+    for lane in "${lanes[@]}"; do
+        quit_reel
+        host_quit MAIN
+        "lane$lane"
+    done
     if [ "$DRY" = 1 ]; then section "R7 lane dry run completed (no live verdict)"
     else section "R7 requested lanes completed"; fi
 }
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

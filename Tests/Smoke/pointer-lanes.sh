@@ -52,7 +52,7 @@ launch_reel() {  # <binary>
     : > "$REEL_LOG"
     [ "$DRY" = 1 ] && write_fixture_log
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
-    REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" \
+    REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" REEL_LOG_PATH="$REEL_LOG" \
         "$1" >> "$REEL_LOG" 2>&1 &
     TEST_REEL_PID=$!
     poll_until 10 "REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-status >/dev/null 2>&1" || fail "$(basename "$1") never answered"
@@ -348,4 +348,4 @@ main() {
     section "pointer lanes ${lanes[*]} passed"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

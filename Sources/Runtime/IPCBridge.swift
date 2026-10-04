@@ -125,19 +125,17 @@ public final class IPCBridge {
             } ?? [:]
             let columns = saved.columns.flatMap { column in column.windows.map { ($0, Optional(column)) } }
             return (columns + saved.floating.map { ($0, nil) } + saved.hidden.map { ($0.window, nil) }).map { window, column in
-                let now = frames[window.id.rawValue].map { frame in
-                    (frame: frame, onScreen: onScreenIDs.contains(window.id.rawValue))
-                }
+                let now = frames[window.id.rawValue]
                 let desired = world.groups[saved.group]?.space == saved.space
                     ? world.frames[window.id]?.frame.rect ?? expected[window.id] : expected[window.id]
                 var entry: [String: Any] = [
                     "windowID": window.id.rawValue, "bundleID": window.bundleID ?? "", "title": window.title,
                     "savedWidth": column.map { "\($0.width)" } ?? "floating", "isFullWidth": column?.isFullWidth ?? false,
-                    "isOnScreen": now?.onScreen ?? false, "currentFrame": NSNull(), "slivered": false,
+                    "isOnScreen": onScreenIDs.contains(window.id.rawValue), "currentFrame": NSNull(), "slivered": false,
                     "unreadable": now == nil, "expectedFrame": desired.map(Self.frameJSON) ?? NSNull(),
                     "expectedPlacement": column == nil ? "outside-strip" : expected[window.id] == nil ? "unavailable-display" : "tiled",
                 ]
-                if let frame = now?.frame {
+                if let frame = now {
                     entry["currentFrame"] = ["x": frame.minX, "y": frame.minY, "w": frame.width, "h": frame.height]
                     entry["slivered"] = area.map { frame.intersection($0).width < 10 } ?? false
                 }

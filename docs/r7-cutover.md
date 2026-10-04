@@ -10,30 +10,32 @@ Inventoried trunk before deletion at 76af894. Every item is kept, changed or dro
 | Dock-autohide visibleFrame polling | Dropped | R3/R5 use screen-parameter notifications rather than the old 1.5-second poll |
 | Focus left/right/up/down, move-column left/right, cycle width, full width, floating and close | Kept | All ten default Option bindings and menu actions remain; `[keys]` replaces `[keybindings]` |
 | `focus-left/right/up/down`, `move-column-left/right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window` | Kept | Same command names, canonical reducer commands |
-| `list-windows`, `get-layout`, `get-layouts` | Changed | Names retained; new world-derived JSON. `get-layouts` shows expected placement and fresh AX reads on app threads, bounded at 500 ms, with `unreadable` on failure. Fresh geometry determines `isOnScreen`/`slivered`. Hidden windows are included |
+| `list-windows`, `get-layout`, `get-layouts` | Changed | Names retained; new world-derived JSON. `get-layouts` shows expected placement and fresh AX reads on app threads, bounded at 500 ms, with `unreadable` on failure. Window-server on-screen IDs determine `isOnScreen`; fresh AX geometry determines `slivered`. Hidden windows are included |
 | `list-positions`, `clear-positions`, `clear-positions-app <bundle-id>` | Kept | SnapshotStore listing/clearing. App-scoped clear filters live, disk and hidden snapshots by bundle ID, preserves other apps and persists; tested |
 | `recover`, `quit` | Kept | Recover rewrites frames; quit awaits release before NSApplication exits |
 | `pause`, `resume`, `get-status`, `reload-config` | Kept | Same names; status reports paths/PID sandbox/config error/topology |
 | CLI socket and bundled `reel-msg` | Kept | Same Unix socket default and bundled CLI path; signature seals CLI before verification |
-| Menu Reload Config, pause/resume, Quit, Open Config, Recover Windows, Clear Saved Positions | Kept | Menu dispatches into the canonical Runtime/Engine handlers |
+| Menu Reload Config, pause/resume, Quit, Open Config, Recover Windows, Clear Saved Positions | Kept | Menu dispatches into the canonical Runtime/Engine handlers; bundle version label and Pause `p` shortcut remain |
 | Separate-Spaces warning and Mission Control deep link | Kept | Shared strips still require separate Spaces off |
 | Start at Login menu | Kept | SMAppService state is the source of truth; requires the bundle; approval opens Login Items |
 | Accessibility onboarding menu | Kept | A waiting status item, Settings link and Quit are available before the grant |
 | Menu icon and per-action shortcut labels | Changed | Text status (`Reel`, paused/error state); actions remain without shortcut labels |
 | `layout.gap`, `layout.snap` | Kept | Same objectives; strict schema rejects unknowns |
-| `layout.default_width`, `layout.width_presets` | Changed | Proportions only; old fixed-width table forms are not imported |
-| `layout.struts` | Kept | Per-display CG working insets before topology; clamped to a positive working area, tested |
-| `layout.animation_enabled`, `animation.scroll_stiffness`, `animation.scroll_damping_ratio`, bounce settings | Changed | `animation.enabled`, `stiffness`, `damping_ratio`; bounce names remain |
-| `gesture.modifier`, `gesture.snap` | Kept | Fn/Control/Option/Command gating; deterministic session ownership |
-| `focus_indicator` styles none/ring/raise/flash, color/width/corner radius/raise height | Kept | `[indicator]` new section; style payload moved to Platform before Config deletion |
-| Exact app, app regex and title regex floating rules | Kept | `bundle_id`, `bundle_id_regex`, `title_regex`, `floating`; multiple fields AND, last match wins. Title is captured at adoption, survives metadata updates and Space restore; no continuous title-rule reevaluation |
-| `layout.position_memory`, `saved_position_limit`, position-memory `match_by` rules | Dropped | Persistence always on; bounded matching belongs to the snapshot book, not user tuning. Root-approved R7 decision |
+| `layout.default_width.proportion`, `layout.default_width.fixed`, `layout.width_presets` | Changed | `layout.default_width` is a proportion scalar; presets remain proportions. Old table/fixed-width forms are not imported |
+| `layout.struts.left/right/top/bottom` | Kept | Per-display CG working insets before topology; clamped to a positive working area. Startup applies them before observer discovery without committing an empty census; reloads retain full topology handling |
+| `layout.animation_enabled`, `animation.scroll_stiffness`, `animation.scroll_damping_ratio`, `animation.bounce_distance`, `animation.bounce_damping_ratio` | Changed | `animation.enabled`, `stiffness`, `damping_ratio`; bounce names remain |
+| `gesture.modifier` | Changed | `fn`, `ctrl`/`control`, `alt`/`opt`/`option`, `cmd`/`command` accepted. `none` and empty no longer accepted: R6 passes unmodified scrolls to apps |
+| `gesture.snap` | Kept | Deterministic session ownership and configured snap behavior |
+| `focus_indicator.style/color/width/corner_radius/raise_height` | Kept | `[indicator]` new section; styles none/ring/raise/flash remain; style payload moved to Platform before Config deletion |
+| `rules.app_id/app_id_regex/title_regex/floating` | Kept | `bundle_id`, `bundle_id_regex`, `title_regex`, `floating`; multiple fields AND, first match wins, as on trunk. Title is captured at adoption, survives metadata updates and Space restore; no continuous title-rule reevaluation |
+| `layout.position_memory` | Dropped | Persistence always on; matching belongs to the snapshot book, not user tuning. Root-approved R7 decision |
 | Old state/config migration | Changed | Existing config is read unchanged at the same path; first unknown key shown and startup defaults used. Old snapshot format is not imported or deleted |
 | `start_at_login` config key | Dropped | Menu/system state only, root-approved R7 decision |
-| `cursor.long_press_delay_ms`, `drag_threshold_px`, `title_bar_height`, `title_bar_corner_inset_px` | Dropped | R6 constants; native corner resizing remains |
-| 3-finger focus swipe, `gesture.swipe_threshold_px` | Dropped | R6 decision. Three fingers pan rather than focus-switch |
+| `cursor.long_press_delay_ms`, `cursor.drag_threshold_px`, `cursor.title_bar_corner_inset_px` | Dropped | R6 constants; native corner resizing remains |
+| 3-finger focus swipe, `cursor.swipe_threshold_px` | Dropped | R6 decision. Three fingers pan rather than focus-switch |
 | Click-to-recenter an already AX-focused window | Dropped | R6 decision. Explicit focus commands still recenter |
-| `reorder_overlay.ghost_settle_ms`, animated reorder band | Dropped | R6 constant/drop behavior; root accepted no band animation |
+| Animated reorder band | Dropped | R6 drop behavior; root accepted no band animation |
+| `reorder_overlay.thumbnail_height` | Dropped | R6 uses fixed overlay sizing rather than a user-configured thumbnail height |
 | `reorder_overlay.thumbnail_style` | Dropped | One ScreenCaptureKit screenshot style with placeholder fallback. The old icon-only choice avoided Screen Recording, so new screenshot permission is an open upgrade risk |
 | Flick and native momentum | Changed | Projected-velocity landing is operator-approved. Scroll during a press is ignored, Space-change drops refused, pause returns a live tail to macOS |
 | Space persistence, exact sid with fingerprint fallback, census guards | Kept | One snapshot book and epoch-guarded reducer; fresh identity is separate from census safety |
@@ -42,6 +44,8 @@ Inventoried trunk before deletion at 76af894. Every item is kept, changed or dro
 | Bundle ID, executable name, signing, Info.plist, icon resource | Kept | `dev.reel.Reel`, `Reel`, existing ad-hoc signing flow, screen-capture usage description; no installer or launch in bundler |
 | Logs and 1 MB rotation | Kept | Bundle log path and one `.1` backup; bare stdout. Added `REEL_LOG_PATH` for sandbox bundle lanes, with rotation checks |
 | Release title-log hashing | Changed | The new runtime does not log titles in normal events, so no hash shim is needed. Read-only IPC intentionally returns titles |
+
+The config inventory was re-audited against `git show 76af894:Sources/Config/Config.swift`, including nested width/strut keys, all ten `[keybindings]` actions and every rule field. `cursor.title_bar_height`, `reorder_overlay.ghost_settle_ms`, `layout.saved_position_limit` and position-memory `match_by` were not parsed trunk keys and are not counted as removed settings.
 
 ## Config migration
 

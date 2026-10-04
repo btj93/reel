@@ -3708,16 +3708,19 @@ struct FuzzStream {
         let missing = (spaces[2]["windows"] as? [[String: Any]])?.first
         check(missing?["unreadable"] as? Bool == true && missing?["currentFrame"] is NSNull, "failed fresh read is explicit, not a cached frame")
         var visibility = Harness()
-        visibility.census(10, [window(10), window(11), window(12), window(13)])
+        visibility.census(10, [window(10), window(11), window(12), window(13), window(14)])
         let overlapping = CGRect(x: 10, y: 10, width: 100, height: 100)
         let classified = IPCBridge.layouts(world: visibility.world, active: 1,
                                            frames: [10: overlapping, 11: overlapping, 12: overlapping, 13: overlapping],
-                                           onScreenIDs: [10])
+                                           onScreenIDs: [10, 14])
         let visibilitySpaces = classified["spaces"] as? [[String: Any]] ?? []
         let visibleEntries = visibilitySpaces.first?["windows"] as? [[String: Any]] ?? []
-        check(visibleEntries.filter { $0["isOnScreen"] as? Bool == true }.compactMap { $0["windowID"] as? UInt32 } == [10],
+        check(visibleEntries.filter { $0["isOnScreen"] as? Bool == true }.compactMap { $0["windowID"] as? UInt32 } == [10, 14],
               "window-server membership alone marks on-screen; off-Space, minimized and hidden readable rectangles do not")
-        check(visibleEntries.allSatisfy { $0["unreadable"] as? Bool == false }, "visibility does not discard fresh AX geometry")
+        check(visibleEntries.filter { $0["windowID"] as? UInt32 != 14 }.allSatisfy { $0["unreadable"] as? Bool == false },
+              "visibility does not discard fresh AX geometry")
+        check(visibleEntries.last?["unreadable"] as? Bool == true && visibleEntries.last?["currentFrame"] is NSNull,
+              "an on-screen window with a failed AX read remains explicitly unreadable")
         var offset = Harness(displays: [display(1, x: -1000, y: -600)])
         offset.census(10, [window(1)])
         let offsetLayout = IPCBridge.layouts(world: offset.world, active: 1, frames: [:], onScreenIDs: [])

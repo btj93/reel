@@ -12,7 +12,7 @@ final class MenuBar: NSObject {
     private let state = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let error = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLogin), keyEquivalent: "")
-    private let pause = NSMenuItem(title: "Pause", action: #selector(togglePause), keyEquivalent: "")
+    private let pause = NSMenuItem(title: "Pause", action: #selector(togglePause), keyEquivalent: "p")
     private let separateSpaces = NSMenuItem(title: "⚠︎ Shared strip disabled. turn off \"Displays have separate Spaces\"",
                                             action: #selector(openDesktopSettings), keyEquivalent: "")
 
@@ -23,6 +23,10 @@ final class MenuBar: NSObject {
         menu.autoenablesItems = false
         state.isEnabled = false
         error.isEnabled = false
+        let version = NSMenuItem(title: "Reel v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")",
+                                 action: nil, keyEquivalent: "")
+        version.isEnabled = false
+        menu.addItem(version)
         login.target = self
         pause.target = self
         separateSpaces.target = self

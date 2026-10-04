@@ -189,7 +189,8 @@ host_quit() {  # <name>
     kill -TERM "${HOST_PID[$name]}" 2>/dev/null || true
     # Close the held write-fd (close by numeric value, not the {var} alloc form).
     [ -n "$fd" ] && eval "exec ${fd}>&-" 2>/dev/null || true
-    unset 'HOST_PID[$name]'
+    rm -f "$NS/host-$name.in"
+    unset 'HOST_PID[$name]' 'HOST_FD[$name]' 'HOST_OUT[$name]'
 }
 
 # ------------------------- layout / column assertions ----------------------
