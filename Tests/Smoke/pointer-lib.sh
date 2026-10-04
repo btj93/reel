@@ -80,8 +80,14 @@ gesture_config() {  # <config dir> <binary>
 # focus_column <index> : make the column active and let the strip settle, so the column sits centred on its display.
 focus_column() {
     if [ "$DRY" != 1 ]; then
-        while [ "$(active_index)" -gt "$1" ]; do reel_msg focus-left >/dev/null; done
-        while [ "$(active_index)" -lt "$1" ]; do reel_msg focus-right >/dev/null; done
+        local index
+        for _ in 1 2 3 4 5 6 7 8; do
+            index=$(active_index)
+            if [ "$index" -gt "$1" ]; then reel_msg focus-left >/dev/null
+            elif [ "$index" -lt "$1" ]; then reel_msg focus-right >/dev/null
+            else break; fi
+        done
+        [ "$(active_index)" = "$1" ] || fail "focus never reached column $1"
     fi
     waitForSettle 10
 }
