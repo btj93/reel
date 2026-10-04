@@ -236,7 +236,7 @@ lane7() {
     band=$(printf '%s' "$line" | sed -E 's/.* y=([-0-9]+).*/\1/')
     [ -n "$slot" ] || slot=$(printf '%s' "$line" | sed -E 's/.*slots=([^ ]*).*/\1/' | tr ',' '\n' | tail -1 | cut -d: -f2)
     post "lane7-drop" "$(drag_release_script $((x + 40)) "$y" "$slot" "$band")"
-    log_wait 3 'pointer: drop '
+    log_wait 3 'pointer: drop tile='
     waitForSettle 10
     shot reorder
     local after expected; after=$(col_window_ids)
@@ -309,7 +309,7 @@ lane10() {
     switch_space 123
     waitForSettle 10
     shot reorder-space
-    log_lacks 'pointer: drop ' "the drag ended without a drop"
+    log_lacks 'pointer: drop tile=' "the drag ended without a drop"
     [ "$DRY" = 1 ] && return 0
     [ "$(col_window_ids)" = "$before" ] || fail "order changed from $before to $(col_window_ids)"
     ok "order stayed $before"
