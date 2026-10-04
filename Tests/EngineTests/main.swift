@@ -390,19 +390,22 @@ struct Harness {
         h.send(.command(.setWidth(TileID(1), 650), .ipc))
         h.send(.pointer(began))
         h.send(.pointer(swipe(1)))
-        let targets = h.gesture!.swipe!.snapTargets
         h.send(.command(.setWidth(TileID(1), 350), .ipc))
+        h.send(.command(.setWidth(TileID(2), 300), .ipc))
+        check(h.gesture != nil && h.active == TileID(1), "width changes leave the swipe on the first column")
         h.send(.pointer(swipe(399)))
         let strip = h.world.groups[1]!.strip
         let shift = strip.columnX(at: 0, time: h.time + 0.01) - strip.columnX(at: 1, time: h.time + 0.01)
+        let lifted = h.offset
         h.send(.pointer(lift))
         check(h.world.groups[1]!.strip.activeColumnIndex == 1, "release lands on the next column")
         if case .animation(let release) = h.world.groups[1]!.strip.viewOffset {
-            check(abs(release.to - shift - targets[1]) < 0.001, "release targets the captured column boundary, not a new-width grid")
+            check(abs(release.from - lifted - shift) < 0.001, "the spring starts where the fingers left the view, in the new column's basis")
         } else { check(false, "gesture release starts spring") }
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(350), "logical width is latest target")
         h.send(.tick, advance: 5)
         check(h.world.groups[1]!.strip.columnData[0].cachedWidth == 350, "animated width settles to logical width")
+        check(abs(h.world.frames[TileID(2)]!.frame.rect.midX - 500) < 1, "the landed column rests at its snap point once the widths settle")
         check(h.world.check().isEmpty, "overlapping animation invariants")
     }
     section("2b2457b 67240b9: free gesture projection retains the starting coordinate basis") {
@@ -3684,17 +3687,20 @@ struct FuzzStream {
         check(h.world.check().isEmpty, "rejection invariants")
     }
     section("abf1b87: a swipe that has not moved yet leaves external focus live, then tracks from where focus left the view") {
-        var h = Harness()
+        var h = Harness(animate: true)
         h.census(10, [window(1), window(2), window(3)])
         h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.tick, advance: 5)
         h.advance(EngineConfig.focusDebounce + margin)
         h.send(.pointer(began))
+        let began = h.gesture?.startOffset ?? h.world.pointer?.startOffset
         h.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus)))
         h.advance(EngineConfig.focusDebounce + margin)
         check(h.active == TileID(3) && h.world.pointer != nil, "external focus moves the strip during an undecided swipe")
-        let moved = h.offset
+        let moving = h.world.groups[1]!.strip.viewOffset.current(at: h.time + 0.01)
+        check(moving != began, "the view is mid-scroll when the swipe decides")
         h.send(.pointer(swipe(30)))
-        check(h.gesture?.startOffset == moved, "the swipe starts from the offset focus left")
+        check(h.gesture?.startOffset == moving, "the swipe starts from the offset focus left")
     }
     section("2b2457b: a swipe onto a column of another width centres that column") {
         var h = Harness()
