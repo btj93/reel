@@ -2,7 +2,6 @@ import Foundation
 import CoreGraphics
 import Core
 import Platform
-import WindowManager
 
 // Additional DisplayManager.alignmentGroups coverage.
 //
@@ -88,27 +87,4 @@ func runL1TopologyTests() {
     // ones. Pruning unconditionally deletes the entries the add step just wrote,
     // so after any merge or split NO display resolves to its live controller.
 
-    section("display map — merge keeps both displays routed to the merged group")
-    do {
-        let current: [CGDirectDisplayID: [CGDirectDisplayID]] = [1: [1], 2: [2]]
-        let out = reconcileDisplayMap(current: current, added: [[1, 2]], removed: [[1], [2]])
-        assertEq(out[1] ?? [], [1, 2], "display 1 routes to merged group")
-        assertEq(out[2] ?? [], [1, 2], "display 2 routes to merged group")
-    }
-
-    section("display map — split routes each display to its own successor")
-    do {
-        let current: [CGDirectDisplayID: [CGDirectDisplayID]] = [1: [1, 2], 2: [1, 2]]
-        let out = reconcileDisplayMap(current: current, added: [[1], [2]], removed: [[1, 2]])
-        assertEq(out[1] ?? [], [1], "display 1 routes to its own group")
-        assertEq(out[2] ?? [], [2], "display 2 routes to its own group")
-    }
-
-    section("display map — pure dissolve drops the unplugged display")
-    do {
-        let current: [CGDirectDisplayID: [CGDirectDisplayID]] = [1: [1], 2: [2]]
-        let out = reconcileDisplayMap(current: current, added: [], removed: [[2]])
-        assertEq(out[1] ?? [], [1], "surviving display keeps its group")
-        check(out[2] == nil, "unplugged display is removed from the map")
-    }
 }

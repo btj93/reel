@@ -7,7 +7,7 @@
 # without REEL_E2E_CONFIRM=1 and while any Reel or ReelNext is running.
 #
 #   REEL_E2E_CONFIRM=1 bash Tests/Smoke/pointer-lanes.sh [lane ...]    lanes 1 to 10, all by default
-#   BIN_HEAD=.build/debug/ReelNext BIN_TRUNK=.build/debug/Reel          the binaries under test
+#   BIN_HEAD=.build/debug/Reel BIN_TRUNK=.build/debug/Reel          the binaries under test
 #   LANE_OUT=/tmp/swarm-r6/worker-1                                     where screenshots go
 #   SMOKE_DRY_RUN=1                                                     walk every lane against fixtures; InputPoster
 #                                                                       parses each script and posts nothing
@@ -28,7 +28,7 @@ SMOKE_TAG="$$"
 BIN_DIR="$REPO_ROOT/.build/debug"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
-BIN_HEAD="${BIN_HEAD:-$BIN_DIR/ReelNext}"
+BIN_HEAD="${BIN_HEAD:-$BIN_DIR/Reel}"
 BIN_TRUNK="${BIN_TRUNK:-$BIN_DIR/Reel}"
 BIN_REEL="$BIN_HEAD"
 NS="/tmp/reel-pointer-lanes-$$"
@@ -119,27 +119,17 @@ view_pos() { reel_msg get-layout | jq "$AG.viewPos"; }
 off_snap() { reel_msg get-layout | jq "$AG | (.currentColumns[.activeColumnIndex].frame | .x + .w / 2) as \$c
     | ([.regions[] | select(\$c >= .minX and \$c < .maxX)] + .regions)[0] | \$c - (.minX + .width / 2) | fabs"; }
 
-# Head lands a flick by its projected velocity, trunk on the column under the cursor, so only head is judged; trunk's
-# column is recorded for comparison.
 lane1() {
-    section "lane 1: a flick from column 1 of 4 toward the strip's end moves head there and settles on a snap point"
-    local results=() bin off
-    for bin in "$BIN_TRUNK" "$BIN_HEAD"; do
-        fresh 4 "$bin"
-        focus_column 1
-        on_display "$(title_x 1)" "$(center_y 1)"
-        post "lane1-flick" "$(flick_script "$(title_x 1)" "$(center_y 1)" -30)"
-        waitForSettle 10
-        results+=("$(active)")
-        shot "flick-$(basename "$bin")"
-    done
-    off=$(off_snap)
-    [ "$DRY" = 1 ] && { dry_note "pass when head's column is past 1 and ${off} pt is at most 2"; return 0; }
-    cp "$OUT/flick-$(basename "$BIN_HEAD").png" "$OUT/flick.png"
-    info "trunk settled on column ${results[0]} (recorded only: trunk lands on the column under the cursor)"
-    [ "${results[1]}" -gt 1 ] || fail "the flick toward the strip's end left head on column ${results[1]}"
-    awk -v d="$off" 'BEGIN { exit !(d <= 2) }' || fail "head settled ${off} pt off its snap point"
-    ok "head moved from column 1 to ${results[1]} and rests on its snap point (${off} pt)"
+    section "lane 1: head flick from column 1 moves toward the strip end and snaps"
+    fresh 4 "$BIN_HEAD"
+    focus_column 1
+    post lane1-flick "$(flick_script "$(title_x 1)" "$(center_y 1)" -30)"
+    waitForSettle 10
+    shot flick
+    local off; off=$(off_snap)
+    [ "$DRY" = 1 ] && { dry_note "pass when active > 1 and snap error <= 2 pt"; return 0; }
+    [ "$(active)" -gt 1 ] || fail "flick did not advance"
+    awk -v d="$off" 'BEGIN { exit !(d <= 2) }' || fail "flick did not snap"
 }
 
 lane2() {

@@ -14,7 +14,6 @@ open class AXApp: @unchecked Sendable {
     public let appElement: AXUIElement
 
     /// Serial queue for this app's AX writes (`setFrame`/`setPosition`).
-    /// StripController routes every write for a window owned by this app through
     /// here, guaranteeing per-window ordering (an older mid-animation frame can
     /// never land after the final frame) and confining the `axCallCostEMA`
     /// read-modify-write to a single thread (finding #2).

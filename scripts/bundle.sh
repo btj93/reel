@@ -5,7 +5,7 @@ set -euo pipefail
 PRODUCT="Reel"
 CONFIG="${1:-debug}"
 BUILD_DIR=".build/${CONFIG}"
-BUNDLE_DIR=".build/bundled/${PRODUCT}.app"
+BUNDLE_DIR="${REEL_BUNDLE_DIR:-.build/bundled/${PRODUCT}.app}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERSION=$(grep -o '"[0-9][0-9.]*"' "${SCRIPT_DIR}/../.release-please-manifest.json" | tr -d '"')
@@ -66,11 +66,11 @@ cp "${BUILD_DIR}/${PRODUCT}" "${BUNDLE_DIR}/Contents/MacOS/"
 cp "${BUILD_DIR}/reel-msg" "${BUNDLE_DIR}/Contents/MacOS/"
 
 # Copy SwiftPM resource bundle into the .app.
-# Place in Contents/Resources/ (standard .app location). The Config module's
+# Place in Contents/Resources/ (standard .app location). The Engine module's
 # resourceBundle accessor checks both this path and SwiftPM's default path.
-CONFIG_BUNDLE="${BUNDLE_DIR}/Contents/Resources/Reel_Config.bundle"
+CONFIG_BUNDLE="${BUNDLE_DIR}/Contents/Resources/Reel_Engine.bundle"
 mkdir -p "${CONFIG_BUNDLE}"
-cp "${SCRIPT_DIR}/../Sources/Config/config.default.toml" "${CONFIG_BUNDLE}/"
+cp "${SCRIPT_DIR}/../Sources/Engine/config.default.toml" "${CONFIG_BUNDLE}/"
 
 # Copy icon
 ICON_SRC="${SCRIPT_DIR}/../Resources/Reel.icns"
@@ -78,10 +78,8 @@ if [ -f "${ICON_SRC}" ]; then
     cp "${ICON_SRC}" "${BUNDLE_DIR}/Contents/Resources/"
 fi
 
-# Ad-hoc code sign with a stable identifier.
-# macOS TCC tracks permissions by code signature hash — without signing,
-# every rebuild produces a different hash and macOS revokes permission.
-# Ad-hoc signing (-s -) with a fixed identifier keeps it stable.
+# Keep the existing signing identity and bundle path. Ad-hoc updates can still
+# require a fresh Accessibility grant; only a lane-host upgrade can confirm TCC.
 codesign -fs - --identifier "dev.reel.Reel" "${BUNDLE_DIR}"
 
 # Gate the signature. --strict is load-bearing: unsealed nested code is exactly

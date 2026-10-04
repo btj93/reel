@@ -88,9 +88,9 @@ public final class IPCBridge {
             let area = world.topology.group(id: saved.group)?.frame
             let displayGroup = world.topology.group(id: saved.group)
             let expected: [TileID: CGRect] = displayGroup.map { group in
-                var strip = Strip(gap: world.config.gap, workingArea: group.frame)
-                strip.groupArea = GroupWorkingArea(regions: group.displays.map { DisplayRegion(displayID: $0.id, rect: $0.area) },
-                                                   referenceMidX: group.displays[0].area.midX)
+                var strip = Strip(gap: world.config.gap, workingArea: CGRect(origin: .zero, size: group.frame.size))
+                strip.groupArea = GroupWorkingArea(regions: group.displays.map { DisplayRegion(displayID: $0.id, rect: $0.area.offsetBy(dx: -group.frame.minX, dy: -group.frame.minY)) },
+                                                   referenceMidX: group.displays[0].area.midX - group.frame.minX)
                 strip.columns = saved.columns.map { column in
                     Column(tiles: column.windows.map(\.id), activeTileIndex: column.activeTileIndex, width: column.width,
                            presetIndex: column.presetIndex, isFullWidth: column.isFullWidth)
@@ -101,10 +101,10 @@ public final class IPCBridge {
                 strip.columnData = strip.columns.map { _ in ColumnData(cachedWidth: 1) }
                 strip.snapIndices = saved.columns.map(\.snapIndex)
                 strip.recalculateWidths(at: world.time)
-                return Dictionary(uniqueKeysWithValues: computeTargetFrames(strip: strip, time: world.time).map { ($0.tileID, $0.frame) })
+                return Dictionary(uniqueKeysWithValues: computeTargetFrames(strip: strip, time: world.time).map { ($0.tileID, $0.frame.offsetBy(dx: group.frame.minX, dy: group.frame.minY)) })
             } ?? [:]
             let columns = saved.columns.flatMap { column in column.windows.map { ($0, Optional(column)) } }
-            return (columns + saved.floating.map { ($0, nil) }).map { window, column in
+            return (columns + saved.floating.map { ($0, nil) } + saved.hidden.map { ($0.window, nil) }).map { window, column in
                 let now = windows[window.id.rawValue]
                 var entry: [String: Any] = [
                     "windowID": window.id.rawValue, "bundleID": window.bundleID ?? "", "title": window.title,
@@ -135,13 +135,12 @@ public final class IPCBridge {
         return ["activeDisplayID": active, "primaryScreenHeight": world.topology.primaryScreenHeight, "spaces": spaces]
     }
 
-    /// Where the window server has every window now, on any Space.
     private func readLayouts(completion: @escaping @Sendable (ReelResponse) -> Void) {
         let world = loop.world
         let active = loop.group
         let snapshots = world.groups.keys.compactMap(world.currentSnapshot)
             + Array(world.spaces.live.values) + world.spaces.disk
-        let windows = snapshots.flatMap { $0.columns.flatMap(\.windows) + $0.floating }
+        let windows = snapshots.flatMap { $0.columns.flatMap(\.windows) + $0.floating + $0.hidden.map(\.window) }
         let unique = Dictionary(windows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let probe = FrameProbe(ids: Set(unique.keys)) { frames in
             let fresh = frames.mapValues { frame in
@@ -196,7 +195,7 @@ public final class IPCBridge {
             "stateDir": loop.paths.stateDir,
             "managedPids": loop.allowedPids.map { $0.sorted() as Any } ?? NSNull(),
             "configError": loop.configError as Any? ?? NSNull(),
-            "stageManager": UserDefaults(suiteName: "com.apple.WindowManager")?.bool(forKey: "GloballyEnabled") == true ? "unsupported" : "off",
+            "stageManager": "unsupported",
         ]
     }
 

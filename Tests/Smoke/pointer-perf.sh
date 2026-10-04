@@ -8,7 +8,7 @@
 #
 #   REEL_E2E_CONFIRM=1 bash Tests/Smoke/pointer-perf.sh
 #   PERF_RUNS=5                          runs per binary, alternating trunk and head
-#   PERF_BINS="a b"                      binaries to compare, trunk first (default: .build/debug/Reel .build/debug/ReelNext)
+#   PERF_BINS="a b"                      binaries to compare, trunk first (default: .build/debug/Reel .build/debug/Reel)
 #   SMOKE_DRY_RUN=1                      walk the steps and summarize a fixture trace; launch and post nothing
 #
 # Both binaries run the default config's [gesture] settings, and every run starts on column 2 of 6, so the swipe has
@@ -30,7 +30,7 @@ SMOKE_TAG="$$"
 BIN_DIR="$REPO_ROOT/.build/debug"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
-read -r -a BINS <<< "${PERF_BINS:-$BIN_DIR/Reel $BIN_DIR/ReelNext}"
+read -r -a BINS <<< "${PERF_BINS:-${BIN_TRUNK:-/tmp/reel-trunk/.build/debug/Reel} $BIN_DIR/Reel}"
 RUNS="${PERF_RUNS:-5}"
 NS="/tmp/reel-pointer-perf-$$"
 SOCK="$NS/reel.sock"
@@ -51,7 +51,9 @@ trap cleanup EXIT INT TERM
 launch_reel() {  # <binary>
     BIN_REEL=$1
     write_test_config "$CFG" 16
-    gesture_config "$CFG" "$1"
+    if [ "$1" = "${BINS[0]}" ]; then cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"; fi
+    if [ "$1" = "${BINS[0]}" ]; then cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"
+    else gesture_config "$CFG" "$1"; fi
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
     REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" \
         "$1" >> "$REEL_LOG" 2>&1 &
@@ -115,7 +117,7 @@ EOF
 
 run_once() {  # <binary> <run>
     local bin=$1 run=$2 name trace x y
-    name=$(basename "$bin")
+    name=$(side "$bin")
     trace="$NS/$name-$run.trace"
     launch_reel "$bin"
     focus_column 2
@@ -137,6 +139,8 @@ run_once() {  # <binary> <run>
     summarize "$NS/$name-$run.xml" "$name"
     quit_reel
 }
+
+side() { if [ "$1" = "${BINS[0]}" ]; then echo trunk; else echo head; fi; }
 
 percentile() {  # <name> <p> : over every frame of every run
     grep "^$1 " "$FRAMES" | awk '{print $2}' | sort -n | awk -v p="$2" '{v[NR]=$1} END {
@@ -163,7 +167,7 @@ main() {
     trunk="$(basename "${BINS[0]}")"
     head="$(basename "${BINS[${#BINS[@]}-1]}")"
     for bin in "${BINS[@]}"; do
-        local name; name="$(basename "$bin")"
+        local name; name="$(side "$bin")"
         info "$name: frames=$(grep -c "^$name " "$FRAMES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
     done
     if [ "$DRY" = 1 ]; then dry_note "rule: $head p95 <= $trunk p95 * 1.1 and <= 8 ms"; return 0; fi

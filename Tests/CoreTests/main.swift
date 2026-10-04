@@ -1,10 +1,8 @@
 import Foundation
 import Core
 import CoreGraphics
-import Config
 import IPC
 import TOMLKit
-import WindowManager
 import Platform
 
 // Simple test runner — no Xcode or XCTest required
@@ -1554,24 +1552,6 @@ do {
     check(strip.columnData[0].widthAnimation != nil, "animation created with params")
 }
 
-// MARK: - CursorConfig
-
-section("CursorConfig — defaults")
-do {
-    let config = CursorConfig()
-    assertEq(config.longPressDelayMs, 300, "default long press delay")
-    assertClose(config.dragThresholdPx, 5.0, tolerance: 0.01, "default drag threshold")
-    assertClose(config.swipeThresholdPx, 50.0, tolerance: 0.01, "default swipe threshold")
-    assertClose(config.titleBarCornerInsetPx, 8.0, tolerance: 0.01, "default title bar corner inset")
-}
-
-section("ReorderOverlayConfig — defaults")
-do {
-    let config = ReorderOverlayConfig()
-    assertEq(config.thumbnailStyle, "screenshot", "default thumbnail style")
-    assertClose(config.thumbnailHeight, 160.0, tolerance: 0.01, "default thumbnail height")
-}
-
 // MARK: - removeColumn viewOffset Preservation
 
 print("removeColumn viewOffset Preservation Tests")
@@ -1690,77 +1670,6 @@ do {
     }
 }
 
-// MARK: - Config Validation
-
-print("Config Validation Tests")
-
-section("Config — negative gap clamped to 0")
-do {
-    let toml = """
-    [layout]
-    gap = -5
-    """
-    let table = try! TOMLTable(string: toml)
-    let config = ReelConfig.load(from: table)
-    assertClose(config.gap, 0, tolerance: 0.01, "negative gap clamped to 0")
-}
-
-section("Config — negative stiffness clamped to 1")
-do {
-    let toml = """
-    [animation]
-    scroll_stiffness = -100
-    """
-    let table = try! TOMLTable(string: toml)
-    let config = ReelConfig.load(from: table)
-    assertClose(config.scrollStiffness, 1, tolerance: 0.01, "negative stiffness clamped to 1")
-}
-
-section("Config — damping ratio clamped to 0.01")
-do {
-    let toml = """
-    [animation]
-    scroll_damping_ratio = 0
-    """
-    let table = try! TOMLTable(string: toml)
-    let config = ReelConfig.load(from: table)
-    assertClose(config.scrollDampingRatio, 0.01, tolerance: 0.001, "zero damping ratio clamped to 0.01")
-}
-
-section("Config — proportion clamped to [0.01, 1]")
-do {
-    let toml = """
-    [layout.default_width]
-    proportion = 5.0
-    """
-    let table = try! TOMLTable(string: toml)
-    let config = ReelConfig.load(from: table)
-    if case .proportion(let p) = config.defaultWidth {
-        assertClose(p, 1.0, tolerance: 0.01, "proportion clamped to 1.0")
-    } else {
-        check(false, "should be proportion type")
-    }
-}
-
-section("Config — invalid regex ignored")
-do {
-    let toml = """
-    [[rules]]
-    app_id_regex = "[invalid("
-    floating = true
-    """
-    let table = try! TOMLTable(string: toml)
-    let config = ReelConfig.load(from: table)
-    // RETARGETED (was: count == 1, "rule should still be added"). Keeping the rule
-    // left every predicate nil, so it matched EVERY window — and with floating =
-    // true it floated the entire session. The intent of this section is "an invalid
-    // regex must not crash or be honored", which a dropped rule satisfies; the old
-    // assertion additionally locked in the match-everything behavior. The
-    // `config.rules[0]` check had to go rather than be retargeted: it would index an
-    // empty array.
-    assertEq(config.rules.count, 0, "rule with no usable predicate is dropped, not kept")
-}
-
 // MARK: - IPC Message Round-Trip
 
 print("IPC Message Round-Trip Tests")
@@ -1810,63 +1719,6 @@ do {
         let decoded = try! JSONDecoder().decode(ReelCommand.self, from: encoded)
         check(decoded == cmd, "\(cmd.rawValue) round-trip")
     }
-}
-
-// ============================================================
-// MARK: - Window rule matching
-
-// `if let regex = X, let value = Y` skipped the predicate entirely when the
-// property was nil and fell through to `return true`, so a rule targeting specific
-// apps matched every window whose bundle ID or title could not be read.
-section("rules — unevaluatable predicates fail closed")
-do {
-    let r = WindowRule(appIDRegex: "^com\\.apple\\.", classification: .float)
-    check(!r.matches(WindowProperties(bundleIdentifier: nil, title: "x")),
-        "regex rule must not match a window with no bundle ID")
-    check(r.matches(WindowProperties(bundleIdentifier: "com.apple.Safari", title: "x")),
-        "regex rule still matches a real bundle ID")
-    check(!r.matches(WindowProperties(bundleIdentifier: "com.other.App", title: "x")),
-        "regex rule rejects a non-matching bundle ID")
-
-    let t = WindowRule(titleRegex: "^Prefs", classification: .float)
-    check(!t.matches(WindowProperties(bundleIdentifier: "a.b", title: nil)),
-        "title rule must not match a window with no title")
-    check(t.matches(WindowProperties(bundleIdentifier: "a.b", title: "Prefs — General")),
-        "title rule still matches a real title")
-
-    let empty = WindowRule(classification: .float)
-    check(!empty.matches(WindowProperties(bundleIdentifier: "a.b", title: "x")),
-        "predicate-free rule matches nothing")
-}
-
-// A rule whose only predicate is an invalid regex used to be kept with all
-// predicates nil — matching every window, and with floating = true floating
-// everything.
-section("rules — a rule whose only predicate is invalid is dropped")
-do {
-    let toml = """
-    [[rules]]
-    app_id_regex = "[invalid("
-    floating = true
-    """
-    let table = try! TOMLTable(string: toml)
-    let config = ReelConfig.load(from: table)
-    assertEq(config.rules.count, 0, "predicate-free rule must not be kept")
-}
-
-section("rules — a partially-valid rule keeps its surviving predicate")
-do {
-    let toml = """
-    [[rules]]
-    app_id = "com.example.App"
-    title_regex = "[invalid("
-    floating = true
-    """
-    let table = try! TOMLTable(string: toml)
-    let config = ReelConfig.load(from: table)
-    assertEq(config.rules.count, 1, "rule survives on its valid app_id")
-    check(config.rules[0].titleRegex == nil, "invalid title regex dropped")
-    assertEq(config.rules[0].appID, "com.example.App", "app_id retained")
 }
 
 // ============================================================
@@ -2929,19 +2781,14 @@ do {
 
 // ============================================================
 // MARK: - W1 Layer-1 backfill (StripSnapshotStore, topology boundaries, Core gaps)
-runL1StoreTests()
-runL1TopologyTests()
-runL1CoreBackfillTests()
-runL1AuditGapTests()
-runL1GroupAreaTests()
-runL1FocusGateTests()
-runL1SpaceKeyTests()
 
 // ============================================================
 // MARK: - W4 Layer-2 StripController simulation (fakes + virtual clock)
-runSimFocus()
-runSimAnim()
-runSimSpace()
+runL1TopologyTests()
+runL1AuditGapTests()
+runL1CoreBackfillTests()
+runL1GroupAreaTests()
+runL1SpaceKeyTests()
 runRuntimeWriteTests()
 
 // ============================================================

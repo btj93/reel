@@ -13,7 +13,6 @@ public final class SocketServer: @unchecked Sendable {
     /// stalled client can never freeze the window manager (and, with it, the
     /// CGEventTaps serviced by the main run loop). Concurrent so one slow
     /// connection does not head-of-line-block the next. Command execution still
-    /// hops to `.main` (WindowManager is main-thread-only).
     private let connectionQueue = DispatchQueue(
         label: "co.reel.ipc.connection", qos: .userInitiated, attributes: .concurrent)
 
@@ -236,7 +235,6 @@ public final class SocketServer: @unchecked Sendable {
     }
 
     /// Decode the request (pure, safe off-main) and invoke the command handler
-    /// on `.main` — WindowManager is main-thread-only.
     /// Returns the response plus the resolved command, so `handleConnection` can
     /// run post-flush actions (see `onFlushed`) without the command handlers having
     /// to thread a closure back out.

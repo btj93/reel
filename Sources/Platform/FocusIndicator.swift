@@ -2,7 +2,6 @@ import AppKit
 import CoreGraphics
 import Foundation
 import Core
-import Config
 
 /// Draws a focus indicator around the active window.
 /// Supports four styles: none, ring (animated border), raise (AX raise), flash (brief color pulse).
@@ -46,7 +45,6 @@ public final class FocusIndicator {
     /// redraws and window-server ordering calls when nothing changed.
     private var appliedFrame: CGRect?
 
-    /// True when any animation is in flight — used by StripController.isFullySettled.
     public var isAnimating: Bool {
         springX != nil || flashEasing != nil || fadeOutEasing != nil
     }

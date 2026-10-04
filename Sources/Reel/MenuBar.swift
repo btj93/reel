@@ -1,0 +1,91 @@
+import AppKit
+import Runtime
+import Platform
+import Foundation
+import ServiceManagement
+
+/// Status item: state, the last config error, the separate-Spaces warning, pause, reload and quit.
+@MainActor
+final class MenuBar: NSObject {
+    private let loop: Loop
+    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let state = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let error = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLogin), keyEquivalent: "")
+    private let pause = NSMenuItem(title: "Pause", action: #selector(togglePause), keyEquivalent: "")
+    private let separateSpaces = NSMenuItem(title: "⚠︎ Shared strip disabled. turn off \"Displays have separate Spaces\"",
+                                            action: #selector(openDesktopSettings), keyEquivalent: "")
+
+    init(loop: Loop) {
+        self.loop = loop
+        super.init()
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        state.isEnabled = false
+        error.isEnabled = false
+        login.target = self
+        pause.target = self
+        separateSpaces.target = self
+        separateSpaces.toolTip = "System Settings → Desktop & Dock → Mission Control → Displays have separate Spaces"
+        let reload = NSMenuItem(title: "Reload Config", action: #selector(reloadConfig), keyEquivalent: "r")
+        reload.target = self
+        let quit = NSMenuItem(title: "Quit Reel", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        [state, error, separateSpaces, .separator()].forEach(menu.addItem)
+        let actions: [(String, HotkeyAction)] = [
+            ("Focus Left", .focusLeft), ("Focus Right", .focusRight), ("Focus Up", .focusUp), ("Focus Down", .focusDown),
+            ("Move Column Left", .moveColumnLeft), ("Move Column Right", .moveColumnRight), ("Cycle Width", .cycleWidthPreset),
+            ("Toggle Full Width", .toggleFullWidth), ("Toggle Floating", .toggleFloating), ("Close Window", .closeWindow),
+        ]
+        for (title, action) in actions {
+            let entry = NSMenuItem(title: title, action: #selector(runAction(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = action
+            menu.addItem(entry)
+        }
+        let open = NSMenuItem(title: "Open Config", action: #selector(openConfig), keyEquivalent: ",")
+        let recover = NSMenuItem(title: "Recover Windows", action: #selector(recover), keyEquivalent: "")
+        let clear = NSMenuItem(title: "Clear Saved Positions", action: #selector(clearPositions), keyEquivalent: "")
+        [open, recover, clear].forEach { $0.target = self }
+        [.separator(), pause, reload, open, login, .separator(), recover, clear, quit].forEach(menu.addItem)
+        item.menu = menu
+        loop.onChange = { [weak self] in self?.refresh() }
+        refresh()
+    }
+
+    private func refresh() {
+        let failed = loop.configError != nil
+        item.button?.title = failed ? "Reel⚠︎" : loop.paused ? "Reel‖" : "Reel"
+        state.title = loop.paused ? "Reel: paused" : "Reel: running"
+        error.isHidden = !failed
+        error.title = "Config error: \(loop.configError ?? "")"
+        pause.title = loop.paused ? "Resume" : "Pause"
+        login.isEnabled = Bundle.main.bundleIdentifier != nil
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        separateSpaces.isHidden = !loop.world.topology.separateSpaces
+    }
+
+    @objc private func toggleLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
+            else { try SMAppService.mainApp.register() }
+        } catch { logLine("login: \(error.localizedDescription)") }
+        if SMAppService.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+        refresh()
+    }
+
+    @objc private func runAction(_ sender: NSMenuItem) {
+        if let action = sender.representedObject as? HotkeyAction { loop.hotkey(action) }
+    }
+    @objc private func openConfig() { NSWorkspace.shared.open(URL(fileURLWithPath: loop.paths.configFile)) }
+    @objc private func recover() { loop.send(.command(.recover, .ipc)) }
+    @objc private func clearPositions() { loop.send(.command(.clearPositions, .ipc)); loop.store.clear() }
+
+    @objc private func togglePause() { loop.setPaused(!loop.paused) }
+    @objc private func reloadConfig() { loop.reloadConfig() }
+    @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func openDesktopSettings() {
+        URL(string: "x-apple.systempreferences:com.apple.Desktop-Settings.extension").map { _ = NSWorkspace.shared.open($0) }
+    }
+}

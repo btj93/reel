@@ -245,7 +245,7 @@ public final class Loop {
         return outcome
     }
 
-    private func hotkey(_ action: HotkeyAction) {
+    public func hotkey(_ action: HotkeyAction) {
         guard !paused else { return }
         let command: Command? = switch action {
         case .focusLeft: .focusLeft

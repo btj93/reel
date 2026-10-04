@@ -163,7 +163,7 @@ extension Snapshot {
 }
 
 func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
-    func fresh(_ old: ObservedWindow) -> ObservedWindow { old.id == window.id ? window : old }
+    func fresh(_ old: ObservedWindow) -> ObservedWindow { old.id == window.id ? window.adoptingTitle(old.ruleTitle ?? old.title) : old }
     let columns = saved.columns.map {
         SnapshotColumn(windows: $0.windows.map(fresh), width: $0.width, activeTileIndex: $0.activeTileIndex,
                        snapIndex: $0.snapIndex, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
@@ -180,7 +180,7 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     var group = GroupState(display: display, config: config)
     group.phase = .settled(key)
     group.epoch = epoch
-    group.windows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+    group.windows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0.adoptingTitle($0.ruleTitle ?? $0.title)) })
     group.hidden = Dictionary(uniqueKeysWithValues: (saved?.hidden ?? []).map { ($0.window.id, $0) })
     // A window that hid on this Space and is back on screen returns to its own place, after the rest of the strip.
     let returning = windows.compactMap { window in group.returning(window).map { (window, $0) } }.sorted { $0.1.place < $1.1.place }
@@ -195,7 +195,9 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     for matches in tiers {
         for old in saved?.windows ?? [] where mappedIDs[old.id] == nil {
             guard let index = unused.firstIndex(where: { matches(old, $0) }) else { continue }
-            mappedIDs[old.id] = unused.remove(at: index).id
+            let live = unused.remove(at: index)
+            mappedIDs[old.id] = live.id
+            group.windows[live.id] = live.adoptingTitle(old.ruleTitle ?? old.title)
         }
     }
     var joined: [ObservedWindow] = []

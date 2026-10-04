@@ -51,7 +51,6 @@ public struct StripSnapshot: Codable {
 }
 
 /// Plain-data representation of a strip window, used by pure matching functions.
-/// Built by WindowManager from StripController + WindowTracker data.
 public struct StripWindowInfo {
     public let tileID: TileID
     public let windowID: CGWindowID

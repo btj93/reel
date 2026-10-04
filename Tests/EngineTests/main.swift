@@ -2224,7 +2224,8 @@ struct FuzzStream {
     section("R7: packaged defaults, struts and add-time regex rules") {
         check(!AppConfig.defaultSource.isEmpty, "the shipped default config resource exists")
         guard let config = try? AppConfig.parse(AppConfig.defaultSource) else { return check(false, "bundled defaults parse") }
-        check(config.engine.gap == EngineConfig().gap && config.keys == AppConfig().keys, "bundled defaults match code defaults")
+        check(config.engine.gap == EngineConfig().gap && config.engine.widthPresets == EngineConfig().widthPresets
+              && config.engine.bounceDistance == EngineConfig().bounceDistance && config.keys == AppConfig().keys, "bundled defaults match code defaults")
         var insets = WorkingInsets()
         insets.top = 10; insets.bottom = 20; insets.left = 30; insets.right = 40
         check(insets.apply(to: CGRect(x: -100, y: 50, width: 1000, height: 700)) == CGRect(x: -70, y: 60, width: 930, height: 670), "per-display working area has CG insets")
@@ -2232,8 +2233,36 @@ struct FuzzStream {
         check(insets.apply(to: CGRect(x: 0, y: 0, width: 100, height: 100)).width == 1, "struts cannot make an invalid area")
         let parsed = try? AppConfig.parse("[[rules]]\nbundle_id_regex = \"com[.]example[.].*\"\ntitle_regex = \"^Dialog\"\nfloating = true")
         check(parsed?.engine.rules.count == 1, "bundle/title regex rules parse")
+        var rules = Harness(rules: [Rule(bundleIDRegex: "^test[.]", titleRegex: "window-2$", floating: true)])
+        rules.census(10, [window(1), window(2)])
+        check(rules.world.groups[1]!.floating == [TileID(2)], "regex selects only its matching add-time title")
+        rules.send(.windowAdded(window(3)))
+        check(!rules.world.groups[1]!.floating.contains(TileID(3)), "nonmatching add stays tiled")
+        let changed = ObservedWindow(id: TileID(2), pid: 2, bundleID: "test.app", title: "now not a match")
+        rules.send(.windowChanged(changed))
+        check(rules.world.groups[1]!.floating.contains(TileID(2)), "a title change does not undo the add-time rule")
+        rules.census(11, [])
+        rules.census(10, [window(1), changed, window(3)])
+        check(rules.world.groups[1]!.floating.contains(TileID(2)), "add-time title survives a Space round trip")
         do { _ = try AppConfig.parse("[[rules]]\ntitle_regex = \"[\"\nfloating = true"); check(false, "invalid regex rejected") }
         catch { check(String(describing: error).contains("title_regex"), "invalid regex names its key") }
+    }
+    section("R7: bundled logs rotate at one MB with one backup") {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let path = dir.appendingPathComponent("reel.log").path
+        defer { try? FileManager.default.removeItem(at: dir) }
+        do {
+            try prepareLogFile(at: path)
+            try Data(repeating: 7, count: 1_000_001).write(to: URL(fileURLWithPath: path))
+            try prepareLogFile(at: path)
+            check(!FileManager.default.fileExists(atPath: path), "oversized current file moved before append")
+            let first = try Data(contentsOf: URL(fileURLWithPath: path + ".1"))
+            check(first.count == 1_000_001, "backup keeps log data")
+            try Data(repeating: 8, count: 1_000_001).write(to: URL(fileURLWithPath: path))
+            try prepareLogFile(at: path)
+            let second = try Data(contentsOf: URL(fileURLWithPath: path + ".1"))
+            check(second.first == 8, "next rotation replaces the single backup")
+        } catch { check(false, "temporary log rotation failed \(error)") }
     }
     section("R7: SnapshotStore lists pending writes and clear survives restart") {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
@@ -3552,6 +3581,17 @@ struct FuzzStream {
             1: (CGRect(x: area.maxX - 1, y: area.minY, width: 400, height: 400), false)])
         let spaces = layouts["spaces"] as? [[String: Any]] ?? []
         check(spaces.map { $0["source"] as? String ?? "" } == ["live", "session", "disk"], "current, then this session's stashes, then disk")
+        let live = (spaces[0]["windows"] as? [[String: Any]])?.first
+        check(live?["expectedFrame"] is [String: Double] && live?["unreadable"] as? Bool == false, "fresh frame and expected placement both reported")
+        let missing = (spaces[2]["windows"] as? [[String: Any]])?.first
+        check(missing?["unreadable"] as? Bool == true && missing?["currentFrame"] is NSNull, "failed fresh read is explicit, not a cached frame")
+        var offset = Harness(displays: [display(1, x: -1000, y: -600)])
+        offset.census(10, [window(1)])
+        let offsetLayout = IPCBridge.layouts(world: offset.world, active: 1, windows: [:])
+        let offsetSpaces = offsetLayout["spaces"] as? [[String: Any]] ?? []
+        let expected = (offsetSpaces.first?["windows"] as? [[String: Any]])?.first?["expectedFrame"] as? [String: Double]
+        let actual = offset.world.frames[TileID(1)]?.frame.rect
+        check(expected?["x"] == actual.map { Double($0.minX) } && expected?["y"] == actual.map { Double($0.minY) }, "expected frames use global AX coordinates on an offset display")
         let away = (spaces[1]["windows"] as? [[String: Any]])?.first
         check(away?["windowID"] as? UInt32 == 1 && away?["slivered"] as? Bool == true && away?["isOnScreen"] as? Bool == false,
               "a stashed window parked as a sliver is flagged")

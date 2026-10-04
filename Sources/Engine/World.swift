@@ -17,7 +17,7 @@ public struct Rule: Equatable, Sendable {
     func matches(_ window: ObservedWindow) -> Bool {
         (bundleID == nil || window.bundleID == bundleID)
             && (bundleIDRegex == nil || window.bundleID?.range(of: bundleIDRegex!, options: .regularExpression) != nil)
-            && (titleRegex == nil || window.title.range(of: titleRegex!, options: .regularExpression) != nil)
+            && (titleRegex == nil || (window.ruleTitle ?? window.title).range(of: titleRegex!, options: .regularExpression) != nil)
     }
 }
 

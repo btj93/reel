@@ -17,6 +17,8 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
     public let pid: Int32
     public let bundleID: String?
     public let title: String
+    /// The adoption title keeps rule matching stable while live metadata changes.
+    public internal(set) var ruleTitle: String?
     public let floating: Bool
     public let initialFrame: AXRect?
 
@@ -28,6 +30,12 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
         self.title = title
         self.floating = floating
         self.initialFrame = initialFrame
+    }
+
+    func adoptingTitle(_ title: String) -> ObservedWindow {
+        var copy = self
+        copy.ruleTitle = title
+        return copy
     }
 
     var isValid: Bool { id.rawValue != 0 && pid > 0 && (initialFrame?.rect.isFinite ?? true) }
