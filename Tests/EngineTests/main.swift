@@ -2345,10 +2345,10 @@ struct FuzzStream {
         } catch {
             check(String(describing: error) == "unknown key animation.scroll_damping_ratio", "old file reports deterministic first unknown key")
         }
-        for source in ["start_at_login = true", "[layout]\nposition_memory = false", "[layout]\nsaved_position_limit = 10",
-                       "[cursor]\ndrag_threshold_px = 2", "[reorder_overlay]\nghost_settle_ms = 0",
-                       "[reorder_overlay]\nthumbnail_style = \"icon\"", "[[position_memory_rules]]\nmatch_by = \"order\"",
-                       "[gesture]\nswipe_threshold_px = 20"] {
+        for source in ["start_at_login = true", "[layout]\nposition_memory = false",
+                       "[cursor]\ndrag_threshold_px = 2", "[cursor]\nlong_press_delay_ms = 500",
+                       "[cursor]\ntitle_bar_corner_inset_px = 8", "[cursor]\nswipe_threshold_px = 20",
+                       "[reorder_overlay]\nthumbnail_style = \"icon\"", "[reorder_overlay]\nthumbnail_height = 160"] {
             do { _ = try AppConfig.parse(source); check(false, "removed key must fail schema") }
             catch { check(String(describing: error).hasPrefix("unknown key"), "removed key produces a schema error") }
         }
