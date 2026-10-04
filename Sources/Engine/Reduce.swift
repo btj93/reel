@@ -399,7 +399,9 @@ extension World {
                 guard momentumTail else { return }
                 momentumTail = scroll.phase == .momentum
                 pass.effects.append(.consumeInput)
-                if case .momentum(let settled, _)? = pointer?.phase { pointer?.phase = .momentum(settledAt: settled, tail: momentumTail ? pass.now : nil) }
+                if case .momentum(let settled, _)? = pointer?.phase {
+                    pointer?.phase = .momentum(settledAt: settled, tail: momentumTail ? pass.now : nil)
+                }
                 return
             }
             // Scroll input ends only swipes: a title-bar press, drag or menu outlives a scroll on any display.
@@ -562,7 +564,8 @@ extension World {
         let edge = swipe.edge != 0 ? swipe.edge : projected > bounds.upperBound ? 1 : projected < bounds.lowerBound ? -1 : 0
         if config.animate, edge != 0 {
             let kick = edge * max(abs(velocity), strip.rubberBandKick)
-            strip.viewOffset = .animation(SpringAnimation(from: from, to: target, initialVelocity: kick, startTime: now, params: strip.rubberBandParams))
+            strip.viewOffset = .animation(SpringAnimation(from: from, to: target, initialVelocity: kick, startTime: now,
+                                                          params: strip.rubberBandParams))
         } else {
             strip.viewOffset = config.animate && abs(target - from) >= 1
                 ? .animation(SpringAnimation(from: from, to: target, initialVelocity: velocity, startTime: now, params: strip.scrollSpringParams))

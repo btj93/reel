@@ -117,7 +117,9 @@ extension World {
             if gestureView != (swiping == id) { errors.append("group \(id): gesture view and swipe disagree") }
         }
         guard let session = pointer else { return errors }
-        if case .momentum(_, _?) = session.phase, !momentumTail { errors.append("momentum session counts a tail the engine does not swallow") }
+        if case .momentum(_, _?) = session.phase, !momentumTail {
+            errors.append("momentum session counts a tail the engine does not swallow")
+        }
         let id = session.scope.group
         if scope(for: id) != session.scope { errors.append("stale pointer") }
         if let tile = session.tile, groups[id]?.strip.columnIndex(of: tile) == nil { errors.append("pointer tile off its strip") }
