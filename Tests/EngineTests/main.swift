@@ -72,7 +72,7 @@ struct Harness {
     var rewoundFocus = 0
     /// The overlay the runtime would show after the effects so far.
     var overlay = Overlay.hidden
-    /// When the last sample of a gesture whose swipe ended came, until a began, its last momentum sample or a pause.
+    /// When the last sample of a gesture whose swipe ended came, until a began, its last momentum sample, a pause or a release.
     var tailAt: Double?
     /// The rest of that gesture is still arriving: it went quiet less than `gestureQuiet` ago.
     var tail: Bool { tailAt.map { time - $0 < EngineConfig.gestureQuiet } ?? false }
@@ -118,6 +118,7 @@ struct Harness {
             if !consumed { leakedTail += 1 }
             tailAt = scroll.phase == .momentumEnded ? nil : time
         case .pointer(.cancel, let token?) where token == session?.token && session?.scope == event.scope: tailAt = nil
+        case .command(.release, _): tailAt = nil
         default: break
         }
         if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
@@ -4069,8 +4070,10 @@ struct FuzzStream {
         let bar = titleBar(TileID(1), in: h.world).point
         let press = { (flags: CGEventFlags) in PointerObserver.pressInput(at: bar, flags: flags, modifier: .maskSecondaryFn, frames: h.world.frames) }
         if case .press(let tile, _) = press(.maskSecondaryFn) { check(tile == TileID(1), "a modifier press on a title bar takes its tile") }
+        else { check(false, "a modifier press on a title bar becomes a press") }
         let plain = press([])
         if case .press(let tile, _) = plain { check(tile == nil, "a plain press on a title bar takes nothing") }
+        else { check(false, "a plain press becomes a press of no tile") }
         h.send(.pointer(plain))
         check(!h.consumed && h.world.pointer == nil, "and reaches the app")
     }
@@ -4184,6 +4187,35 @@ struct FuzzStream {
             hand(&h)
             h.send(.pointer(scroll(.momentum, 5, modifier: false)))
             check(!h.consumed, "\(name) hands later momentum to the app")
+        }
+        var menu = Harness(animate: true)
+        menu.census(10, [window(1), window(2), window(3)])
+        menu.send(.pointer(began))
+        menu.send(.pointer(swipe(300)))
+        menu.send(.pointer(lift))
+        menu.send(.pointer(.press(TileID(2), at: titleBar(TileID(2), in: menu.world))))
+        for _ in 0..<10 {
+            menu.send(.pointer(scroll(.momentum, 5, modifier: false)), advance: 0)
+            menu.advance(0.05)
+        }
+        check(menu.world.pointer.map { if case .menuOpen = $0.phase { true } else { false } } == true, "a menu opens while the flick's momentum runs")
+        menu.send(.pointer(.release(AXPoint(.zero))))
+        menu.send(.pointer(scroll(.momentum, 5, modifier: false)))
+        check(menu.consumed, "dismissing the menu keeps swallowing the flick's momentum")
+        for ender in ["a new window", "a Space change"] {
+            var paused = Harness(animate: true)
+            paused.census(10, [window(1), window(2), window(3)])
+            paused.send(.pointer(began))
+            paused.send(.pointer(swipe(100)))
+            if ender == "a new window" { paused.send(.windowAdded(window(4))) } else { paused.census(20, [window(5)]) }
+            check(paused.world.pointer == nil && paused.world.gestureTail != nil, "\(ender) leaves the taken gesture's tail with no session")
+            paused.send(.command(.release, .ipc))
+            var reached = true
+            for _ in 0..<20 {
+                paused.send(.pointer(scroll(.changed, 10, modifier: false)), advance: 0.05)
+                reached = reached && !paused.consumed
+            }
+            check(reached, "after \(ender), a pause hands an app's scroll begun meanwhile back to the app")
         }
         var lost = Harness(animate: true)
         lost.census(10, [window(1), window(2), window(3)])

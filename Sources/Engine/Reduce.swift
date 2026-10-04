@@ -288,6 +288,7 @@ extension World {
         switch command {
         case .release:
             // Quitting must never strand a window off screen, even mid Space change.
+            gestureTail = nil
             release(group: id, &pass)
             return .accepted
         case .recover:
@@ -479,7 +480,10 @@ extension World {
             cancelPointer(&pass)
             pass.effects.append(.consumeInput)
             choose(action, tile: press.tile, group: id, &pass)
-        case (.menuOpen, .release), (_, .cancel):
+        case (.menuOpen, .release):
+            cancelPointer(&pass)
+            pass.effects.append(.consumeInput)
+        case (_, .cancel):
             cancelPointer(&pass)
             gestureTail = nil
             pass.effects.append(.consumeInput)
