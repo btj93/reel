@@ -6,7 +6,6 @@ public struct PointerToken: Hashable, Sendable {
     public init(_ rawValue: UInt64) { self.rawValue = rawValue }
 }
 
-/// A modifier press on a title bar: the tile it hit and where the cursor went down.
 public struct TitlePress: Equatable, Sendable {
     public let tile: TileID
     public let origin: AXPoint
@@ -41,7 +40,6 @@ public struct PointerSession: Sendable {
     public let token: PointerToken
     /// The group the session began on, under the epoch and topology it began in.
     public let scope: EventScope
-    /// The view offset when tracking began.
     public internal(set) var startOffset: Double
     public internal(set) var phase: Phase
     /// The session's one pending deadline: a long press, or a released drag waiting for its drop.
@@ -67,7 +65,6 @@ public struct PointerSession: Sendable {
         if case .gestureTracking(let swipe) = phase { swipe } else { nil }
     }
 
-    /// What the runtime shows for this session.
     public var overlay: Overlay {
         switch phase {
         case .menuOpen(let press): .menu(MenuRequest(session: token, scope: scope, press: press))

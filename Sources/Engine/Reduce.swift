@@ -534,6 +534,7 @@ extension World {
         var from = gesture.currentOffset
         let velocity = gesture.tracker.velocity(at: now)
         let projected = abs(velocity) < EngineConfig.flickVelocity ? from : start + gesture.tracker.projectedEndPosition(isTouchpad: true)
+        let bounds = strip.viewOffsetBounds(at: now)
         var target: Double
         if config.gestureSnap, swipe.snapTargets.count == strip.columns.count,
            let column = swipe.snapTargets.indices.min(by: { abs(swipe.snapTargets[$0] - projected) < abs(swipe.snapTargets[$1] - projected) }) {
@@ -542,10 +543,8 @@ extension World {
             from += shift
             target = swipe.snapTargets[column] + shift
         } else {
-            let bounds = strip.viewOffsetBounds(at: now)
             target = min(max(projected, bounds.lowerBound), bounds.upperBound)
         }
-        let bounds = strip.viewOffsetBounds(at: now)
         let edge = swipe.edge != 0 ? swipe.edge : projected > bounds.upperBound ? 1 : projected < bounds.lowerBound ? -1 : 0
         if config.animate, edge != 0 {
             let bounce = SpringParams(dampingRatio: config.bounceDampingRatio, stiffness: 600, epsilon: 0.5)

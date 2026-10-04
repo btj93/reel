@@ -23,7 +23,7 @@ public final class ReorderOverlay {
     private let world: () -> World
     private let send: (PointerInput, PointerToken) -> Void
     private let log: (String) -> Void
-    private(set) var request: ReorderRequest?
+    private var request: ReorderRequest?
     private var panel: NSPanel?
     private var thumbnails: [NSImageView] = []
     private let ghost = NSImageView()
@@ -35,7 +35,7 @@ public final class ReorderOverlay {
     private var ready = false
     private var answered = false
     private var latest: AXPoint?
-    private(set) var gap = 0
+    private var gap = 0
     private var started = ContinuousClock.now
     private var tasks: [Task<Void, Never>] = []
 
@@ -123,13 +123,13 @@ public final class ReorderOverlay {
                 self?.becomeReady(session, reason: "deadline")
             },
             Task { [weak self] in
-                await self?.capture(session, display: display, scale: Double(NSScreen.main?.backingScaleFactor ?? 2))
+                await self?.capture(session, scale: Double(NSScreen.main?.backingScaleFactor ?? 2))
                 self?.becomeReady(session, reason: "captures")
             },
         ]
     }
 
-    private func capture(_ session: PointerToken, display: Display, scale: Double) async {
+    private func capture(_ session: PointerToken, scale: Double) async {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
             return log("reorder: capture unavailable, icons stand in")
         }
@@ -197,7 +197,6 @@ public final class ReorderOverlay {
         layout()
     }
 
-    /// The non-dragged thumbnails sit centred in the band; the indicator marks the gap the drop lands in.
     private func layout() {
         guard let panel else { return }
         let band = Self.band(in: panel.frame.size)
@@ -227,7 +226,6 @@ public final class ReorderOverlay {
         panel = nil
     }
 
-    /// The band runs along the top of the display, 40 points down, the full width less a margin.
     public nonisolated static func band(in size: CGSize) -> CGRect {
         let height = thumbnailHeight + 40
         return CGRect(x: 20, y: size.height - height - 40, width: max(0, size.width - 40), height: height)
@@ -239,7 +237,6 @@ public final class ReorderOverlay {
         return [first - 40] + zip(midpoints, midpoints.dropFirst()).map { ($0 + $1) / 2 } + [last + 40]
     }
 
-    /// Left edges of thumbnails `widths` wide, `spacing` apart, centred in a band `bandWidth` wide.
     public nonisolated static func origins(widths: [Double], bandWidth: Double, spacing: Double) -> [Double] {
         let total = widths.reduce(0, +) + spacing * Double(max(0, widths.count - 1))
         var x = (bandWidth - total) / 2

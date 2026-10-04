@@ -19,7 +19,7 @@ public final class PointerObserver {
     private let send: (PointerInput, PointerToken?) -> [Effect]
     private let paused: () -> Bool
     private let log: (String) -> Void
-    let reorder: ReorderOverlay
+    private let reorder: ReorderOverlay
     private var pills: [(item: PillItem, command: Command)] = []
     var modifier: CGEventFlags = .maskSecondaryFn {
         didSet { mouse.requiredModifier = modifier }
@@ -47,16 +47,17 @@ public final class PointerObserver {
         reorder.show(.hidden)
     }
 
-    /// Show what the session asks for. The Escape tap runs only while a title-bar session is live.
     func show(_ overlay: Overlay) {
         reorder.show(overlay)
-        guard case .menu(let open) = overlay, let frame = world().frames[open.press.tile]?.frame else {
+        guard case .menu(let open) = overlay else {
             pills = []
             menu.hide()
             return
         }
-        let topology = world().topology
-        pills = Self.pills(presets: world().config.widthPresets, tile: open.press.tile)
+        let world = world()
+        let topology = world.topology
+        let frame = world.frames[open.press.tile]?.frame ?? AXRect(CGRect(origin: open.press.origin.point, size: .zero))
+        pills = Self.pills(presets: world.config.widthPresets, tile: open.press.tile)
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(screenPoint(open.press.origin, in: topology).point) }) ?? NSScreen.main {
             menu.ensurePanel(for: screen)
         }
@@ -71,6 +72,7 @@ public final class PointerObserver {
         log("pointer: menu tile=\(open.press.tile.rawValue) pills=\(targets.joined(separator: ";"))")
     }
 
+    /// The Escape tap runs only while a title-bar session is live.
     func sync(_ session: PointerSession?) {
         mouse.setEscapeTap(session?.press != nil)
     }
@@ -85,8 +87,7 @@ public final class PointerObserver {
         let input: PointerInput
         switch event {
         case .down(let point, let modifier):
-            let frames = world().frames.values.filter { $0.scope.group == world().owner(of: $0.tile) }
-            guard modifier, let hit = frames.first(where: {
+            guard modifier, let hit = world().frames.values.first(where: {
                 TitleBarInteraction.titleBarContains(point, frame: $0.frame.rect, height: Self.titleBarHeight, cornerInset: Self.cornerInset)
             }) else { return .pass }
             input = .press(hit.tile, at: AXPoint(point))
@@ -114,7 +115,6 @@ public final class PointerObserver {
         pills.isEmpty ? nil : menu.pillIndexAt(point: screenPoint(AXPoint(point), in: world().topology).point)
     }
 
-    /// One pill per width preset, then full width, float and close. Each command names the tile the menu opened for.
     public nonisolated static func pills(presets: [Double], tile: TileID) -> [(item: PillItem, command: Command)] {
         let widths = presets.enumerated().map { index, share in
             let label = switch share {

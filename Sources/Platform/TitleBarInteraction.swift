@@ -477,10 +477,10 @@ private func escapeCallback(
         }
         let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
         if input.event.getIntegerValueField(.keyboardEventKeycode) == 0x35 {
-            if let onMouse = handler.onMouse, onMouse(.escape) == .pass {
-                return EventCallbackOutput(event: .passUnretained(input.event))
+            if let onMouse = handler.onMouse {
+                return EventCallbackOutput(event: onMouse(.escape) == .pass ? .passUnretained(input.event) : nil)
             }
-            if handler.onMouse == nil { handler.handleEscapeKey() }
+            handler.handleEscapeKey()
             return EventCallbackOutput(event: nil)
         }
         return EventCallbackOutput(event: .passUnretained(input.event))

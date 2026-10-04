@@ -143,17 +143,8 @@ class OverlayView: NSView {
     private func drawPillBar(ctx: CGContext, pills: [PillItem], anchorFrame: CGRect, selectedIndex: Int?) {
         guard !pills.isEmpty else { return }
 
-        let localAnchor = anchorInViewLocal(anchorFrame)
-
-        let pillWidths = pills.map { estimatePillWidth($0.label) }
-        let totalPillWidth = pillWidths.reduce(0, +)
-            + CGFloat(max(0, pills.count - 1)) * pillSpacing
-        let containerWidth = totalPillWidth + containerPadding * 2
-        let containerHeight = pillHeight + containerPadding * 2
-
-        let containerX = localAnchor.midX - containerWidth / 2
-        let containerY = localAnchor.minY - 8 - containerHeight
-        let containerRect = CGRect(x: containerX, y: containerY, width: containerWidth, height: containerHeight)
+        let rects = pillRects(pills: pills, anchorFrame: anchorFrame)
+        let containerRect = rects.reduce(rects[0]) { $0.union($1) }.insetBy(dx: -containerPadding, dy: -containerPadding)
 
         let bgColor = NSColor(white: 0.12, alpha: 0.92)
         ctx.setFillColor(bgColor.cgColor)
@@ -161,12 +152,8 @@ class OverlayView: NSView {
         ctx.addPath(containerPath)
         ctx.fillPath()
 
-        var x = containerRect.minX + containerPadding
-        let pillY = containerRect.minY + containerPadding
-
         for (i, pill) in pills.enumerated() {
-            let w = pillWidths[i]
-            let pillRect = CGRect(x: x, y: pillY, width: w, height: pillHeight)
+            let pillRect = rects[i]
 
             let isSelected = selectedIndex == i
             let pillBg: NSColor
@@ -195,8 +182,6 @@ class OverlayView: NSView {
                 height: textSize.height
             )
             str.draw(in: textRect)
-
-            x += w + pillSpacing
         }
     }
 
@@ -214,7 +199,7 @@ class OverlayView: NSView {
         return rects.indices.first { pills[$0].isEnabled && rects[$0].contains(localPoint) }
     }
 
-    /// Pill frames in view-local coordinates, laid out as `drawPillBar` draws them.
+    /// Pill frames in view-local coordinates.
     func pillRects(pills: [PillItem], anchorFrame: CGRect) -> [CGRect] {
         let localAnchor = anchorInViewLocal(anchorFrame)
         let pillWidths = pills.map { estimatePillWidth($0.label) }

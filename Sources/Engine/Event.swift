@@ -69,11 +69,9 @@ public enum Command: Sendable {
 
 public enum PointerInput: Sendable {
     case scroll(ScrollInput)
-    /// A modifier press on the title bar of `tile`.
     case press(TileID, at: AXPoint)
     case drag(AXPoint)
     case release(AXPoint)
-    /// The reorder overlay is showing.
     case overlayReady
     /// A pill picked in the menu; the command acts on the tile the menu opened for, whatever tile it names.
     case choose(Command)
