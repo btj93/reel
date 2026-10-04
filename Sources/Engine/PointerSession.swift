@@ -26,8 +26,8 @@ public struct PointerSession: Sendable {
     public enum Phase: Sendable {
         /// Nil until the first moving sample decides the direction.
         case gestureTracking(Swipe?)
-        /// The released swipe's spring and the trackpad's own momentum tail. `tail` is the last tail sample's time.
-        case momentum(settledAt: Double?, tail: Double?)
+        /// The released swipe's spring, and its gesture's tail while `World.gestureTail` is set.
+        case momentum(settledAt: Double?)
         case titleArmed(TitlePress)
         /// Past the drag threshold; the overlay was asked for and is not ready yet.
         case titleDragging(TitlePress, display: UInt32, released: Bool)
@@ -112,14 +112,12 @@ extension World {
     var pointerErrors: [String] {
         var errors: [String] = []
         let swiping = pointer?.swipe != nil ? pointer?.scope.group : nil
+        if swiping != nil, gestureTail != nil { errors.append("a tracking swipe beside the tail of a gesture already taken") }
         for (id, group) in groups {
             let gestureView = if case .gesture = group.strip.viewOffset { true } else { false }
             if gestureView != (swiping == id) { errors.append("group \(id): gesture view and swipe disagree") }
         }
         guard let session = pointer else { return errors }
-        if case .momentum(_, _?) = session.phase, !momentumTail {
-            errors.append("momentum session counts a tail the engine does not swallow")
-        }
         let id = session.scope.group
         if scope(for: id) != session.scope { errors.append("stale pointer") }
         if let tile = session.tile, groups[id]?.strip.columnIndex(of: tile) == nil { errors.append("pointer tile off its strip") }

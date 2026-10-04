@@ -72,9 +72,11 @@ struct Harness {
     var rewoundFocus = 0
     /// The overlay the runtime would show after the effects so far.
     var overlay = Overlay.hidden
-    /// A swipe was released and no began or last momentum sample has come since: its tail must be swallowed.
-    var tail = false
-    /// Momentum samples of a released swipe's tail that reached the app.
+    /// When the last sample of a gesture whose swipe ended came, until a began, its last momentum sample or a pause.
+    var tailAt: Double?
+    /// The rest of that gesture is still arriving: it went quiet less than `gestureQuiet` ago.
+    var tail: Bool { tailAt.map { time - $0 < EngineConfig.gestureQuiet } ?? false }
+    /// Samples of a taken gesture's rest that reached the app.
     var leakedTail = 0
 
     init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [Display] = [display()],
@@ -105,13 +107,19 @@ struct Harness {
         let leader = world.activeGroup
         let focusedAt = world.groups.mapValues(\.focusedAt)
         let swiping = world.pointer?.swipe != nil
+        let session = world.pointer?.token
         effects = reduce(&world, event, now: time)
         for case .overlay(let shown) in effects { overlay = shown }
-        if case .pointer(.scroll(let scroll), _) = event.kind {
-            if tail, scroll.phase == .momentum || scroll.phase == .momentumEnded, !consumed { leakedTail += 1 }
-            if scroll.phase == .began || scroll.phase == .momentumEnded { tail = false }
+        let live = tail
+        if swiping, world.pointer?.swipe == nil { tailAt = time }
+        switch event.kind {
+        case .pointer(.scroll(let scroll), _) where scroll.phase == .began: tailAt = nil
+        case .pointer(.scroll(let scroll), _) where live && scroll.phase != .discrete:
+            if !consumed { leakedTail += 1 }
+            tailAt = scroll.phase == .momentumEnded ? nil : time
+        case .pointer(.cancel, let token?) where token == session: tailAt = nil
+        default: break
         }
-        if swiping, case .momentum? = world.pointer?.phase { tail = true }
         if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
         if event.scope.group != leader, effects.contains(where: { if case .focus(_, .restore) = $0 { true } else { false } }) { stolenFocus += 1 }
         reduceTime += start.duration(to: .now)
@@ -4128,6 +4136,13 @@ struct FuzzStream {
             h.send(.pointer(scroll(.momentum, 5, modifier: false)))
             check(!h.consumed, "\(name) hands later momentum to the app")
         }
+        var lost = Harness(animate: true)
+        lost.census(10, [window(1), window(2), window(3)])
+        lost.send(.pointer(began))
+        lost.send(.pointer(swipe(100)))
+        lost.send(.pointer(began))
+        lost.send(.pointer(swipe(100)))
+        check(lost.gesture != nil && lost.consumed, "a began after a lost lift starts a swipe of its own")
     }
 }
 
@@ -4156,7 +4171,7 @@ struct FuzzStream {
         check(stream.reached["no-modifier scroll consumed", default: 0] == 0, "seed=\(seed) a scroll without the modifier reaches the app")
         check(stream.reached["a held button's input reached the app", default: 0] == 0, "seed=\(seed) a session swallows every drag, release, choice and Escape of its button")
         check(stream.reached["a scroll ended a title-bar session", default: 0] == 0, "seed=\(seed) no scroll ends a title-bar session")
-        check(stream.h.leakedTail == 0, "seed=\(seed) a released swipe's momentum is swallowed to its last sample: \(stream.h.leakedTail)")
+        check(stream.h.leakedTail == 0, "seed=\(seed) once a swipe is taken, the rest of its gesture is swallowed: \(stream.h.leakedTail)")
         check(stream.h.rewoundFocus == 0, "seed=\(seed) a group's focusedAt never moves back: \(stream.h.rewoundFocus)")
         check(stream.h.stolenFocus == 0, "seed=\(seed) only the group commands act on restores OS focus: \(stream.h.stolenFocus)")
     }

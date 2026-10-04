@@ -64,8 +64,8 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
 
 extension World {
     mutating func expireMomentum(_ now: Double) {
-        guard case .momentum(let settled?, let tail) = pointer?.phase, now - settled >= EngineConfig.gestureQuiet,
-              tail.map({ now - $0 >= EngineConfig.gestureQuiet }) ?? true else { return }
+        if let tail = gestureTail, now - tail >= EngineConfig.gestureQuiet { gestureTail = nil }
+        guard case .momentum(let settled?) = pointer?.phase, now - settled >= EngineConfig.gestureQuiet, gestureTail == nil else { return }
         pointer = nil
     }
 
@@ -97,10 +97,12 @@ extension World {
         pass.effects.append(.invalidateFrame(tile: tile, revision: nextRevision()))
     }
 
-    /// Ending a session cancels its timer and leaves a swipe's view where it is; the overlay follows the session.
+    /// Ending a session cancels its timer and leaves a swipe's view where it is; the overlay follows the session. The
+    /// rest of an ended swipe's gesture stays Reel's.
     mutating func cancelPointer(_ pass: inout Pass) {
         guard let session = pointer else { return }
         pointer = nil
+        if session.swipe != nil { gestureTail = pass.now }
         if let timer = session.timer { pass.effects.append(.cancel(timer.token)) }
         let id = session.scope.group
         if var group = groups[id], case .gesture = group.strip.viewOffset {
@@ -394,15 +396,17 @@ extension World {
 
     fileprivate mutating func onPointer(_ input: PointerInput, token: PointerToken?, group id: UInt32, _ pass: inout Pass) {
         if case .scroll(let scroll) = input {
-            if scroll.phase == .began { momentumTail = false }
-            if scroll.phase == .momentum || scroll.phase == .momentumEnded {
-                guard momentumTail else { return }
-                momentumTail = scroll.phase == .momentum
-                pass.effects.append(.consumeInput)
-                if case .momentum(let settled, _)? = pointer?.phase {
-                    pointer?.phase = .momentum(settledAt: settled, tail: momentumTail ? pass.now : nil)
+            switch scroll.phase {
+            case .began:
+                if pointer?.press == nil { cancelPointer(&pass) }
+                gestureTail = nil
+            case .discrete: break
+            default:
+                if gestureTail != nil {
+                    gestureTail = scroll.phase == .momentumEnded ? nil : pass.now
+                    return pass.effects.append(.consumeInput)
                 }
-                return
+                if scroll.phase == .momentum || scroll.phase == .momentumEnded { return }
             }
             // Scroll input ends only swipes: a title-bar press, drag or menu outlives a scroll on any display.
             if pointer?.press != nil { return }
@@ -410,7 +414,6 @@ extension World {
         switch input {
         case .scroll(let scroll) where scroll.phase == .discrete: return wheel(scroll, group: id, &pass)
         case .scroll(let scroll) where scroll.phase == .began:
-            cancelPointer(&pass)
             if scroll.modifier { begin(.gestureTracking(nil), group: id, &pass) }
             return
         case .press(let tile, let origin):
@@ -437,9 +440,9 @@ extension World {
             guard var group = groups[id], case .gesture(let gesture) = group.strip.viewOffset else { return cancelPointer(&pass) }
             release(gesture, swipe: swipe, from: session.startOffset, strip: &group.strip, at: pass.now)
             groups[id] = group
-            session.phase = .momentum(settledAt: group.strip.viewOffset.isAnimating ? nil : pass.now, tail: nil)
+            session.phase = .momentum(settledAt: group.strip.viewOffset.isAnimating ? nil : pass.now)
             pointer = session
-            momentumTail = true
+            gestureTail = pass.now
             pass.effects.append(.consumeInput)
             pass.layout.insert(id)
             pass.persist = true
@@ -478,6 +481,7 @@ extension World {
             choose(action, tile: press.tile, group: id, &pass)
         case (.menuOpen, .release), (_, .cancel):
             cancelPointer(&pass)
+            gestureTail = nil
             pass.effects.append(.consumeInput)
         default:
             cancelPointer(&pass)
@@ -824,15 +828,15 @@ extension World {
     fileprivate mutating func onTick(_ pass: inout Pass) {
         for id in groups.keys.sorted() {
             guard var group = groups[id], !group.phase.isChanging else { continue }
-            let momentum = if case .momentum(nil, _) = pointer?.phase { pointer?.scope.group == id } else { false }
+            let momentum = if case .momentum(nil) = pointer?.phase { pointer?.scope.group == id } else { false }
             guard group.isAnimating || momentum else { continue }
             _ = group.strip.settleWidthAnimations(at: pass.now)
             _ = group.strip.settleRaiseAnimations(at: pass.now)
             if case .animation(let animation) = group.strip.viewOffset, animation.isDone(at: pass.now) {
                 group.strip.viewOffset = .static(animation.to)
             }
-            if momentum, case .momentum(_, let tail) = pointer?.phase, !group.strip.viewOffset.isAnimating {
-                pointer?.phase = .momentum(settledAt: pass.now, tail: tail)
+            if momentum, !group.strip.viewOffset.isAnimating {
+                pointer?.phase = .momentum(settledAt: pass.now)
             }
             groups[id] = group
             pass.layout.insert(id)
