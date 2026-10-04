@@ -1208,6 +1208,18 @@ struct Harness {
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2)]))
         check(h.tiles == [TileID(1), TileID(2)] && h.gesture != nil, "a re-read that changes nothing keeps the swipe")
     }
+    section("R6: a drop during a same-Space hold is refused like a command") {
+        var h = Harness()
+        h.census(20, [window(4), window(5)])
+        h.census(10, [window(1), window(2), window(3)])
+        let order = h.tiles
+        h.beginReorder(TileID(1))
+        h.send(.pointer(.release(AXPoint(.zero))))
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3), window(4)]))
+        check(h.censusRequest != nil && h.world.pointer != nil, "the hold keeps the drag")
+        h.send(.pointer(.drop(3)))
+        check(h.tiles == order && h.world.pointer == nil && h.overlay == .hidden, "the drop ends the drag and leaves the order")
+    }
     section("Moved windows: focus lands during a same-Space hold") {
         var h = Harness()
         h.census(20, [window(3), window(4)])
