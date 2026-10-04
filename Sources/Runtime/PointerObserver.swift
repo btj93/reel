@@ -134,7 +134,6 @@ public final class PointerObserver {
         return CGRect(origin: point.point, size: .zero)
     }
 
-    /// A left press takes a title bar only with the modifier held; any other press only ends a live session.
     public nonisolated static func pressInput(at point: CGPoint, flags: CGEventFlags, modifier: CGEventFlags,
                                               frames: [TileID: FrameRequest]) -> PointerInput {
         let hit = !flags.contains(modifier) ? nil : frames.values.first {

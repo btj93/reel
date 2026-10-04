@@ -107,7 +107,7 @@ struct Harness {
         let leader = world.activeGroup
         let focusedAt = world.groups.mapValues(\.focusedAt)
         let swiping = world.pointer?.swipe != nil
-        let session = world.pointer?.token
+        let session = world.pointer
         effects = reduce(&world, event, now: time)
         for case .overlay(let shown) in effects { overlay = shown }
         let live = tail
@@ -117,7 +117,7 @@ struct Harness {
         case .pointer(.scroll(let scroll), _) where live && scroll.phase != .discrete:
             if !consumed { leakedTail += 1 }
             tailAt = scroll.phase == .momentumEnded ? nil : time
-        case .pointer(.cancel, let token?) where token == session: tailAt = nil
+        case .pointer(.cancel, let token?) where token == session?.token && session?.scope == event.scope: tailAt = nil
         default: break
         }
         if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
