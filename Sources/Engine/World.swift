@@ -22,7 +22,7 @@ public struct EngineConfig: Sendable {
     public static let gestureQuiet = 0.3
     public static let longPress = 0.3
     public static let dragThreshold = 5.0
-    /// How long a released reorder waits for the overlay's drop; the overlay is ready within 0.3 s.
+    /// How long a released reorder waits for the overlay's drop; at least twice `ReorderOverlay.readyDeadline`, by test.
     public static let dropDeadline = 1.0
     public static let flickVelocity = 50.0
     public static let defaultGap = 8.0

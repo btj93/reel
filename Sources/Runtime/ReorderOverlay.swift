@@ -18,7 +18,7 @@ private struct CaptureRequest: @unchecked Sendable {
 public final class ReorderOverlay {
     nonisolated static let thumbnailHeight = 160.0
     nonisolated static let spacing = 12.0
-    static let readyDeadline: Duration = .milliseconds(300)
+    public nonisolated static let readyDeadline: Duration = .milliseconds(300)
 
     private let world: () -> World
     private let send: (PointerInput, PointerToken) -> Void

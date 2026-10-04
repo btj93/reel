@@ -4035,6 +4035,7 @@ struct FuzzStream {
         check(ReorderOverlay.local(AXPoint(CGPoint(x: 100, y: -800)), panel: panel, in: topology) == CGPoint(x: 100, y: 800),
               "a cursor 30 points below the top lands 30 points below the panel's top")
         check(ReorderOverlay.origins(widths: [100, 200], bandWidth: 1000, spacing: 10) == [345, 455], "thumbnails sit centred")
+        check(.seconds(EngineConfig.dropDeadline) >= ReorderOverlay.readyDeadline * 2, "a released drag waits for an overlay that gave up capturing")
     }
     section("R6: no scroll on any display ends a title-bar press, drag or menu; the drop still lands") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
