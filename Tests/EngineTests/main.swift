@@ -2221,6 +2221,21 @@ struct FuzzStream {
         let ring = try? AppConfig.parse("[indicator]\nstyle = \"ring\"\nraise_height = 24")
         check(ring?.engine.raiseHeight == 0, "raise_height lowers columns only in raise style")
     }
+    section("R7: legacy display grouping boundaries belong to Engine topology") {
+        for (gap, expected) in [(0.4, 1), (0.5, 1), (0.6, 2)] {
+            let first = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 900), area: CGRect(x: 0, y: 0, width: 1000, height: 900))
+            let second = Display(id: 2, frame: CGRect(x: 1000 + gap, y: 0, width: 1000, height: 900), area: CGRect(x: 1000 + gap, y: 0, width: 1000, height: 900))
+            let topology = Topology(revision: 1, displays: [first, second], separateSpaces: false, primaryScreenHeight: 900)
+            check(topology.groups.count == expected, "X edge grouping respects inclusive half-point tolerance")
+        }
+        for (y, expected) in [(899.0, 1), (900.0, 2)] {
+            let first = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 900), area: CGRect(x: 0, y: 0, width: 1000, height: 900))
+            let second = Display(id: 2, frame: CGRect(x: 1000, y: y, width: 1000, height: 900), area: CGRect(x: 1000, y: y, width: 1000, height: 900))
+            let topology = Topology(revision: 1, displays: [first, second], separateSpaces: false, primaryScreenHeight: 900)
+            check(topology.groups.count == expected, "positive Y overlap required for a shared strip")
+        }
+        check(Topology(revision: 1, displays: [], separateSpaces: false, primaryScreenHeight: 900).groups.isEmpty, "empty display census has no groups")
+    }
     section("R7: packaged defaults, struts and add-time regex rules") {
         check(!AppConfig.defaultSource.isEmpty, "the shipped default config resource exists")
         guard let config = try? AppConfig.parse(AppConfig.defaultSource) else { return check(false, "bundled defaults parse") }

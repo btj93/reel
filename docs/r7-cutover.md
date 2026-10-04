@@ -4,7 +4,10 @@ Inventoried trunk before deletion at 76af894. Every item is kept, changed or dro
 
 | Trunk surface | Status | New behavior or reason |
 | --- | --- | --- |
-| Horizontal strip, animated focus, widths, bounce, visibility-zone writes | Kept | Pure Core behind Engine; gap default changes from 16 to 8 |
+| Horizontal strip, animated focus, widths, bounce | Kept | Pure Core behind Engine; gap default changes from 16 to 8 |
+| Visibility-zone AX write deferral, keyboard snap-milestone stepping | Changed | R3 sends changed targets each tick and computes only moving strips. Keyboard focus steps one column and recenters |
+| Floating-window focus indicator and left-edge resize anchoring | Dropped | R3 retains indicators for engine-owned tiled frames; native resize only updates width, not a left-edge scroll anchor |
+| Dock-autohide visibleFrame polling | Dropped | R3/R5 use screen-parameter notifications rather than the old 1.5-second poll |
 | Focus left/right/up/down, move-column left/right, cycle width, full width, floating and close | Kept | All ten default Option bindings and menu actions remain; `[keys]` replaces `[keybindings]` |
 | `focus-left/right/up/down`, `move-column-left/right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window` | Kept | Same command names, canonical reducer commands |
 | `list-windows`, `get-layout`, `get-layouts` | Changed | Names retained; new world-derived JSON. `get-layouts` shows expected placement and fresh AX reads on app threads, bounded at 500 ms, with `unreadable` on failure. Fresh geometry determines `isOnScreen`/`slivered`. Hidden windows are included |
@@ -52,7 +55,7 @@ Accessibility and login identity remain `Reel` and `dev.reel.Reel`, at the same 
 
 ## Tests removed or ported
 
-Deleted the simulation runners and their SimHarness, L1FocusGateTests, L1StoreTests, legacy AppActivationCarryover/FocusEventGate checks, old config validation/default and rule-parser blocks, and old display-reconciliation map checks. They exercised the removed orchestration/config layer. Engine historical replays, snapshot/clear/title tests, R6 pointer checks and seeded fuzz cover their runtime objectives. Retained pure Core topology grouping, geometry, SpaceKey, snapshot matching, spring/swipe and classification backfills. Added R7 checks for bundled defaults, insets, regex validation/adoption-title stability across Space restore, SnapshotStore pending/list/clear persistence, bounded frame probes, fresh diagnostic JSON/non-primary expected coordinates and temp-directory log rotation.
+Deleted the simulation runners and their SimHarness, L1FocusGateTests, L1StoreTests, legacy AppActivationCarryover/FocusEventGate checks, old config validation/default and rule-parser blocks, and old display-reconciliation map checks. Removed DisplayManager alignment/group-area helpers and their L1TopologyTests/L1GroupAreaTests/main alignment blocks per the R5 handover; ported epsilon and Y-overlap boundaries to Engine Topology tests. They exercised the removed orchestration/config layer. Engine historical replays, snapshot/clear/title tests, R6 pointer checks and seeded fuzz cover their runtime objectives. Retained pure Core geometry, SpaceKey, snapshot matching, spring/swipe and classification backfills. Added R7 checks for bundled defaults, insets, regex validation/adoption-title stability across Space restore, SnapshotStore pending/list/clear persistence, bounded frame probes, fresh diagnostic JSON/non-primary expected coordinates and temp-directory log rotation.
 
 ## Review passes
 
