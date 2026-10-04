@@ -3981,6 +3981,70 @@ struct FuzzStream {
               "a cursor 30 points below the top lands 30 points below the panel's top")
         check(ReorderOverlay.origins(widths: [100, 200], bandWidth: 1000, spacing: 10) == [345, 455], "thumbnails sit centred")
     }
+    section("R6: no scroll on any display ends a title-bar press, drag or menu; the drop still lands") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1), window(2), window(3)])
+        h.census(20, [window(4)], group: 2)
+        @MainActor func stray(_ h: inout Harness) -> Bool {
+            let session = h.world.pointer?.token
+            var passed = true
+            for (input, group) in [(scroll(.began, modifier: false, x: 1500), 2), (scroll(.began, x: 1500), 2), (scroll(.began), 1),
+                                   (scroll(.momentum, 5, modifier: false), 1), (swipe(30), 1), (lift, 1), (scroll(.discrete, 120), 1)] {
+                h.send(.pointer(input), group: UInt32(group))
+                passed = passed && !h.consumed && h.world.pointer?.token == session
+            }
+            return passed
+        }
+        let origin = titleBar(TileID(1), in: h.world).point
+        h.send(.pointer(.press(TileID(1), at: AXPoint(origin))))
+        check(stray(&h), "a press outlives every scroll, which reaches the app")
+        h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + 40, y: origin.y)))))
+        check(stray(&h), "a drag waiting for its overlay outlives every scroll")
+        h.send(.pointer(.overlayReady))
+        check(stray(&h) && h.overlay != .hidden, "a reorder drag and its overlay outlive every scroll")
+        h.drop(3)
+        check(h.tiles == [TileID(2), TileID(3), TileID(1)], "the drop lands")
+        h.openMenu(TileID(2))
+        check(stray(&h) && h.world.pointer?.press?.tile == TileID(2), "an open menu outlives every scroll")
+    }
+    section("d227a21: a released swipe's momentum is swallowed until it ends, whatever ends the session meanwhile") {
+        let enders: [(String, (inout Harness) -> Void)] = [
+            ("a hotkey focus", { $0.send(.command(.focus(TileID(1)), .keyboard)) }),
+            ("a new window", { $0.send(.windowAdded(window(4))) }),
+            ("a plain click", { $0.send(.pointer(.press(nil, at: AXPoint(CGPoint(x: 10, y: 10))))) }),
+            ("a Space change", { $0.census(20, [window(5)]) }),
+            ("a config reload", { $0.send(.configChanged(EngineConfig(animate: true))) }),
+        ]
+        for (name, end) in enders {
+            var h = Harness(animate: true)
+            h.census(10, [window(1), window(2), window(3)])
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(300)))
+            h.send(.pointer(lift))
+            end(&h)
+            check(h.world.pointer == nil, "\(name) ends the momentum session")
+            let later = h.time + 10
+            let rest = h.world.groups[1]!.strip.viewOffset.current(at: later)
+            var swallowed = true
+            for _ in 0..<5 {
+                h.send(.pointer(scroll(.momentum, 40, modifier: false)), advance: 0.05)
+                swallowed = swallowed && h.consumed
+            }
+            check(swallowed && h.world.groups[1]!.strip.viewOffset.current(at: later) == rest, "after \(name) the tail is still swallowed and moves nothing")
+            h.send(.pointer(scroll(.momentumEnded, modifier: false)))
+            check(h.consumed, "after \(name) the tail's last sample is swallowed")
+            h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+            check(!h.consumed, "after \(name) the next gesture's momentum reaches the app")
+        }
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(300)))
+        h.send(.pointer(lift))
+        h.send(.pointer(scroll(.began, modifier: false)))
+        h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+        check(!h.consumed, "a new gesture's began hands momentum back to the app")
+    }
 }
 
 @MainActor func fuzzTests(seeds: [UInt64]) {
