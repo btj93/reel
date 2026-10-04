@@ -197,7 +197,9 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
             guard let index = unused.firstIndex(where: { matches(old, $0) }) else { continue }
             let live = unused.remove(at: index)
             mappedIDs[old.id] = live.id
-            group.windows[live.id] = live.adoptingTitle(old.ruleTitle ?? old.title)
+            if hidesMissing, old.id == live.id, old.hasSameOwner(as: live) {
+                group.windows[live.id] = live.adoptingTitle(old.ruleTitle ?? old.title)
+            }
         }
     }
     var joined: [ObservedWindow] = []

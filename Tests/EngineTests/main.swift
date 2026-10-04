@@ -2259,6 +2259,13 @@ struct FuzzStream {
         rules.census(11, [])
         rules.census(10, [window(1), changed, window(3)])
         check(rules.world.groups[1]!.floating.contains(TileID(2)), "add-time title survives a Space round trip")
+        let previous = rules.world.currentSnapshot(group: 1)!
+        var relaunched = Harness(rules: [Rule(bundleIDRegex: "^test[.]", titleRegex: "window-2$", floating: true)])
+        relaunched.send(.loadSnapshots([previous]))
+        relaunched.census(10, [ObservedWindow(id: TileID(22), pid: 222, bundleID: "test.app", title: "now not a match")])
+        check(!relaunched.world.groups[1]!.floating.contains(TileID(22))
+              && relaunched.world.groups[1]!.strip.columns.flatMap(\.tiles).contains(TileID(22)),
+              "a new window matched to disk placement evaluates its own adoption title")
         do { _ = try AppConfig.parse("[[rules]]\ntitle_regex = \"[\"\nfloating = true"); check(false, "invalid regex rejected") }
         catch { check(String(describing: error).contains("title_regex"), "invalid regex names its key") }
     }
