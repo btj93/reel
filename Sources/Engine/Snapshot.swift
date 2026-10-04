@@ -245,3 +245,10 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     group.strip.recalculateWidths(at: time)
     return group
 }
+
+extension Snapshot {
+    public func excluding(bundleID: String) -> Snapshot {
+        let ids = Set((windows + hidden.map(\.window)).filter { $0.bundleID == bundleID }.map { $0.id.rawValue })
+        return removing(ids, from: self)
+    }
+}

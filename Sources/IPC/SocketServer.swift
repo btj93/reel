@@ -23,7 +23,7 @@ public final class SocketServer: @unchecked Sendable {
     private static let connectionTimeoutSeconds = 2
 
     /// Called when a command is received. Returns a response.
-    public var onAsyncCommand: (@Sendable (ReelCommand, @escaping @Sendable (ReelResponse) -> Void) -> Void)?
+    public var onAsyncMessage: (@Sendable (IPCMessage, @escaping @Sendable (ReelResponse) -> Void) -> Void)?
 
     public var onCommand: ((ReelCommand) -> ReelResponse)?
 
@@ -248,8 +248,8 @@ public final class SocketServer: @unchecked Sendable {
         if let jsonData = rawStr.data(using: .utf8),
            let message = try? JSONDecoder().decode(IPCMessage.self, from: jsonData) {
             let resolved = ReelCommand(rawValue: message.command)
-            if let command = resolved, onAsyncCommand != nil {
-                return (executeAsync(command), command)
+            if let command = resolved, onAsyncMessage != nil {
+                return (executeAsync(message), command)
             }
             let response = executeOnMain {
                 self.onMessage?(message) ?? self.onCommand.flatMap { handler in
@@ -260,7 +260,7 @@ public final class SocketServer: @unchecked Sendable {
         }
         // Fall back to raw string for backward compatibility
         if let command = ReelCommand(rawValue: rawStr) {
-            if onAsyncCommand != nil { return (executeAsync(command), command) }
+            if onAsyncMessage != nil { return (executeAsync(IPCMessage(command: command.rawValue)), command) }
             let response = executeOnMain {
                 self.onCommand?(command) ?? ReelResponse(success: false, message: "No handler")
             }
@@ -269,9 +269,9 @@ public final class SocketServer: @unchecked Sendable {
         return (ReelResponse(success: false, message: "Unknown command: \(rawStr)"), nil)
     }
 
-    private func executeAsync(_ command: ReelCommand) -> ReelResponse {
+    private func executeAsync(_ message: IPCMessage) -> ReelResponse {
         let box = ResponseBox()
-        DispatchQueue.main.async { self.onAsyncCommand?(command) { box.complete($0) } }
+        DispatchQueue.main.async { self.onAsyncMessage?(message) { box.complete($0) } }
         return box.wait()
     }
 

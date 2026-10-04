@@ -66,6 +66,7 @@ public enum Command: Sendable {
     case release
     /// Forget every saved strip, in this session and on disk.
     case clearPositions
+    case clearPositionsApp(String)
 
     public var tile: TileID? {
         switch self {

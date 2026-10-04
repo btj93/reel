@@ -15,11 +15,11 @@ public final class IPCBridge {
 
     public init(loop: Loop) {
         self.loop = loop
-        server.onAsyncCommand = { [weak self] command, completion in
+        server.onAsyncMessage = { [weak self] message, completion in
             MainActor.assumeIsolated {
                 guard let self else { return completion(ReelResponse(success: false, message: "shutting down")) }
-                if command == .getLayouts { self.readLayouts(completion: completion) }
-                else { completion(self.handle(command)) }
+                if message.command == ReelCommand.getLayouts.rawValue { self.readLayouts(completion: completion) }
+                else { completion(self.handle(message)) }
             }
         }
         // Through AppKit, so the delegate stops this server and releases windows before the app exits.
@@ -33,6 +33,22 @@ public final class IPCBridge {
     public func start() -> Bool { server.start() }
 
     public func stop() { server.stop() }
+
+    func handle(_ message: IPCMessage) -> ReelResponse {
+        guard let command = ReelCommand(rawValue: message.command) else {
+            return ReelResponse(success: false, message: "Unknown command")
+        }
+        if command == .clearPositionsApp {
+            guard let bundleID = message.appID, !bundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return ReelResponse(success: false, message: "clear-positions-app needs a bundle id")
+            }
+            let outcome = loop.request(.clearPositionsApp(bundleID))
+            guard outcome == .accepted else { return reply(outcome) }
+            loop.store.clear(bundleID: bundleID)
+            return ReelResponse(success: true, message: "Cleared saved positions for \(bundleID)")
+        }
+        return handle(command)
+    }
 
     func handle(_ command: ReelCommand) -> ReelResponse {
         switch command {
@@ -53,6 +69,7 @@ public final class IPCBridge {
             guard outcome == .accepted else { return reply(outcome) }
             loop.store.clear()
             return ReelResponse(success: true, message: "Cleared all saved positions")
+        case .clearPositionsApp: return ReelResponse(success: false, message: "clear-positions-app needs a bundle id")
         case .getLayouts: return ReelResponse(success: false, message: "get-layouts requires an asynchronous read")
         case .listWindows: return json(listWindows())
         case .getLayout: return json(Self.layout(world: loop.world, active: loop.group, now: TimeUtil.now()))
@@ -111,6 +128,7 @@ public final class IPCBridge {
                     "savedWidth": column.map { "\($0.width)" } ?? "floating", "isFullWidth": column?.isFullWidth ?? false,
                     "isOnScreen": now?.onScreen ?? false, "currentFrame": NSNull(), "slivered": false,
                     "unreadable": now == nil, "expectedFrame": expected[window.id].map(Self.frameJSON) ?? NSNull(),
+                    "expectedPlacement": column == nil ? "outside-strip" : expected[window.id] == nil ? "unavailable-display" : "tiled",
                 ]
                 if let frame = now?.frame {
                     entry["currentFrame"] = ["x": frame.minX, "y": frame.minY, "w": frame.width, "h": frame.height]

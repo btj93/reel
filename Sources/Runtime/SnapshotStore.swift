@@ -34,6 +34,11 @@ public final class SnapshotStore {
 
     public func list() -> [Snapshot] { pending ?? load() }
 
+    public func clear(bundleID: String) {
+        save(list().map { $0.excluding(bundleID: bundleID) })
+        flush()
+    }
+
     public func clear() {
         save([])
         flush()

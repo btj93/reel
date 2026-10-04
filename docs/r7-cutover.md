@@ -8,7 +8,7 @@ Inventoried trunk before deletion at 76af894. Every item is kept, changed or dro
 | Focus left/right/up/down, move-column left/right, cycle width, full width, floating and close | Kept | All ten default Option bindings and menu actions remain; `[keys]` replaces `[keybindings]` |
 | `focus-left/right/up/down`, `move-column-left/right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window` | Kept | Same command names, canonical reducer commands |
 | `list-windows`, `get-layout`, `get-layouts` | Changed | Names retained; new world-derived JSON. `get-layouts` shows expected placement and fresh AX reads on app threads, bounded at 500 ms, with `unreadable` on failure. Fresh geometry determines `isOnScreen`/`slivered`. Hidden windows are included |
-| `list-positions`, `clear-positions` | Kept | SnapshotStore listing/clearing, with persisted-clear tests |
+| `list-positions`, `clear-positions`, `clear-positions-app <bundle-id>` | Kept | SnapshotStore listing/clearing. App-scoped clear filters live, disk and hidden snapshots by bundle ID, preserves other apps and persists; tested |
 | `recover`, `quit` | Kept | Recover rewrites frames; quit awaits release before NSApplication exits |
 | `pause`, `resume`, `get-status`, `reload-config` | Kept | Same names; status reports paths/PID sandbox/config error/topology |
 | CLI socket and bundled `reel-msg` | Kept | Same Unix socket default and bundled CLI path; signature seals CLI before verification |
@@ -56,7 +56,7 @@ Deleted the simulation runners and their SimHarness, L1FocusGateTests, L1StoreTe
 
 ## Review passes
 
-Deslop removed accidentally copied legacy key-label helpers, stale single-display/ReelNext narration and an unused legacy focus helper. No-comments removed legacy class-name comments and inaccurate signing/grant promises; raw-adapter comments now explain event ownership rather than the deleted state machine. Inline interrogate found and fixed the old-template symlink fixture, trunk/head basename sample collisions, missing live SMOKE_TAG and command helper names, wrong diagnostic local/global coordinates, lane 9's possible no-op focus, and title-rule reevaluation on metadata/Space restore. No independent model review was launched because this child owns inline review only. Root fanout remains pending.
+Deslop removed accidentally copied legacy key-label helpers, stale single-display/ReelNext narration and an unused legacy focus helper. No-comments removed legacy class-name comments and inaccurate signing/grant promises; raw-adapter comments now explain event ownership rather than the deleted state machine. Inline interrogate found and fixed the old-template symlink fixture, trunk/head basename sample collisions, missing live SMOKE_TAG and command helper names, wrong diagnostic local/global coordinates, lane 9's possible no-op focus, and title-rule reevaluation on metadata/Space restore. The pass also fixed a menu clear that bypassed the reducer refusal, moved frame-probe deadlines into common run-loop modes, and found/retained the previously unsupported app-scoped clear CLI route. No independent model review was launched because this child owns inline review only. Root fanout remains pending.
 
 ## Root-owned live and performance checks
 
@@ -68,6 +68,7 @@ Build distinct trunk and head artifacts first. On clean isolated lane accounts o
 - `... 5 6 7 8 9 10` covers Space return, physical unplug, signed-bundle reorder, a 30-minute RSS soak, quit mid-animation and old-schema startup. Lane 6 and on-screen quit observations are manual. Screenshots and logs go to `LANE_OUT` or the printed temp evidence directory.
 - `BIN_TRUNK=/path/to/trunk/Reel BIN_HEAD=/path/to/head/Reel.app/Contents/MacOS/Reel bash Tests/Smoke/cutover-perf.sh` performs 20 interleaved samples per latency side and five idle minutes per side. Baseline is recorded first. Both p95 latencies must be at most trunk * 1.1; head idle CPU must be at most one second in five minutes. Prepare two adjacent Spaces, current with host windows and right empty, and Ctrl-arrow shortcuts.
 - R6 `pointer-perf.sh` posts a two-second swipe, not lane 1's flick. Point `PERF_BINS` at distinct trunk and head binaries. Its default baseline is `/tmp/reel-trunk/.build/debug/Reel`, not the now-cut-over local Reel. Pointer lane 1 is head-only; trunk comparison belongs to the R7 regression lane.
+- `REEL_LANE_BUNDLE=/same/installed/Reel.app ... cutover-lanes.sh 11` verifies an already-granted trunk bundle, then asks the root to install signed head at the same path. Keep `upgrade.png` and `upgrade.txt` with prompted/no-prompt and five-second tiling observations. No grant reset occurs.
 - Copy first-run, Space-roundtrip and old-config screenshots to the R7 review media paths; record the plan's 30-60 second first-launch/tiling/Space/reorder video and post it for operator review.
 
 Nothing live or performance-measured ran on the daily machine. Dry-run results validate scripts and fixture parsers only. The program cannot be called fully verified until root supplies live/perf/media evidence and reviews the exact head.

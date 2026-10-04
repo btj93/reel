@@ -79,7 +79,11 @@ final class MenuBar: NSObject {
     }
     @objc private func openConfig() { NSWorkspace.shared.open(URL(fileURLWithPath: loop.paths.configFile)) }
     @objc private func recover() { loop.send(.command(.recover, .ipc)) }
-    @objc private func clearPositions() { loop.send(.command(.clearPositions, .ipc)); loop.store.clear() }
+    @objc private func clearPositions() {
+        let outcome = loop.request(.clearPositions)
+        if outcome == .accepted { loop.store.clear() }
+        else { logLine("positions: clear refused \(outcome)") }
+    }
 
     @objc private func togglePause() { loop.setPaused(!loop.paused) }
     @objc private func reloadConfig() { loop.reloadConfig() }

@@ -197,9 +197,11 @@ lane10() {
     fresh
     cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"
     cp "$CFG/config.toml" "$OUT/old-config-input.toml"
-    reel_msg reload-config > "$OUT/old-config-response.json"
+    if [ "$DRY" = 1 ]; then
+        printf '%s\n' 'config error: unknown key animation.scroll_damping_ratio' > "$OUT/old-config-response.txt"
+    elif reel_msg reload-config > "$OUT/old-config-response.txt" 2>&1; then fail "old config reload unexpectedly succeeded"; fi
+    grep -q 'unknown key animation.scroll_damping_ratio' "$OUT/old-config-response.txt" || fail "first schema error not returned"
     if [ "$DRY" != 1 ]; then
-        jq -e '.success == false and (.message | contains("unknown key"))' "$OUT/old-config-response.json" >/dev/null || fail "schema error not returned"
         cmp "$CFG/config.toml" "$OUT/old-config-input.toml" || fail "old config was overwritten"
         quit_reel; launch_reel
         poll_until 10 "REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-status >/dev/null" || fail "old config prevented launch"
@@ -207,6 +209,33 @@ lane10() {
     waitForSettle 10
     operator_step "Confirm menu shows Config error with the first unknown key (animation.scroll_damping_ratio for the fixture). Confirm default Alt-H/Alt-L hotkeys and default layout work after restart."
     shot old-config
+}
+
+lane11() {
+    section "upgrade lane: same-path trunk grant versus head cdhash"
+    operator_step "Set REEL_LANE_BUNDLE to the installed bundle on an isolated lane account. It must currently contain trunk with an existing Accessibility grant. The same install path will receive head."
+    quit_reel
+    host_quit MAIN
+    host_start MAIN
+    host_create MAIN 4 >/dev/null
+    cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"
+    launch_reel
+    waitForSettle 10
+    operator_step "Confirm trunk tiles without asking for Accessibility."
+    quit_reel
+    operator_step "Install the signed head bundle over that trunk bundle at the SAME path using the normal upgrade method. Do not remove the grant or reset TCC."
+    write_test_config "$CFG" 16
+    if [ "$DRY" != 1 ]; then codesign --verify --deep --strict "$BUNDLE"; fi
+    launch_reel
+    operator_step "Record whether Accessibility prompts on launch, and whether host windows tile within five seconds. If prompted, record it before granting, then record post-grant tiling separately."
+    if [ "$DRY" = 1 ]; then
+        dry_echo "write prompted/no-prompt and five-second observations to $OUT/upgrade.txt"
+    else
+        printf 'Describe prompt and first-five-seconds result, plus post-grant timing if relevant: '
+        read -r observation
+        printf '%s\n' "$observation" > "$OUT/upgrade.txt"
+    fi
+    shot upgrade
 }
 
 main() {
@@ -218,8 +247,9 @@ main() {
     mkdir -p "$CFG" "$STATE" "$OUT"
     write_fixtures
     local lanes=("$@")
-    [ ${#lanes[@]} -gt 0 ] || lanes=(1 2 3 4 5 6 7 8 9 10)
+    [ ${#lanes[@]} -gt 0 ] || lanes=(1 2 3 4 5 6 7 8 9 10 11)
     for lane in "${lanes[@]}"; do "lane$lane"; done
-    section "R7 requested lanes completed"
+    if [ "$DRY" = 1 ]; then section "R7 lane dry run completed (no live verdict)"
+    else section "R7 requested lanes completed"; fi
 }
 main "$@"

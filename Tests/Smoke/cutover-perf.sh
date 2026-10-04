@@ -55,9 +55,13 @@ now_ms() { perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.3f\n",
 
 space_settle() {
     local key=$1 expected=$2
-    if [ "$DRY" = 1 ]; then dry_echo "Ctrl key $key, wait for $expected columns, then settle"; return; fi
+    if [ "$DRY" = 1 ]; then
+        reel_msg get-layout | jq -e '.groups | map(select(.isActive)) | .[0].currentColumns | length >= 0' >/dev/null
+        dry_echo "Ctrl key $key, wait for $expected columns, then settle"
+        return
+    fi
     osascript -e "tell application \"System Events\" to key code $key using control down"
-    poll_until 10 "[ \$(REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-layout | jq -r '.data.groups | map(select(.isActive)) | .[0].currentColumns | length') -eq '$expected' ]" || fail "Space never changed to expected census"
+    poll_until 10 "[ \$(REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-layout | jq -r '.groups | map(select(.isActive)) | .[0].currentColumns | length') -eq '$expected' ]" || fail "Space never changed to expected census"
     waitForSettle 10
 }
 
@@ -127,6 +131,7 @@ main() {
         awk -v t="$trunk" -v h="$head" 'BEGIN {exit !(h<=t*1.1)}' || fail "$metric p95 exceeds trunk * 1.1"
     done
     awk '$1=="head" && $2>1 {exit 1}' "$OUT/idle.tsv" || fail "head idle CPU exceeds 1 second in five minutes"
-    section "R7 perf passed; samples in $OUT"
+    if [ "$DRY" = 1 ]; then section "R7 perf dry parser check passed (fixture samples only)"
+    else section "R7 perf passed; samples in $OUT"; fi
 }
 main "$@"

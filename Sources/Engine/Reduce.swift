@@ -298,6 +298,8 @@ extension World {
             return recover(group: id, &pass)
         case .clearPositions:
             return clearPositions(&pass)
+        case .clearPositionsApp(let bundleID):
+            return clearPositions(&pass, bundleID: bundleID)
         case .focusUp, .focusDown:
             if case .focusUp = command { return focusVertically(up: true, source: source, from: id, &pass) }
             return focusVertically(up: false, source: source, from: id, &pass)
@@ -372,7 +374,7 @@ extension World {
             guard group.windows[tile] != nil else { return .unknownWindow(tile) }
             pass.effects.append(.close(tile))
             return .accepted
-        case .recover, .release, .clearPositions, .focusUp, .focusDown:
+        case .recover, .release, .clearPositions, .clearPositionsApp, .focusUp, .focusDown:
             preconditionFailure("run handles recover, release, clearPositions and vertical focus")
         }
         if recenter, !group.strip.columns.isEmpty {
@@ -633,7 +635,7 @@ extension World {
         case .close: targeted = .close(tile)
         case .focus: targeted = .focus(tile)
         case .focusLeft, .focusRight, .focusUp, .focusDown, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release,
-             .clearPositions: return
+             .clearPositions, .clearPositionsApp: return
         }
         let outcome = run(targeted, source: .click, group: id, &pass)
         pass.effects.append(.log("pointer: menu \(targeted) tile=\(tile.rawValue) outcome=\(outcome)"))
@@ -865,10 +867,14 @@ extension World {
     /// Forget every saved strip, on disk and in this session. No pending work may save one again: a Space change still
     /// in progress would stash the departing strip, so it refuses, and a debounced focus would save the strip it moves,
     /// so it is cancelled. The empty book goes out at once; the strips on screen are saved again at their next change.
-    private mutating func clearPositions(_ pass: inout Pass) -> CommandOutcome {
+    private mutating func clearPositions(_ pass: inout Pass, bundleID: String? = nil) -> CommandOutcome {
         guard !groups.values.contains(where: \.phase.isChanging) else { return .refused("space change in progress") }
         for id in groups.keys.sorted() { cancelTimers(group: id, &pass, focusOnly: true) }
-        spaces = SpaceBook()
+        if let bundleID {
+            guard !bundleID.isEmpty else { return .refused("bundle id is required") }
+            spaces.live = spaces.live.mapValues { $0.excluding(bundleID: bundleID) }
+            spaces.disk = spaces.disk.map { $0.excluding(bundleID: bundleID) }
+        } else { spaces = SpaceBook() }
         pass.effects.append(.persist(spaces))
         pass.effects.append(.log("positions cleared"))
         return .accepted

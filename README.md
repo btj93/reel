@@ -99,7 +99,7 @@ Old saved layouts are not imported. The new runtime writes `~/.local/state/reel/
 
 `get-layouts` covers every known Space. Each window has expected placement and a fresh bounded AX frame read. `unreadable` means the read failed or missed the deadline. `isOnScreen` and `slivered` describe the fresh frame. A stuck window cannot be hidden by a cached layout result.
 
-Also available are width/move/floating/close commands, `clear-positions`, `pause`, `resume`, `reload-config`, `get-status` and `quit`. The bundled CLI is `Reel.app/Contents/MacOS/reel-msg`.
+Also available are width/move/floating/close commands, `clear-positions`, `clear-positions-app <bundle-id>`, `pause`, `resume`, `reload-config`, `get-status` and `quit`. The bundled CLI is `Reel.app/Contents/MacOS/reel-msg`.
 
 Bundle logs are `~/Library/Logs/Reel/reel.log`, with one `reel.log.1` backup rotated above 1 MB at launch. The development binary logs to its terminal. Diagnostics include window titles; avoid publishing logs containing private window content.
 

@@ -11,9 +11,11 @@ public final class FrameProbe {
     public init(ids: Set<TileID>, timeout: Double = 0.5, completion: @escaping ([UInt32: CGRect]) -> Void) {
         pending = ids
         self.completion = completion
-        timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [self] _ in
+        let deadline = Timer(timeInterval: timeout, repeats: false) { [self] _ in
             MainActor.assumeIsolated { finish() }
         }
+        timer = deadline
+        RunLoop.main.add(deadline, forMode: .common)
         if ids.isEmpty { finish() }
     }
 

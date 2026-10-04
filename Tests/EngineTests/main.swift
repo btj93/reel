@@ -2264,6 +2264,23 @@ struct FuzzStream {
             check(second.first == 8, "next rotation replaces the single backup")
         } catch { check(false, "temporary log rotation failed \(error)") }
     }
+    section("R7: old config names its first unknown key and every removed key fails") {
+        let path = FileManager.default.currentDirectoryPath + "/Tests/Smoke/trunk-config.toml"
+        do {
+            let old = try String(contentsOfFile: path, encoding: .utf8)
+            _ = try AppConfig.parse(old)
+            check(false, "old-schema fixture must not parse")
+        } catch {
+            check(String(describing: error) == "unknown key animation.scroll_damping_ratio", "old file reports deterministic first unknown key")
+        }
+        for source in ["start_at_login = true", "[layout]\nposition_memory = false", "[layout]\nsaved_position_limit = 10",
+                       "[cursor]\ndrag_threshold_px = 2", "[reorder_overlay]\nghost_settle_ms = 0",
+                       "[reorder_overlay]\nthumbnail_style = \"icon\"", "[[position_memory_rules]]\nmatch_by = \"order\"",
+                       "[gesture]\nswipe_threshold_px = 20"] {
+            do { _ = try AppConfig.parse(source); check(false, "removed key must fail schema") }
+            catch { check(String(describing: error).hasPrefix("unknown key"), "removed key produces a schema error") }
+        }
+    }
     section("R7: SnapshotStore lists pending writes and clear survives restart") {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         defer { try? FileManager.default.removeItem(atPath: dir) }
@@ -2273,6 +2290,26 @@ struct FuzzStream {
         check(store.list().count == 1, "pending snapshot is listed before disk flush")
         store.clear()
         check(store.list().isEmpty && SnapshotStore(directory: dir, log: { _ in }).load().isEmpty, "clear persists empty book")
+    }
+    section("R7: app-scoped clear removes only that bundle from live and disk snapshots") {
+        var h = Harness()
+        h.census(10, [window(1, bundle: "clear.me"), window(2, bundle: "keep.me")])
+        h.census(11, [window(3, bundle: "clear.me"), window(4, bundle: "keep.me", floating: true)])
+        h.send(.windowsHidden([TileID(3)]))
+        let disk = Snapshot(group: 1, space: .skylight(90), columns: [SnapshotColumn(windows: [window(9, bundle: "clear.me"), window(10, bundle: "keep.me")], width: .proportion(0.5))])
+        h.send(.loadSnapshots([disk]))
+        h.send(.command(.clearPositionsApp("clear.me"), .ipc))
+        let book = h.world.spaces.persisted
+        check(book.allSatisfy { ($0.windows + $0.hidden.map(\.window)).allSatisfy { $0.bundleID != "clear.me" } }, "target absent from live/disk/hidden snapshots")
+        check(Set(book.flatMap { $0.windows.map(\.bundleID) }) == ["keep.me"], "other bundle survives")
+        check(h.world.groups[1]?.floating.contains(TileID(4)) == true, "current managed layout is not removed")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = SnapshotStore(directory: dir, log: { _ in })
+        store.save([disk])
+        store.clear(bundleID: "clear.me")
+        let loaded = SnapshotStore(directory: dir, log: { _ in }).load()
+        check(loaded.flatMap(\.windows).map(\.id) == [TileID(10)], "app-scoped clear persists across restart")
     }
     section("R7: fresh frame reads finish once, deadline reports missing reads as unreadable") {
         var results: [[UInt32: CGRect]] = []
@@ -2284,6 +2321,11 @@ struct FuzzStream {
         probe.receive(TileID(2), frame: fresh)
         probe.finish()
         check(results.count == 1 && results[0][1] == fresh && results[0][2] == nil, "one bounded result with missing frame omitted")
+        var timedOut = false
+        let timerProbe = FrameProbe(ids: [TileID(9)], timeout: 0.001) { frames in timedOut = frames.isEmpty }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        check(timedOut, "real run-loop deadline finishes unreadable reads")
+        timerProbe.finish()
     }
     section("R3 config: unknown keys and bad values are load errors that name the key") {
         func error(_ text: String) -> String? {
