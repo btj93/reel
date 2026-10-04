@@ -2318,20 +2318,26 @@ struct FuzzStream {
         h.census(10, [window(1, bundle: "clear.me"), window(2, bundle: "keep.me")])
         h.census(11, [window(3, bundle: "clear.me"), window(4, bundle: "keep.me", floating: true)])
         h.send(.windowsHidden([TileID(3)]))
+        h.census(12, [window(5, bundle: "keep.me", floating: true), window(6, bundle: "clear.me")])
         let disk = Snapshot(group: 1, space: .skylight(90), columns: [SnapshotColumn(windows: [window(9, bundle: "clear.me"), window(10, bundle: "keep.me")], width: .proportion(0.5))])
         h.send(.loadSnapshots([disk]))
+        let before = h.world.spaces.persisted
+        check(before.contains { $0.hidden.contains { $0.window.id == TileID(3) } }, "hidden target is really in a stored snapshot")
         h.send(.command(.clearPositionsApp("clear.me"), .ipc))
         let book = h.world.spaces.persisted
         check(book.allSatisfy { ($0.windows + $0.hidden.map(\.window)).allSatisfy { $0.bundleID != "clear.me" } }, "target absent from live/disk/hidden snapshots")
         check(Set(book.flatMap { $0.windows.map(\.bundleID) }) == ["keep.me"], "other bundle survives")
-        check(h.world.groups[1]?.floating.contains(TileID(4)) == true, "current managed layout is not removed")
+        check(h.world.groups[1]?.floating.contains(TileID(5)) == true && h.world.groups[1]?.windows[TileID(6)] != nil,
+              "current managed layout is not removed, including the cleared app")
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = SnapshotStore(directory: dir, log: { _ in })
-        store.save([disk])
+        store.save(before)
         store.clear(bundleID: "clear.me")
         let loaded = SnapshotStore(directory: dir, log: { _ in }).load()
-        check(loaded.flatMap(\.windows).map(\.id) == [TileID(10)], "app-scoped clear persists across restart")
+        check(Set(loaded.flatMap(\.windows).map(\.id)) == [TileID(2), TileID(4), TileID(5), TileID(10)],
+              "app-scoped clear preserves other apps across restart")
+        check(loaded.flatMap(\.hidden).allSatisfy { $0.window.bundleID != "clear.me" }, "hidden target also stays cleared on disk")
     }
     section("R7: fresh frame reads finish once, deadline reports missing reads as unreadable") {
         var results: [[UInt32: CGRect]] = []
