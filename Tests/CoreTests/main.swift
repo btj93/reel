@@ -2677,6 +2677,7 @@ do {
 runL1AuditGapTests()
 runL1CoreBackfillTests()
 runL1SpaceKeyTests()
+runIPCTransportTests()
 runRuntimeWriteTests()
 
 // ============================================================

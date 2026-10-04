@@ -12,7 +12,7 @@ public final class SocketServer: @unchecked Sendable {
     /// Per-connection read/write runs here, off the main thread, so a slow or
     /// stalled client can never freeze the window manager (and, with it, the
     /// CGEventTaps serviced by the main run loop). Concurrent so one slow
-    /// connection does not head-of-line-block the next. Command execution still
+    /// connection does not block the next. Requests execute asynchronously on main.
     private let connectionQueue = DispatchQueue(
         label: "co.reel.ipc.connection", qos: .userInitiated, attributes: .concurrent)
 
@@ -22,12 +22,8 @@ public final class SocketServer: @unchecked Sendable {
     /// this deadline.
     private static let connectionTimeoutSeconds = 2
 
-    /// Called when a command is received. Returns a response.
+    /// Called on main. The reply may arrive later without blocking main.
     public var onAsyncMessage: (@Sendable (IPCMessage, @escaping @Sendable (ReelResponse) -> Void) -> Void)?
-
-    public var onCommand: ((ReelCommand) -> ReelResponse)?
-
-    public var onMessage: ((IPCMessage) -> ReelResponse)?
 
     /// Invoked after a command's response has been fully written and the client
     /// socket closed. For actions that must not race the reply — `quit` above all,
@@ -36,8 +32,8 @@ public final class SocketServer: @unchecked Sendable {
     /// action touches main-thread state.
     public var onFlushed: ((ReelCommand) -> Void)?
 
-    public init() {
-        self.socketPath = reelSocketPath()
+    public init(socketPath: String = reelSocketPath()) {
+        self.socketPath = socketPath
     }
 
     deinit { stop() }
@@ -238,48 +234,35 @@ public final class SocketServer: @unchecked Sendable {
     /// Returns the response plus the resolved command, so `handleConnection` can
     /// run post-flush actions (see `onFlushed`) without the command handlers having
     /// to thread a closure back out.
-    private func computeResponse(from data: Data) -> (ReelResponse, ReelCommand?) {
-        guard let rawStr = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) else {
-            return (ReelResponse(success: false, message: "Invalid data"), nil)
+    private func computeResponse(from raw: Data) -> (ReelResponse, ReelCommand?) {
+        guard let text = String(data: raw, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return (ReelResponse(success: false, message: "Invalid command encoding"), nil)
         }
-
-        // Try JSON protocol first
-        if let jsonData = rawStr.data(using: .utf8),
-           let message = try? JSONDecoder().decode(IPCMessage.self, from: jsonData) {
-            let resolved = ReelCommand(rawValue: message.command)
-            if let command = resolved, onAsyncMessage != nil {
-                return (executeAsync(message), command)
+        let request: IPCMessage
+        if text.hasPrefix("{") {
+            guard let decoded = try? JSONDecoder().decode(IPCMessage.self, from: raw) else {
+                return (ReelResponse(success: false, message: "Invalid command JSON"), nil)
             }
-            let response = executeOnMain {
-                self.onMessage?(message) ?? self.onCommand.flatMap { handler in
-                    resolved.map { handler($0) }
-                } ?? ReelResponse(success: false, message: "No handler")
-            }
-            return (response, resolved)
+            request = decoded
+        } else { request = IPCMessage(command: text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard let command = ReelCommand(rawValue: request.command) else {
+            return (ReelResponse(success: false, message: "Unknown command: \(request.command)"), nil)
         }
-        // Fall back to raw string for backward compatibility
-        if let command = ReelCommand(rawValue: rawStr) {
-            if onAsyncMessage != nil { return (executeAsync(IPCMessage(command: command.rawValue)), command) }
-            let response = executeOnMain {
-                self.onCommand?(command) ?? ReelResponse(success: false, message: "No handler")
-            }
-            return (response, command)
-        }
-        return (ReelResponse(success: false, message: "Unknown command: \(rawStr)"), nil)
+        return (executeAsync(request), command)
     }
 
     private func executeAsync(_ message: IPCMessage) -> ReelResponse {
         let box = ResponseBox()
-        DispatchQueue.main.async { self.onAsyncMessage?(message) { box.complete($0) } }
+        DispatchQueue.main.async {
+            guard let handler = self.onAsyncMessage else {
+                return box.complete(ReelResponse(success: false, message: "No handler"))
+            }
+            handler(message) { box.complete($0) }
+        }
         return box.wait()
     }
 
-    /// Synchronously run `work` on the main thread and return its result.
-    private func executeOnMain(_ work: () -> ReelResponse) -> ReelResponse {
-        if Thread.isMainThread { return work() }
-        return DispatchQueue.main.sync(execute: work)
-    }
+
 }
 
 private final class ResponseBox: @unchecked Sendable {
