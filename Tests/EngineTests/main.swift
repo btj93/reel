@@ -3662,6 +3662,16 @@ struct FuzzStream {
         let expected = (offsetSpaces.first?["windows"] as? [[String: Any]])?.first?["expectedFrame"] as? [String: Double]
         let actual = offset.world.frames[TileID(1)]?.frame.rect
         check(expected?["x"] == actual.map { Double($0.minX) } && expected?["y"] == actual.map { Double($0.minY) }, "expected frames use global AX coordinates on an offset display")
+        var raised = Harness()
+        raised.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
+        raised.census(10, [window(1), window(2)])
+        let raisedLayout = IPCBridge.layouts(world: raised.world, active: 1, windows: [:])
+        let raisedSpaces = raisedLayout["spaces"] as? [[String: Any]] ?? []
+        let raisedEntries = raisedSpaces.first?["windows"] as? [[String: Any]] ?? []
+        let raisedExpected = raisedEntries.first?["expectedFrame"] as? [String: Double]
+        let raisedActual = raised.world.frames[TileID(1)]!.frame.rect
+        check(raisedExpected?["y"] == Double(raisedActual.minY) && raisedExpected?["h"] == Double(raisedActual.height),
+              "expected placement includes the engine's raised target, not an unraised reconstruction")
         let away = (spaces[1]["windows"] as? [[String: Any]])?.first
         check(away?["windowID"] as? UInt32 == 1 && away?["slivered"] as? Bool == true && away?["isOnScreen"] as? Bool == false,
               "a stashed window parked as a sliver is flagged")

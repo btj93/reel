@@ -118,16 +118,21 @@ public final class IPCBridge {
                 strip.columnData = strip.columns.map { _ in ColumnData(cachedWidth: 1) }
                 strip.snapIndices = saved.columns.map(\.snapIndex)
                 strip.recalculateWidths(at: world.time)
+                for index in strip.columnData.indices where index != strip.activeColumnIndex {
+                    strip.columnData[index].cachedRaiseTarget = world.config.raiseHeight
+                }
                 return Dictionary(uniqueKeysWithValues: computeTargetFrames(strip: strip, time: world.time).map { ($0.tileID, $0.frame.offsetBy(dx: group.frame.minX, dy: group.frame.minY)) })
             } ?? [:]
             let columns = saved.columns.flatMap { column in column.windows.map { ($0, Optional(column)) } }
             return (columns + saved.floating.map { ($0, nil) } + saved.hidden.map { ($0.window, nil) }).map { window, column in
                 let now = windows[window.id.rawValue]
+                let desired = world.groups[saved.group]?.space == saved.space
+                    ? world.frames[window.id]?.frame.rect ?? expected[window.id] : expected[window.id]
                 var entry: [String: Any] = [
                     "windowID": window.id.rawValue, "bundleID": window.bundleID ?? "", "title": window.title,
                     "savedWidth": column.map { "\($0.width)" } ?? "floating", "isFullWidth": column?.isFullWidth ?? false,
                     "isOnScreen": now?.onScreen ?? false, "currentFrame": NSNull(), "slivered": false,
-                    "unreadable": now == nil, "expectedFrame": expected[window.id].map(Self.frameJSON) ?? NSNull(),
+                    "unreadable": now == nil, "expectedFrame": desired.map(Self.frameJSON) ?? NSNull(),
                     "expectedPlacement": column == nil ? "outside-strip" : expected[window.id] == nil ? "unavailable-display" : "tiled",
                 ]
                 if let frame = now?.frame {
