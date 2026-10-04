@@ -65,6 +65,7 @@ public final class Loop {
     private var lastRequest: UInt64 = 0
     private var indicatorTile: TileID?
     private var quitting = false
+    private var observing = false
 
     public init(paths: Paths = Paths()) {
         self.paths = paths
@@ -99,6 +100,7 @@ public final class Loop {
         pointer.start()
         observer.start(timeout: 1.5) { [weak self] in
             guard let self else { return }
+            observing = true
             world.groups.keys.sorted().forEach(census(group:))
             spaces.start()
         }
@@ -209,6 +211,7 @@ public final class Loop {
 
     private func topologyChanged(_ next: Topology) {
         sendGlobal(.topologyChanged(next))
+        guard observing else { return }
         world.groups.keys.sorted().forEach(census(group:))
         recover()
         onChange?()

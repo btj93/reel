@@ -3698,18 +3698,29 @@ struct FuzzStream {
         check(positions.count == 4 && positions.contains { $0["windowID"] as? UInt32 == 2 && $0["hidden"] as? Bool == true },
               "one entry per saved window, hidden ones marked")
         let area = h.world.topology.groups[0].frame
-        let layouts = IPCBridge.layouts(world: h.world, active: 1, windows: [
-            3: (CGRect(x: area.minX + 10, y: area.minY, width: 400, height: 400), true),
-            1: (CGRect(x: area.maxX - 1, y: area.minY, width: 400, height: 400), false)])
+        let layouts = IPCBridge.layouts(world: h.world, active: 1, frames: [
+            3: CGRect(x: area.minX + 10, y: area.minY, width: 400, height: 400),
+            1: CGRect(x: area.maxX - 1, y: area.minY, width: 400, height: 400)], onScreenIDs: [3])
         let spaces = layouts["spaces"] as? [[String: Any]] ?? []
         check(spaces.map { $0["source"] as? String ?? "" } == ["live", "session", "disk"], "current, then this session's stashes, then disk")
         let live = (spaces[0]["windows"] as? [[String: Any]])?.first
         check(live?["expectedFrame"] is [String: Double] && live?["unreadable"] as? Bool == false, "fresh frame and expected placement both reported")
         let missing = (spaces[2]["windows"] as? [[String: Any]])?.first
         check(missing?["unreadable"] as? Bool == true && missing?["currentFrame"] is NSNull, "failed fresh read is explicit, not a cached frame")
+        var visibility = Harness()
+        visibility.census(10, [window(10), window(11), window(12), window(13)])
+        let overlapping = CGRect(x: 10, y: 10, width: 100, height: 100)
+        let classified = IPCBridge.layouts(world: visibility.world, active: 1,
+                                           frames: [10: overlapping, 11: overlapping, 12: overlapping, 13: overlapping],
+                                           onScreenIDs: [10])
+        let visibilitySpaces = classified["spaces"] as? [[String: Any]] ?? []
+        let visibleEntries = visibilitySpaces.first?["windows"] as? [[String: Any]] ?? []
+        check(visibleEntries.filter { $0["isOnScreen"] as? Bool == true }.compactMap { $0["windowID"] as? UInt32 } == [10],
+              "window-server membership alone marks on-screen; off-Space, minimized and hidden readable rectangles do not")
+        check(visibleEntries.allSatisfy { $0["unreadable"] as? Bool == false }, "visibility does not discard fresh AX geometry")
         var offset = Harness(displays: [display(1, x: -1000, y: -600)])
         offset.census(10, [window(1)])
-        let offsetLayout = IPCBridge.layouts(world: offset.world, active: 1, windows: [:])
+        let offsetLayout = IPCBridge.layouts(world: offset.world, active: 1, frames: [:], onScreenIDs: [])
         let offsetSpaces = offsetLayout["spaces"] as? [[String: Any]] ?? []
         let expected = (offsetSpaces.first?["windows"] as? [[String: Any]])?.first?["expectedFrame"] as? [String: Double]
         let actual = offset.world.frames[TileID(1)]?.frame.rect
@@ -3717,7 +3728,7 @@ struct FuzzStream {
         var raised = Harness()
         raised.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
         raised.census(10, [window(1), window(2)])
-        let raisedLayout = IPCBridge.layouts(world: raised.world, active: 1, windows: [:])
+        let raisedLayout = IPCBridge.layouts(world: raised.world, active: 1, frames: [:], onScreenIDs: [])
         let raisedSpaces = raisedLayout["spaces"] as? [[String: Any]] ?? []
         let raisedEntries = raisedSpaces.first?["windows"] as? [[String: Any]] ?? []
         let raisedExpected = raisedEntries.first?["expectedFrame"] as? [String: Double]

@@ -95,7 +95,14 @@ public struct AppConfig: Sendable {
                 (action.rawValue, { config.keys[action] = try text($0, "keys.\(action.rawValue)") })
             })) },
             "gesture": { try Section($0, path: "gesture").read([
-                "modifier": { config.gestureModifier = try choice($0, "gesture.modifier", GestureModifier.allCases) },
+                "modifier": {
+                    let value = try text($0, "gesture.modifier").lowercased()
+                    let aliases = ["control": "ctrl", "opt": "alt", "option": "alt", "command": "cmd"]
+                    guard let modifier = GestureModifier(rawValue: aliases[value] ?? value) else {
+                        throw ConfigError(description: "gesture.modifier must be one of fn, ctrl/control, alt/opt/option, cmd/command")
+                    }
+                    config.gestureModifier = modifier
+                },
                 "snap": { gestureSnap = try flag($0, "gesture.snap") },
             ]) },
             "indicator": { try Section($0, path: "indicator").read([

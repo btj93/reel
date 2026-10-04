@@ -100,7 +100,7 @@ public final class IPCBridge {
     }
 
     /// Every known Space, with expected placement beside a bounded, fresh AX read. Missing reads are unreadable.
-    public static func layouts(world: World, active: UInt32, windows: [UInt32: (frame: CGRect, onScreen: Bool)]) -> [String: Any] {
+    public static func layouts(world: World, active: UInt32, frames: [UInt32: CGRect], onScreenIDs: Set<UInt32>) -> [String: Any] {
         func entries(_ saved: Snapshot) -> [[String: Any]] {
             let area = world.topology.group(id: saved.group)?.frame
             let displayGroup = world.topology.group(id: saved.group)
@@ -125,7 +125,9 @@ public final class IPCBridge {
             } ?? [:]
             let columns = saved.columns.flatMap { column in column.windows.map { ($0, Optional(column)) } }
             return (columns + saved.floating.map { ($0, nil) } + saved.hidden.map { ($0.window, nil) }).map { window, column in
-                let now = windows[window.id.rawValue]
+                let now = frames[window.id.rawValue].map { frame in
+                    (frame: frame, onScreen: onScreenIDs.contains(window.id.rawValue))
+                }
                 let desired = world.groups[saved.group]?.space == saved.space
                     ? world.frames[window.id]?.frame.rect ?? expected[window.id] : expected[window.id]
                 var entry: [String: Any] = [
@@ -165,11 +167,9 @@ public final class IPCBridge {
             + Array(world.spaces.live.values) + world.spaces.disk
         let windows = snapshots.flatMap { $0.columns.flatMap(\.windows) + $0.floating + $0.hidden.map(\.window) }
         let unique = Dictionary(windows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let onScreenIDs = Set(windowInfo(onScreenOnly: true).map(\.windowID))
         let probe = FrameProbe(ids: Set(unique.keys)) { frames in
-            let fresh = frames.mapValues { frame in
-                (frame: frame, onScreen: world.topology.displays.contains { frame.intersects($0.frame) })
-            }
-            completion(self.json(Self.layouts(world: world, active: active, windows: fresh)))
+            completion(self.json(Self.layouts(world: world, active: active, frames: frames, onScreenIDs: onScreenIDs)))
         }
         for window in unique.values {
             guard let worker = loop.observer.workers[window.pid] else {
