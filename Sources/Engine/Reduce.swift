@@ -401,6 +401,7 @@ extension World {
             return
         case .press(let tile, let origin):
             cancelPointer(&pass)
+            guard let tile else { return }
             return begin(.titleArmed(TitlePress(tile: tile, origin: origin)), group: id, &pass)
         default: break
         }

@@ -69,7 +69,8 @@ public enum Command: Sendable {
 
 public enum PointerInput: Sendable {
     case scroll(ScrollInput)
-    case press(TileID, at: AXPoint)
+    /// A left press: `tile` when it hit a title bar with the modifier held, else nil, which only ends a live session.
+    case press(TileID?, at: AXPoint)
     case drag(AXPoint)
     case release(AXPoint)
     case overlayReady

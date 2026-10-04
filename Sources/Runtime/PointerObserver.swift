@@ -87,10 +87,10 @@ public final class PointerObserver {
         let input: PointerInput
         switch event {
         case .down(let point, let modifier):
-            guard modifier, let hit = world().frames.values.first(where: {
+            let hit = !modifier ? nil : world().frames.values.first {
                 TitleBarInteraction.titleBarContains(point, frame: $0.frame.rect, height: Self.titleBarHeight, cornerInset: Self.cornerInset)
-            }) else { return .pass }
-            input = .press(hit.tile, at: AXPoint(point))
+            }
+            input = .press(hit?.tile, at: AXPoint(point))
         case .dragged(let point):
             if !pills.isEmpty { menu.highlightPill(at: pill(at: point)) }
             reorder.cursor(AXPoint(point))

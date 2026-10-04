@@ -54,9 +54,11 @@ public struct PointerSession: Sendable {
 
     public var tile: TileID? { press?.tile }
 
+    /// An undecided swipe has not moved the view, so external focus may still scroll it.
     public var isSwiping: Bool {
         switch phase {
-        case .gestureTracking, .momentum: true
+        case .gestureTracking(let swipe): swipe != nil
+        case .momentum: true
         default: false
         }
     }

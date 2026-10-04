@@ -1450,7 +1450,7 @@ struct FuzzStream {
         case 3: input = scroll(rng.next(3) == 0 ? .cancelled : .ended, modifier: modifier, x: x)
         case 4: input = scroll(rng.next(3) == 0 ? .momentumEnded : .momentum, dx, modifier: modifier, x: x)
         case 5: input = scroll(.discrete, dx, dy: dy, modifier: modifier, x: x)
-        case 6: input = .press(tile, at: point)
+        case 6: input = .press(rng.next(4) == 0 ? nil : tile, at: point)
         case 7: input = .drag(AXPoint(CGPoint(x: point.point.x + Double(rng.next(30)), y: point.point.y)))
         case 8: input = .release(point)
         case 9: input = .overlayReady
@@ -3669,6 +3669,19 @@ struct FuzzStream {
         check(h.gesture == nil && h.consumed, "letting go of the modifier mid-swipe releases the swipe")
         check(h.world.check().isEmpty, "rejection invariants")
     }
+    section("abf1b87: a swipe that has not moved yet leaves external focus live, then tracks from where focus left the view") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.pointer(began))
+        h.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus)))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(3) && h.world.pointer != nil, "external focus moves the strip during an undecided swipe")
+        let moved = h.offset
+        h.send(.pointer(swipe(30)))
+        check(h.gesture?.startOffset == moved, "the swipe starts from the offset focus left")
+    }
     section("2b2457b: a swipe onto a column of another width centres that column") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
@@ -3805,6 +3818,15 @@ struct FuzzStream {
         check(h.effects.contains { if case .cancel(timer) = $0 { true } else { false } }, "the long press is cancelled")
         h.advance(EngineConfig.longPress + margin)
         check(h.overlay == .hidden && h.world.pointer == nil, "no menu opens later")
+    }
+    section("eebb564: a plain click ends a drag whose release was lost, and still reaches the window") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.beginReorder(TileID(1))
+        h.send(.pointer(.press(nil, at: AXPoint(CGPoint(x: 10, y: 10)))))
+        check(h.world.pointer == nil && h.overlay == .hidden && !h.consumed, "the overlay goes and the click passes")
+        h.send(.pointer(.press(nil, at: AXPoint(CGPoint(x: 10, y: 10)))))
+        check(h.effects.isEmpty, "a plain click with no session does nothing")
     }
     section("eebb564: a pill resizes the tile it opened on without moving focus or the focused window") {
         var h = Harness()
