@@ -443,7 +443,7 @@ extension World {
             cancelPointer(&pass)
             pass.effects.append(.consumeInput)
             pass.effects.append(.replayPress(press.origin))
-        case (.titleDragging, .drag), (.reorderDragging(_, _, false), .drag), (.menuOpen, .drag):
+        case (.titleDragging(_, _, false), .drag), (.reorderDragging(_, _, false), .drag), (.menuOpen, .drag):
             pass.effects.append(.consumeInput)
         case (.titleDragging(let press, let display, let released), .overlayReady):
             session.phase = .reorderDragging(press, display: display, released: released)
