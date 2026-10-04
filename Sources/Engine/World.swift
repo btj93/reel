@@ -20,6 +20,10 @@ public struct EngineConfig: Sendable {
     /// notification.
     public static let censusReads = 4
     public static let gestureQuiet = 0.3
+    public static let longPress = 0.3
+    public static let dragThreshold = 5.0
+    /// How long a released reorder waits for the overlay's drop; the overlay is ready within 0.3 s.
+    public static let dropDeadline = 1.0
     public static let flickVelocity = 50.0
     public static let defaultGap = 8.0
     public static let defaultColumnWidth = 0.5
@@ -273,7 +277,7 @@ public struct World: Sendable {
     public internal(set) var topology: Topology
     public internal(set) var groups: [UInt32: GroupState]
     public internal(set) var spaces = SpaceBook()
-    public internal(set) var pointer: PointerState = .idle
+    public internal(set) var pointer: PointerSession?
     public internal(set) var frames: [TileID: FrameRequest] = [:]
     public internal(set) var appliedFrames: [TileID: FrameRequest] = [:]
     public internal(set) var timers: [TimerToken: ScheduledWork] = [:]
@@ -334,7 +338,9 @@ public struct World: Sendable {
             return groups.keys.sorted().first { id in groups[id]!.windows.values.contains { $0.pid == intent.pid } } ?? activeGroup
         case .focus(let intent): tile = intent.tile
         case .command(let command, _), .ipc(_, let command): tile = command.tile
-        case .pointer(let input, _): return input.tile.flatMap(owner) ?? pointer.scope?.group ?? activeGroup
+        case .pointer(let input, _):
+            return input.tile.flatMap(owner) ?? input.beginsAt.flatMap { topology.nearestGroup(to: $0.point)?.id }
+                ?? pointer?.scope.group ?? activeGroup
         default: tile = nil
         }
         return tile.flatMap { tile in owner(of: tile) ?? groups.first { $0.value.hidden[tile] != nil }?.key } ?? activeGroup
@@ -407,10 +413,7 @@ public struct World: Sendable {
                 errors.append("group \(id): fingerprint census deferred past \(EngineConfig.censusReads) settled reads")
             }
         }
-        if let owner = pointer.scope,
-           scope(for: owner.group) != owner || pointer.tile.map({ groups[owner.group]?.windows[$0] == nil }) == true {
-            errors.append("stale pointer")
-        }
+        errors += pointerErrors
         for frame in frames.values {
             guard let group = groups[frame.scope.group], scope(for: frame.scope.group) == frame.scope,
                   group.windows[frame.tile] != nil, !group.floating.contains(frame.tile) else {

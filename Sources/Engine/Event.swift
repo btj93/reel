@@ -67,20 +67,28 @@ public enum Command: Sendable {
 }
 
 public enum PointerInput: Sendable {
-    case beginGesture(TileID)
-    case delta(Double)
-    case endGesture
-    case openMenu(TileID)
-    case menu(Command)
-    case beginReorder(TileID)
-    case dropReorder(Int)
+    case scroll(ScrollInput)
+    /// A modifier press on the title bar of `tile`.
+    case press(TileID, at: AXPoint)
+    case drag(AXPoint)
+    case release(AXPoint)
+    /// The reorder overlay is showing.
+    case overlayReady
+    /// A pill picked in the menu; the command acts on the tile the menu opened for, whatever tile it names.
+    case choose(Command)
+    /// The gap the released drag lands in, `0...columns.count`.
+    case drop(Int)
     case cancel
 
     var tile: TileID? {
-        switch self {
-        case .beginGesture(let tile), .openMenu(let tile), .beginReorder(let tile): tile
-        default: nil
-        }
+        if case .press(let tile, _) = self { tile } else { nil }
+    }
+
+    /// Where a session that starts at this input begins: a press on its tile, a swipe or a wheel notch on the strip
+    /// under the cursor.
+    var beginsAt: AXPoint? {
+        guard case .scroll(let scroll) = self, scroll.phase == .began || scroll.phase == .discrete else { return nil }
+        return scroll.at
     }
 }
 

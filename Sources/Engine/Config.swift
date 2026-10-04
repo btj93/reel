@@ -14,6 +14,11 @@ public enum KeyAction: String, CaseIterable, Sendable {
     case closeWindow = "close_window"
 }
 
+/// The key held for trackpad swipes, wheel scrolls and title-bar drags.
+public enum GestureModifier: String, CaseIterable, Sendable {
+    case fn, ctrl, alt, cmd
+}
+
 public enum IndicatorStyle: String, CaseIterable, Sendable {
     case none, ring, raise, flash
 }
@@ -48,6 +53,7 @@ public struct AppConfig: Sendable {
         .moveLeft: "alt-shift-h", .moveRight: "alt-shift-l", .cycleWidth: "alt-r", .toggleFullWidth: "alt-f", .toggleFloating: "alt-space", .closeWindow: "alt-w",
     ]
     public internal(set) var indicator = IndicatorConfig()
+    public internal(set) var gestureModifier = GestureModifier.fn
 
     public init() {}
 
@@ -61,7 +67,7 @@ public struct AppConfig: Sendable {
         let base = EngineConfig()
         var gap = base.gap, defaultWidth = base.defaultWidth, presets = base.widthPresets, snap = base.snapPoints
         var animate = base.animate, stiffness = base.scroll.stiffness, damping = base.dampingRatio
-        var bounce = base.bounceDistance, bounceDamping = base.bounceDampingRatio, rules = base.rules
+        var bounce = base.bounceDistance, bounceDamping = base.bounceDampingRatio, rules = base.rules, gestureSnap = base.gestureSnap
         var config = AppConfig()
         try Section(root, path: "").read([
             "layout": { try Section($0, path: "layout").read([
@@ -80,6 +86,10 @@ public struct AppConfig: Sendable {
             "keys": { try Section($0, path: "keys").read(Dictionary(uniqueKeysWithValues: KeyAction.allCases.map { action in
                 (action.rawValue, { config.keys[action] = try text($0, "keys.\(action.rawValue)") })
             })) },
+            "gesture": { try Section($0, path: "gesture").read([
+                "modifier": { config.gestureModifier = try choice($0, "gesture.modifier", GestureModifier.allCases) },
+                "snap": { gestureSnap = try flag($0, "gesture.snap") },
+            ]) },
             "indicator": { try Section($0, path: "indicator").read([
                 "style": { config.indicator.style = try choice($0, "indicator.style", IndicatorStyle.allCases) },
                 "color": { config.indicator.color = try color($0) },
@@ -102,7 +112,7 @@ public struct AppConfig: Sendable {
                 }
             },
         ])
-        config.engine = EngineConfig(gap: gap, defaultWidth: defaultWidth, animate: animate, gestureSnap: base.gestureSnap,
+        config.engine = EngineConfig(gap: gap, defaultWidth: defaultWidth, animate: animate, gestureSnap: gestureSnap,
                                      rules: rules, widthPresets: presets, snapPoints: snap, stiffness: stiffness,
                                      dampingRatio: damping, bounceDistance: bounce, bounceDampingRatio: bounceDamping,
                                      raiseHeight: config.indicator.style == .raise ? config.indicator.raiseHeight : 0)

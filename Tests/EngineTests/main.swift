@@ -34,6 +34,20 @@ func topology(_ revision: UInt64, _ displays: [Display], separateSpaces: Bool = 
     Topology(revision: revision, displays: displays, separateSpaces: separateSpaces, primaryScreenHeight: 900)
 }
 
+func scroll(_ phase: ScrollPhase, _ dx: Double = 0, dy: Double = 0, modifier: Bool = true, x: Double = 500) -> PointerInput {
+    .scroll(ScrollInput(phase: phase, dx: dx, dy: dy, modifier: modifier, at: AXPoint(CGPoint(x: x, y: 400))))
+}
+
+let began = scroll(.began)
+let lift = scroll(.ended)
+func swipe(_ dx: Double) -> PointerInput { scroll(.changed, dx) }
+
+/// The middle of `tile`'s title bar.
+func titleBar(_ tile: TileID, in world: World) -> AXPoint {
+    let frame = world.frames[tile]?.frame.rect ?? .zero
+    return AXPoint(CGPoint(x: frame.midX, y: frame.minY + 10))
+}
+
 func threadCPUTime() -> Duration {
     var spec = timespec()
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &spec)
@@ -50,6 +64,8 @@ struct Harness {
     var stolenFocus = 0
     /// Events after which a group's `focusedAt` moved back.
     var rewoundFocus = 0
+    /// The overlay the runtime would show after the effects so far.
+    var overlay = Overlay.hidden
 
     init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [Display] = [display()],
          separateSpaces: Bool = true) {
@@ -63,8 +79,9 @@ struct Harness {
         switch kind {
         case .pointer(let input, nil):
             switch input {
-            case .beginGesture, .openMenu, .beginReorder: stamped = kind
-            default: stamped = .pointer(input, session: world.pointer.token)
+            case .press: stamped = kind
+            case .scroll(let scroll) where scroll.phase == .began || scroll.phase == .discrete: stamped = kind
+            default: stamped = .pointer(input, session: world.pointer?.token)
             }
         default: stamped = kind
         }
@@ -78,6 +95,7 @@ struct Harness {
         let leader = world.activeGroup
         let focusedAt = world.groups.mapValues(\.focusedAt)
         effects = reduce(&world, event, now: time)
+        for case .overlay(let shown) in effects { overlay = shown }
         if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
         if event.scope.group != leader, effects.contains(where: { if case .focus(_, .restore) = $0 { true } else { false } }) { stolenFocus += 1 }
         reduceTime += start.duration(to: .now)
@@ -97,18 +115,38 @@ struct Harness {
 
     mutating func advance(_ delta: Double) {
         let target = time + delta
-        while let entry = world.timers.filter({ $0.value.deadline <= target }).min(by: {
-            if $0.value.deadline == $1.value.deadline { return $0.key.rawValue < $1.key.rawValue }
-            return $0.value.deadline < $1.value.deadline
-        }) {
-            time = max(time, entry.value.deadline)
-            apply(Event(scope: entry.value.scope, kind: .timer(entry.key)))
+        while true {
+            var due = world.timers.map { (token: $0.key, deadline: $0.value.deadline, scope: $0.value.scope) }
+            if let session = world.pointer, let timer = session.timer { due.append((timer.token, timer.deadline, session.scope)) }
+            guard let entry = due.filter({ $0.deadline <= target }).min(by: { ($0.deadline, $0.token) < ($1.deadline, $1.token) }) else { break }
+            time = max(time, entry.deadline)
+            apply(Event(scope: entry.scope, kind: .timer(entry.token)))
         }
         time = target
     }
 
+    /// A modifier press on `tile`'s title bar, held past the long press.
+    mutating func openMenu(_ tile: TileID, group: UInt32 = 1) {
+        send(.pointer(.press(tile, at: titleBar(tile, in: world))), group: group)
+        advance(EngineConfig.longPress + margin)
+    }
+
+    /// A modifier drag on `tile`'s title bar past the threshold, with the overlay showing.
+    mutating func beginReorder(_ tile: TileID, group: UInt32 = 1) {
+        let origin = titleBar(tile, in: world).point
+        send(.pointer(.press(tile, at: AXPoint(origin))), group: group)
+        send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + EngineConfig.dragThreshold + 1, y: origin.y)))), group: group)
+        send(.pointer(.overlayReady), group: group)
+    }
+
+    /// Release the drag and answer with the overlay's gap.
+    mutating func drop(_ gap: Int, group: UInt32 = 1) {
+        send(.pointer(.release(AXPoint(.zero))), group: group)
+        send(.pointer(.drop(gap)), group: group)
+    }
+
     var active: TileID? { world.groups[1]?.strip.activeColumn?.activeTile }
-    var gesture: GestureSession? { if case .gesture(let session) = world.pointer { session } else { nil } }
+    var gesture: PointerSession? { world.pointer?.swipe != nil ? world.pointer : nil }
     var tiles: [TileID] { world.groups[1]!.strip.columns.flatMap(\.tiles) }
     var offset: Double { world.groups[1]!.strip.viewOffset.current(at: time) }
 
@@ -228,8 +266,8 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
         h.send(.command(.focus(TileID(1)), .ipc))
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(50)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(50)))
         h.send(.pointer(.cancel))
         let prior = h.offset
         h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .appActivation)))
@@ -264,10 +302,10 @@ struct Harness {
     section("abf1b87 d227a21: adoption and Space observation cancel old gesture and focus latches") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(90)))
-        h.send(.pointer(.beginGesture(TileID(999))))
-        check(h.world.pointer.token == nil, "rejected gesture resets idle")
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(90)))
+        h.send(.pointer(.drop(0)))
+        check(h.world.pointer?.token == nil, "an out-of-order input resets idle")
         if case .gesture = h.world.groups[1]!.strip.viewOffset { check(false, "reject left gesture latch") }
         h.advance(EngineConfig.focusDebounce + margin)
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
@@ -276,48 +314,49 @@ struct Harness {
         check(h.world.timers.isEmpty, "adoption cancels deferred old focus")
         h.send(.timer(timer), advance: EngineConfig.focusDebounce + margin)
         check(h.active == TileID(3), "late pre-adoption focus cannot win")
-        h.send(.pointer(.beginGesture(TileID(3))))
+        h.send(.pointer(began))
         h.send(.spaceWillChange)
-        check(h.world.pointer.token == nil, "observed Space change cancels immediately")
+        check(h.world.pointer?.token == nil, "observed Space change cancels immediately")
     }
     section("eebb564: menu commands retain open-time target after active column changes") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.send(.pointer(.openMenu(TileID(1))))
+        h.openMenu(TileID(1))
         h.send(.command(.focus(TileID(2)), .ipc))
-        h.send(.pointer(.menu(.setWidth(TileID(2), 333))))
+        h.send(.pointer(.choose(.setWidth(TileID(2), 333))))
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(333), "menu acts on captured tile")
         check(h.world.groups[1]!.strip.columns[1].width != .fixed(333), "later active tile unchanged")
-        check(h.world.pointer.token == nil, "menu consumed")
+        check(h.world.pointer?.token == nil, "menu consumed")
     }
     section("eebb564: late menu and reorder callbacks cannot act on a replacement session") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.send(.pointer(.openMenu(TileID(1))))
-        let oldMenu = h.world.pointer.token!
-        h.send(.pointer(.openMenu(TileID(2))))
-        let newMenu = h.world.pointer.token!
-        h.send(.pointer(.menu(.setWidth(TileID(1), 311)), session: oldMenu))
-        check(h.effects.isEmpty && h.world.pointer.token == newMenu, "old menu callback cannot mutate or cancel new menu")
+        h.openMenu(TileID(1))
+        let oldMenu = h.world.pointer!.token
+        h.openMenu(TileID(2))
+        let newMenu = h.world.pointer!.token
+        h.send(.pointer(.choose(.setWidth(TileID(1), 311)), session: oldMenu))
+        check(h.effects.isEmpty && h.world.pointer?.token == newMenu, "old menu callback cannot mutate or cancel new menu")
         check(h.world.groups[1]!.strip.columns.allSatisfy { $0.width != .fixed(311) }, "stale callback touches neither tile")
-        h.send(.pointer(.menu(.setWidth(TileID(1), 322)), session: newMenu))
+        h.send(.pointer(.choose(.setWidth(TileID(1), 322)), session: newMenu))
         check(h.world.groups[1]!.strip.columns[1].width == .fixed(322), "current menu still acts on captured target")
-        h.send(.pointer(.beginReorder(TileID(1))))
-        let oldDrag = h.world.pointer.token!
-        h.send(.pointer(.beginReorder(TileID(2))))
-        let newDrag = h.world.pointer.token!
-        h.send(.pointer(.dropReorder(0), session: oldDrag))
-        check(h.tiles == [TileID(1), TileID(2)] && h.world.pointer.token == newDrag, "late drop cannot commit new drag")
+        h.beginReorder(TileID(1))
+        let oldDrag = h.world.pointer!.token
+        h.beginReorder(TileID(2))
+        let newDrag = h.world.pointer!.token
+        h.send(.pointer(.release(AXPoint(.zero)), session: oldDrag))
+        h.send(.pointer(.drop(0), session: oldDrag))
+        check(h.tiles == [TileID(1), TileID(2)] && h.world.pointer?.token == newDrag, "late drop cannot commit new drag")
     }
     section("5753fc0: topology revision invalidates gesture, overlay, queued frames and stale events") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(10, [window(1)])
         h.census(10, [window(2)], group: 2)
-        h.send(.pointer(.openMenu(TileID(1))))
+        h.openMenu(TileID(1))
         let old = h.world.scope(for: 1)!
         let oldFrame = h.world.frames[TileID(1)]!
         h.send(.topologyChanged(topology(2, [display()])))
-        check(h.world.pointer.token == nil, "topology cancels overlay")
+        check(h.world.pointer?.token == nil, "topology cancels overlay")
         check(Set(h.tiles) == Set([TileID(1), TileID(2)]), "hot-unplug migrates windows")
         let staleEffects = h.send(.windowRemoved(TileID(1)), scope: old)
         check(staleEffects.count == 1 && h.logged("stale topology revision dropped rev=1 current=2"),
@@ -331,13 +370,14 @@ struct Harness {
         var h = Harness(animate: true)
         h.census(10, [window(1), window(2)])
         h.send(.command(.setWidth(TileID(1), 650), .ipc))
-        h.send(.pointer(.beginGesture(TileID(1))))
-        let targets = h.gesture!.snapTargets
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(1)))
+        let targets = h.gesture!.swipe!.snapTargets
         h.send(.command(.setWidth(TileID(1), 350), .ipc))
-        h.send(.pointer(.delta(400)))
+        h.send(.pointer(swipe(399)))
         let strip = h.world.groups[1]!.strip
         let shift = strip.columnX(at: 0, time: h.time + 0.01) - strip.columnX(at: 1, time: h.time + 0.01)
-        h.send(.pointer(.endGesture))
+        h.send(.pointer(lift))
         check(h.world.groups[1]!.strip.activeColumnIndex == 1, "release lands on the next column")
         if case .animation(let release) = h.world.groups[1]!.strip.viewOffset {
             check(abs(release.to - shift - targets[1]) < 0.001, "release targets the captured column boundary, not a new-width grid")
@@ -351,21 +391,21 @@ struct Harness {
         var h = Harness(gestureSnap: false)
         h.census(10, [window(1), window(2)])
         h.send(.command(.focus(TileID(2)), .ipc))
-        h.send(.pointer(.beginGesture(TileID(2))))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(-90)))
         let start = h.gesture!.startOffset
-        h.send(.pointer(.delta(-90)))
-        h.send(.pointer(.delta(-30)))
+        h.send(.pointer(swipe(-30)))
         guard case .gesture(let gesture) = h.world.groups[1]!.strip.viewOffset else { check(false, "gesture state"); return }
         let expected = start + gesture.tracker.projectedEndPosition(isTouchpad: true)
         check(start != 0, "nonzero starting offset exercises the coordinate bug")
         check(h.world.groups[1]!.strip.viewOffsetBounds(at: h.time).contains(expected), "projection lands inside the strip")
-        h.send(.pointer(.endGesture))
+        h.send(.pointer(lift))
         check(abs(h.offset - expected) < 0.001, "free release uses start offset plus tracker projection")
-        check(h.world.pointer.token == nil, "release clears latch without a tick")
-        h.send(.pointer(.beginGesture(TileID(2))))
-        h.send(.pointer(.delta(17)), advance: 0.1)
+        check(h.gesture == nil, "release clears latch without a tick")
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(17)), advance: 0.1)
         let dropped = h.offset
-        h.send(.pointer(.endGesture), advance: 0.1)
+        h.send(.pointer(lift), advance: 0.1)
         check(h.offset == dropped, "slow free release does not snap or reuse old momentum")
     }
     section("2be34bd: secondary screen coordinate round trip and reorder at end") {
@@ -382,8 +422,8 @@ struct Harness {
         check(axPoint(screenPoint(point, in: topology), in: topology) == point, "typed point round trip")
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
-        h.send(.pointer(.beginReorder(TileID(1))))
-        h.send(.pointer(.dropReorder(Int.max)))
+        h.beginReorder(TileID(1))
+        h.drop(Int.max)
         check(h.tiles == [TileID(2), TileID(3), TileID(1)], "past-end drop moves to end")
     }
     section("524cd8a 283afe2: hung app does not block a healthy app; cancelled retries cannot fire") {
@@ -579,15 +619,15 @@ struct Harness {
     section("eebb564: menu focus, close and width act on the captured tile") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.send(.pointer(.openMenu(TileID(1))))
-        h.send(.pointer(.menu(.focus(TileID(2)))))
+        h.openMenu(TileID(1))
+        h.send(.pointer(.choose(.focus(TileID(2)))))
         check(h.active == TileID(1), "menu focus targets the captured tile")
-        h.send(.pointer(.openMenu(TileID(2))))
-        h.send(.pointer(.menu(.close(TileID(1)))))
+        h.openMenu(TileID(2))
+        h.send(.pointer(.choose(.close(TileID(1)))))
         check(h.effects.contains { if case .close(TileID(2)) = $0 { return true }; return false }, "menu close targets the captured tile")
-        h.send(.pointer(.openMenu(TileID(2))))
-        h.send(.pointer(.menu(.cycleWidthPreset)))
-        check(h.world.pointer.token == nil && h.world.groups[1]!.strip.columns[1].presetIndex == nil, "strip-wide menu action is ignored")
+        h.openMenu(TileID(2))
+        h.send(.pointer(.choose(.cycleWidthPreset)))
+        check(h.world.pointer?.token == nil && h.world.groups[1]!.strip.columns[1].presetIndex == nil, "strip-wide menu action is ignored")
     }
     section("configChanged and frame routing") {
         var h = Harness()
@@ -606,9 +646,9 @@ struct Harness {
         var h = Harness(animate: true)
         h.census(10, [window(1), window(2), window(3)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(300)))
-        h.send(.pointer(.endGesture))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(300)))
+        h.send(.pointer(lift))
         let landed = h.active
         check(landed != TileID(1), "swipe landed away from the focus target")
         h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .appActivation)))
@@ -737,17 +777,17 @@ struct Harness {
     section("Gesture basis: releases clamp and re-anchor the active column") {
         var free = Harness(gestureSnap: false)
         free.census(10, [window(1), window(2)])
-        free.send(.pointer(.beginGesture(TileID(1))))
-        free.send(.pointer(.delta(50_000)))
-        free.send(.pointer(.endGesture))
+        free.send(.pointer(began))
+        free.send(.pointer(swipe(50_000)))
+        free.send(.pointer(lift))
         let bounds = free.world.groups[1]!.strip.viewOffsetBounds(at: free.time)
         check(bounds.contains(free.offset), "free scroll stays inside view bounds")
         var snapped = Harness()
         snapped.census(10, [window(1), window(2), window(3), window(4)])
         snapped.send(.command(.focus(TileID(1)), .ipc))
-        snapped.send(.pointer(.beginGesture(TileID(1))))
-        snapped.send(.pointer(.delta(1_500)))
-        snapped.send(.pointer(.endGesture))
+        snapped.send(.pointer(began))
+        snapped.send(.pointer(swipe(1_500)))
+        snapped.send(.pointer(lift))
         check(snapped.world.groups[1]!.strip.activeColumnIndex == 3, "snapped swipe moves the active column")
         check(abs(snapped.offset - snapped.world.groups[1]!.strip.snapTarget(forColumn: 3, at: snapped.time)) < 0.001,
               "release rests on the landed column's snap point")
@@ -758,14 +798,14 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
+        h.send(.pointer(began))
         let start = h.offset
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(swipe(40)))
         h.send(.focus(FocusIntent(tile: TileID(3), pid: 3, source: .appActivation)))
         h.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus)))
         h.advance(EngineConfig.focusDebounce + margin)
         check(h.gesture != nil, "swipe survives external focus")
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(swipe(40)))
         check(abs(h.offset - start - 80) < 0.001, "later deltas still apply")
     }
     section("Space census: a same-Space read listing another Space's windows is not trusted") {
@@ -901,14 +941,14 @@ struct Harness {
         h.send(.command(.focus(TileID(4)), .ipc))
         h.census(10, [window(1, app: 10), window(2, app: 20)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         let offset = h.offset
         h.send(.focus(FocusIntent(tile: TileID(2), source: .axFocus)))
         h.advance(EngineConfig.focusDebounce + margin)
         check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "AX focus during a swipe is recorded")
         check(h.gesture != nil && h.offset == offset, "recorded focus does not scroll the swipe")
-        h.send(.pointer(.endGesture))
+        h.send(.pointer(lift))
         h.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation)))
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         check(h.active == TileID(3), "dock click during momentum still crosses Spaces")
@@ -916,16 +956,16 @@ struct Harness {
     section("Gesture basis: removing a window mid-swipe ends the gesture") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         h.send(.windowRemoved(TileID(3)))
         check(h.tiles.count == 2 && h.gesture == nil, "stale snap basis cannot survive a removed column")
     }
     section("Gesture basis: adding a window mid-swipe ends the gesture") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3), window(4)]))
         check(h.tiles.count == 4 && h.gesture == nil, "stale snap basis cannot survive an added column")
     }
@@ -1137,8 +1177,8 @@ struct Harness {
         h.census(20, [window(3), window(4)])
         h.census(10, [window(1), window(2)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
         check(h.censusRequest != nil && h.gesture != nil, "the deferral keeps the swipe")
         h.send(.windowAdded(window(8)))
@@ -1221,8 +1261,8 @@ struct Harness {
         h.census(10, [window(1), window(2)])
         h.send(.command(.focus(TileID(2)), .keyboard))
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
         check(h.gesture != nil, "the hold keeps the swipe")
         h.census(30, [window(1), window(3)])
@@ -1394,13 +1434,13 @@ struct FuzzStream {
         case 0: h.send(.command(.focus(tile), .ipc), group: id)
         case 1: h.send(.focus(FocusIntent(tile: tile, source: .axFocus)), group: id)
         case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keyboard), group: id)
-        case 3: h.send(.pointer(.beginGesture(tile)), group: id)
-        case 4: h.send(.pointer(.delta(Double(rng.next(400) - 200))), group: id)
-        case 5: h.send(.pointer(.endGesture), group: id)
-        case 6: h.send(.pointer(.openMenu(tile)), group: id)
+        case 3: h.send(.pointer(began), group: id)
+        case 4: h.send(.pointer(swipe(Double(rng.next(400) - 200))), group: id)
+        case 5: h.send(.pointer(lift), group: id)
+        case 6: h.openMenu(tile, group: id)
         case 7:
             let actions: [Command] = [.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile)]
-            h.send(.pointer(.menu(pick(actions)!)), group: id)
+            h.send(.pointer(.choose(pick(actions)!)), group: id)
         case 8:
             if tile.rawValue % 2 == 0, let hidden = group.windows[tile] { hiddenWindows.append(hidden) }
             h.send(tile.rawValue % 2 == 0 ? .windowsHidden([tile]) : .windowRemoved(tile), group: id)
@@ -1441,8 +1481,8 @@ struct FuzzStream {
         case 13: h.send(.windowRemoved(tile), group: id, scope: pick(priorScopes)!)
         case 14: h.send(.command(.toggleFloating(tile), .ipc), group: id)
         case 15: reconfigure()
-        case 16: h.send(.pointer(.beginReorder(tile)), group: id)
-        case 17: h.send(.pointer(.dropReorder(rng.next(10) - 3)), group: id)
+        case 16: h.beginReorder(tile, group: id)
+        case 17: h.drop(rng.next(10) - 3, group: id)
         case 18: h.send(.spaceWillChange, group: id)
         case 19:
             let all = h.world.groups.values.flatMap { $0.windows.values }.sorted { $0.id.rawValue < $1.id.rawValue }
@@ -1633,9 +1673,9 @@ struct FuzzStream {
         check(tiles(h, 2) == [2, 5] && tiles(h, 1) == [1], "the rightmost display's columns join the middle strip: \(tiles(h, 1)) | \(tiles(h, 2))")
         var scrolled = Harness(gestureSnap: false)
         scrolled.census(10, (1...5).map { window($0) })
-        scrolled.send(.pointer(.beginGesture(TileID(1))))
-        scrolled.send(.pointer(.delta(-170)))
-        scrolled.send(.pointer(.endGesture))
+        scrolled.send(.pointer(began))
+        scrolled.send(.pointer(swipe(-170)))
+        scrolled.send(.pointer(lift))
         let view = scrolled.offset
         scrolled.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)])))
         check(scrolled.offset == view, "plugging in another display leaves this strip's view: \(view) -> \(scrolled.offset)")
@@ -2501,8 +2541,8 @@ struct FuzzStream {
         check(!still.world.needsTicks, "without animation there is no bounce")
         var swiping = Harness(animate: true)
         swiping.census(10, [window(1), window(2)])
-        swiping.send(.pointer(.beginGesture(TileID(1))))
-        swiping.send(.pointer(.delta(20)))
+        swiping.send(.pointer(began))
+        swiping.send(.pointer(swipe(20)))
         swiping.send(.command(.focusLeft, .keyboard))
         let viewSwipes = if case .gesture = swiping.world.groups[1]!.strip.viewOffset { true } else { false }
         check(viewSwipes == (swiping.gesture != nil), "edge focus during a swipe never leaves a swipe without its view")

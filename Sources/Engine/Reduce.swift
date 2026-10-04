@@ -23,6 +23,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     }
     world.time = now
     world.expireMomentum(now)
+    let overlay = world.pointer?.overlay ?? .hidden
     var pass = Pass(now: now, scope: event.scope)
     let id = event.scope.group
     switch event.kind {
@@ -56,12 +57,16 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .tick: world.onTick(&pass)
     }
     world.flush(&pass)
+    let shown = world.pointer?.overlay ?? .hidden
+    if shown != overlay { pass.effects.append(.overlay(shown)) }
     return pass.effects
 }
 
 extension World {
     mutating func expireMomentum(_ now: Double) {
-        if case .momentum(_, let settled?) = pointer, now - settled >= EngineConfig.gestureQuiet { pointer = .idle }
+        guard case .momentum(let settled?, let tail) = pointer?.phase, now - settled >= EngineConfig.gestureQuiet,
+              tail.map({ now - $0 >= EngineConfig.gestureQuiet }) ?? true else { return }
+        pointer = nil
     }
 
     fileprivate mutating func nextRevision() -> UInt64 {
@@ -92,18 +97,22 @@ extension World {
         pass.effects.append(.invalidateFrame(tile: tile, revision: nextRevision()))
     }
 
+    /// Ending a session cancels its timer and leaves a swipe's view where it is; the overlay follows the session.
     mutating func cancelPointer(_ pass: inout Pass) {
-        switch pointer {
-        case .gesture(let session):
-            if var group = groups[session.scope.group] {
-                group.strip.viewOffset = .static(group.strip.viewOffset.current(at: pass.now))
-                groups[session.scope.group] = group
-                pass.layout.insert(session.scope.group)
-            }
-        case .menu, .reorder: pass.effects.append(.overlay(.hidden))
-        case .idle, .momentum: break
+        guard let session = pointer else { return }
+        pointer = nil
+        if let timer = session.timer { pass.effects.append(.cancel(timer.token)) }
+        let id = session.scope.group
+        if var group = groups[id], case .gesture = group.strip.viewOffset {
+            group.strip.viewOffset = .static(group.strip.viewOffset.current(at: pass.now))
+            groups[id] = group
+            pass.layout.insert(id)
         }
-        pointer = .idle
+    }
+
+    /// A change to the strip a session began on ends it: its snap targets and its overlay describe the old strip.
+    mutating func cancelPointer(in id: UInt32, _ pass: inout Pass) {
+        if pointer?.scope.group == id { cancelPointer(&pass) }
     }
 
     fileprivate mutating func onFocusObserved(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
@@ -234,7 +243,7 @@ extension World {
         guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
         let returning = group.returning(window)
         if returning == nil { cancelTimers(group: id, &pass, focusOnly: true) }
-        cancelGesture(in: id, &pass)
+        cancelPointer(in: id, &pass)
         group = groups[id]!
         if group.space?.isEmpty == true { group.phase = .settled(.fingerprint([window.id.rawValue])) }
         group.windows[window.id] = window
@@ -245,10 +254,6 @@ extension World {
         else { group.strip.insertTile(window.id, at: pass.now) }
         groups[id] = group
         pass.layout.insert(id)
-    }
-
-    private mutating func cancelGesture(in id: UInt32, _ pass: inout Pass) {
-        if case .gesture(let session) = pointer, session.scope.group == id { cancelPointer(&pass) }
     }
 
     private mutating func prune(_ ids: Set<UInt32>, from stashes: [GroupSpace: Snapshot], hiddenOnly: Bool = false) {
@@ -266,8 +271,7 @@ extension World {
         for group in groups.keys { groups[group]!.hidden[tile] = nil }
         guard groups[id]?.windows[tile] != nil else { return }
         cancelTimers(group: id, &pass, focusOnly: true)
-        if pointer.tile == tile { cancelPointer(&pass) }
-        cancelGesture(in: id, &pass)
+        cancelPointer(in: id, &pass)
         var group = groups[id]!
         group.strip.removeTile(tile, at: pass.now)
         group.windows.removeValue(forKey: tile)
@@ -300,7 +304,12 @@ extension World {
     }
 
     private mutating func execute(_ command: Command, source: FocusSource, group id: UInt32, _ pass: inout Pass) -> CommandOutcome {
-        guard var group = groups[id], !group.phase.isChanging else { return .refused("space change in progress") }
+        guard groups[id]?.phase.isChanging == false else { return .refused("space change in progress") }
+        switch command {
+        case .moveLeft, .moveRight, .toggleFloating: cancelPointer(in: id, &pass)
+        default: break
+        }
+        var group = groups[id]!
         func missing(_ tile: TileID) -> CommandOutcome {
             group.windows[tile] == nil ? .unknownWindow(tile) : .refused("floating window")
         }
@@ -341,10 +350,6 @@ extension World {
             recenter = index == group.strip.activeColumnIndex
         case .toggleFloating(let tile):
             guard group.windows[tile] != nil else { return .unknownWindow(tile) }
-            if pointer.tile == tile {
-                cancelPointer(&pass)
-                group = groups[id]!
-            }
             if group.floating.remove(tile) != nil {
                 group.strip.insertTile(tile, at: now)
             } else {
@@ -384,108 +389,222 @@ extension World {
 
     fileprivate mutating func onPointer(_ input: PointerInput, token: PointerToken?, group id: UInt32, _ pass: inout Pass) {
         switch input {
-        case .beginGesture(let tile), .openMenu(let tile), .beginReorder(let tile):
-            beginPointer(input, tile: tile, group: id, &pass)
-        case _ where pointer.token == nil || pointer.token != token || pointer.scope != pass.scope:
+        case .scroll(let scroll) where scroll.phase == .discrete: return wheel(scroll, group: id, &pass)
+        case .scroll(let scroll) where scroll.phase == .began:
+            cancelPointer(&pass)
+            if scroll.modifier { begin(.gestureTracking(nil), group: id, &pass) }
             return
-        case .delta(let delta):
-            guard delta.isFinite, case .gesture = pointer, var group = groups[id],
-                  case .gesture(var gesture) = group.strip.viewOffset else { return cancelPointer(&pass) }
-            let bounds = group.strip.viewOffsetBounds(at: pass.now)
-            let next = min(max(gesture.currentOffset + delta, bounds.lowerBound), bounds.upperBound)
-            gesture.tracker.push(delta: next - gesture.currentOffset, timestamp: pass.now)
-            gesture.currentOffset = next
-            group.strip.viewOffset = .gesture(gesture)
-            groups[id] = group
-            pass.layout.insert(id)
-        case .endGesture:
-            guard case .gesture(let session) = pointer, var group = groups[id],
-                  case .gesture(let gesture) = group.strip.viewOffset else { return cancelPointer(&pass) }
-            release(gesture, session: session, strip: &group.strip, at: pass.now)
-            groups[id] = group
-            pointer = .momentum(session.scope, settledAt: group.strip.viewOffset.isAnimating ? nil : pass.now)
-            pass.layout.insert(id)
-            pass.persist = true
-        case .menu(let action):
-            guard case .menu(let session) = pointer else { return cancelPointer(&pass) }
+        case .press(let tile, let origin):
             cancelPointer(&pass)
-            let targeted: Command
-            switch action {
-            case .setWidth(_, let width): targeted = .setWidth(session.tile, width)
-            case .toggleFloating: targeted = .toggleFloating(session.tile)
-            case .toggleFullWidth: targeted = .toggleFullWidth(session.tile)
-            case .close: targeted = .close(session.tile)
-            case .focus: targeted = .focus(session.tile)
-            case .focusLeft, .focusRight, .focusUp, .focusDown, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release,
-                 .clearPositions: return
-            }
-            _ = run(targeted, source: .click, group: id, &pass)
-        case .dropReorder(let requested):
-            guard case .reorder(let session) = pointer, var group = groups[id],
-                  let index = group.strip.columnIndex(of: session.tile) else { return cancelPointer(&pass) }
-            group.strip.moveColumn(from: index, to: max(0, min(group.strip.columns.count - 1, requested)), at: pass.now)
-            group.strip.recenter(animated: config.animate, at: pass.now)
-            groups[id] = group
-            cancelPointer(&pass)
-            pass.layout.insert(id)
-            pass.persist = true
-        case .cancel: cancelPointer(&pass)
+            return begin(.titleArmed(TitlePress(tile: tile, origin: origin)), group: id, &pass)
+        default: break
         }
-    }
-
-    private mutating func beginPointer(_ input: PointerInput, tile: TileID, group id: UInt32, _ pass: inout Pass) {
-        cancelPointer(&pass)
-        guard var group = groups[id], !group.phase.isChanging, group.strip.columnIndex(of: tile) != nil,
-              let scope = scope(for: id) else { return }
-        let token = PointerToken(nextRevision())
-        switch input {
-        case .beginGesture:
-            var settled = group.strip
-            for i in settled.columnData.indices { settled.columnData[i].widthAnimation = nil }
-            let activeX = settled.columnX(at: settled.activeColumnIndex, time: pass.now)
-            let targets = settled.columns.indices.map {
-                settled.columnX(at: $0, time: pass.now) - activeX + settled.snapTarget(forColumn: $0, at: pass.now)
-            }
-            let session = GestureSession(token: token, scope: scope, tile: tile,
-                                         startOffset: group.strip.viewOffset.current(at: pass.now), snapTargets: targets)
+        // An input from an ended session is dropped; it must not end the one that replaced it.
+        guard var session = pointer, session.token == token, session.scope == pass.scope else { return }
+        switch (session.phase, input) {
+        case (.gestureTracking(nil), .scroll(let scroll)) where scroll.phase == .changed && scroll.modifier:
+            guard scroll.dx != 0 || scroll.dy != 0 else { return }
+            guard scroll.isHorizontal, var group = groups[id], !group.strip.columns.isEmpty else { return cancelPointer(&pass) }
+            session.startOffset = group.strip.viewOffset.current(at: pass.now)
+            session.phase = .gestureTracking(Swipe(snapTargets: snapTargets(group.strip, at: pass.now)))
             group.strip.viewOffset = .gesture(GestureState(currentOffset: session.startOffset, isTouchpad: true))
             groups[id] = group
-            pointer = .gesture(session)
-        case .openMenu:
-            pointer = .menu(TargetSession(token: token, scope: scope, tile: tile))
-            pass.effects.append(.overlay(.menu(tile: tile, scope: scope, session: token)))
-        case .beginReorder:
-            pointer = .reorder(TargetSession(token: token, scope: scope, tile: tile))
-            pass.effects.append(.overlay(.reorder(tile: tile, scope: scope, session: token)))
-        case .delta, .endGesture, .menu, .dropReorder, .cancel:
-            break
+            pointer = session
+            track(scroll.dx, group: id, &pass)
+        case (.gestureTracking(.some), .scroll(let scroll)) where scroll.phase == .changed && scroll.modifier:
+            track(scroll.dx, group: id, &pass)
+        case (.gestureTracking(.some(let swipe)), .scroll(let scroll)) where [.changed, .ended, .cancelled].contains(scroll.phase):
+            guard var group = groups[id], case .gesture(let gesture) = group.strip.viewOffset else { return cancelPointer(&pass) }
+            release(gesture, swipe: swipe, from: session.startOffset, strip: &group.strip, at: pass.now)
+            groups[id] = group
+            session.phase = .momentum(settledAt: group.strip.viewOffset.isAnimating ? nil : pass.now, tail: nil)
+            pointer = session
+            pass.effects.append(.consumeInput)
+            pass.layout.insert(id)
+            pass.persist = true
+        case (.momentum(let settled, _), .scroll(let scroll)) where scroll.phase == .momentum || scroll.phase == .momentumEnded:
+            session.phase = .momentum(settledAt: settled, tail: scroll.phase == .momentum ? pass.now : nil)
+            pointer = session
+            pass.effects.append(.consumeInput)
+        case (.titleArmed(let press), .drag(let point)):
+            pass.effects.append(.consumeInput)
+            guard hypot(point.point.x - press.origin.point.x, point.point.y - press.origin.point.y) > EngineConfig.dragThreshold,
+                  let display = topology.displays.min(by: { $0.distance(to: point.point) < $1.distance(to: point.point) }) else { return }
+            setTimer(&session, nil, &pass)
+            session.phase = .titleDragging(press, display: display.id, released: false)
+            pointer = session
+        case (.titleArmed(let press), .release):
+            cancelPointer(&pass)
+            pass.effects.append(.consumeInput)
+            pass.effects.append(.replayPress(press.origin))
+        case (.titleDragging, .drag), (.reorderDragging(_, _, false), .drag), (.menuOpen, .drag):
+            pass.effects.append(.consumeInput)
+        case (.titleDragging(let press, let display, let released), .overlayReady):
+            session.phase = .reorderDragging(press, display: display, released: released)
+            pointer = session
+        case (.titleDragging(let press, let display, false), .release):
+            setTimer(&session, EngineConfig.dropDeadline, &pass)
+            session.phase = .titleDragging(press, display: display, released: true)
+            pointer = session
+            pass.effects.append(.consumeInput)
+        case (.reorderDragging(let press, let display, false), .release):
+            setTimer(&session, EngineConfig.dropDeadline, &pass)
+            session.phase = .reorderDragging(press, display: display, released: true)
+            pointer = session
+            pass.effects.append(.consumeInput)
+        case (.reorderDragging(let press, _, true), .drop(let gap)):
+            cancelPointer(&pass)
+            drop(press.tile, gap: gap, group: id, &pass)
+        case (.menuOpen(let press), .choose(let action)):
+            cancelPointer(&pass)
+            pass.effects.append(.consumeInput)
+            choose(action, tile: press.tile, group: id, &pass)
+        case (.menuOpen, .release), (_, .cancel):
+            cancelPointer(&pass)
+            pass.effects.append(.consumeInput)
+        default:
+            cancelPointer(&pass)
         }
     }
 
-    private func release(_ gesture: GestureState, session: GestureSession, strip: inout Strip, at now: Double) {
-        let current = gesture.currentOffset
+    /// A session starts only on a strip that is settled and holds its tile; a gesture waits for its first moving sample.
+    private mutating func begin(_ phase: PointerSession.Phase, group id: UInt32, _ pass: inout Pass) {
+        guard let group = groups[id], !group.phase.isChanging, !group.strip.columns.isEmpty, let scope = scope(for: id) else { return }
+        if case .titleArmed(let press) = phase, group.strip.columnIndex(of: press.tile) == nil { return }
+        var session = PointerSession(token: PointerToken(nextRevision()), scope: scope,
+                                     startOffset: group.strip.viewOffset.current(at: pass.now), phase: phase)
+        if case .titleArmed = phase {
+            setTimer(&session, EngineConfig.longPress, &pass)
+            pass.effects.append(.consumeInput)
+        }
+        pointer = session
+    }
+
+    private mutating func setTimer(_ session: inout PointerSession, _ delay: Double?, _ pass: inout Pass) {
+        if let timer = session.timer { pass.effects.append(.cancel(timer.token)) }
+        session.timer = delay.map { (TimerToken(nextRevision()), pass.now + $0) }
+        if let timer = session.timer {
+            pass.effects.append(.schedule(token: timer.token, deadline: timer.deadline, event: Event(scope: session.scope, kind: .timer(timer.token))))
+        }
+    }
+
+    /// A long press opens the menu; a released drag whose drop never came ends with the order unchanged.
+    private mutating func onSessionTimer(_ session: PointerSession, _ pass: inout Pass) {
+        guard session.scope == pass.scope, let timer = session.timer, pass.now >= timer.deadline else { return }
+        guard case .titleArmed(let press) = session.phase else {
+            pass.effects.append(.log("pointer: drop never came, reorder cancelled"))
+            return cancelPointer(&pass)
+        }
+        pointer = PointerSession(token: session.token, scope: session.scope, startOffset: session.startOffset, phase: .menuOpen(press))
+    }
+
+    /// Snap targets are taken with every width at its target, in the basis of the active column at the start.
+    private func snapTargets(_ strip: Strip, at now: Double) -> [Double] {
+        var settled = strip
+        for i in settled.columnData.indices { settled.columnData[i].widthAnimation = nil }
+        let activeX = settled.columnX(at: settled.activeColumnIndex, time: now)
+        return settled.columns.indices.map { settled.columnX(at: $0, time: now) - activeX + settled.snapTarget(forColumn: $0, at: now) }
+    }
+
+    private mutating func track(_ delta: Double, group id: UInt32, _ pass: inout Pass) {
+        guard delta.isFinite, var session = pointer, case .gestureTracking(var swipe?) = session.phase, var group = groups[id],
+              case .gesture(var gesture) = group.strip.viewOffset else { return cancelPointer(&pass) }
+        let bounds = group.strip.viewOffsetBounds(at: pass.now)
+        let wanted = gesture.currentOffset + delta
+        let next = min(max(wanted, bounds.lowerBound), bounds.upperBound)
+        swipe.edge = wanted > next ? 1 : wanted < next ? -1 : 0
+        gesture.tracker.push(delta: next - gesture.currentOffset, timestamp: pass.now)
+        gesture.currentOffset = next
+        group.strip.viewOffset = .gesture(gesture)
+        groups[id] = group
+        session.phase = .gestureTracking(swipe)
+        pointer = session
+        pass.effects.append(.consumeInput)
+        pass.layout.insert(id)
+    }
+
+    /// The release projects from the start offset, the tracker's origin. A swipe that pushed past the strip's end
+    /// stretches past it and springs back.
+    private func release(_ gesture: GestureState, swipe: Swipe, from start: Double, strip: inout Strip, at now: Double) {
+        var from = gesture.currentOffset
         let velocity = gesture.tracker.velocity(at: now)
-        let projected = abs(velocity) < EngineConfig.flickVelocity
-            ? current : session.startOffset + gesture.tracker.projectedEndPosition(isTouchpad: true)
-        var from = current
+        let projected = abs(velocity) < EngineConfig.flickVelocity ? from : start + gesture.tracker.projectedEndPosition(isTouchpad: true)
         var target: Double
-        if config.gestureSnap, session.snapTargets.count == strip.columns.count,
-           let column = session.snapTargets.indices.min(by: { abs(session.snapTargets[$0] - projected) < abs(session.snapTargets[$1] - projected) }) {
+        if config.gestureSnap, swipe.snapTargets.count == strip.columns.count,
+           let column = swipe.snapTargets.indices.min(by: { abs(swipe.snapTargets[$0] - projected) < abs(swipe.snapTargets[$1] - projected) }) {
             let shift = strip.columnX(at: strip.activeColumnIndex, time: now) - strip.columnX(at: column, time: now)
             strip.activeColumnIndex = column
             from += shift
-            target = session.snapTargets[column] + shift
+            target = swipe.snapTargets[column] + shift
         } else {
             let bounds = strip.viewOffsetBounds(at: now)
             target = min(max(projected, bounds.lowerBound), bounds.upperBound)
         }
-        strip.viewOffset = config.animate && abs(target - from) >= 1
-            ? .animation(SpringAnimation(from: from, to: target, initialVelocity: velocity, startTime: now, params: strip.scrollSpringParams))
-            : .static(target)
+        if config.animate, swipe.edge != 0 {
+            let bounce = SpringParams(dampingRatio: config.bounceDampingRatio, stiffness: 600, epsilon: 0.5)
+            strip.viewOffset = .animation(SpringAnimation(from: from, to: target, initialVelocity: config.bounceDistance * swipe.edge * 15,
+                                                          startTime: now, params: bounce))
+        } else {
+            strip.viewOffset = config.animate && abs(target - from) >= 1
+                ? .animation(SpringAnimation(from: from, to: target, initialVelocity: velocity, startTime: now, params: strip.scrollSpringParams))
+                : .static(target)
+        }
+    }
+
+    /// A wheel notch with the modifier moves the view by its delta, onto the target of a scroll still in flight.
+    private mutating func wheel(_ scroll: ScrollInput, group id: UInt32, _ pass: inout Pass) {
+        guard scroll.modifier, scroll.isHorizontal, scroll.dx.isFinite else { return }
+        cancelPointer(&pass)
+        guard var group = groups[id], !group.phase.isChanging, !group.strip.columns.isEmpty else { return }
+        let bounds = group.strip.viewOffsetBounds(at: pass.now)
+        let current = group.strip.viewOffset.current(at: pass.now)
+        let base = if case .animation(let animation) = group.strip.viewOffset { animation.to } else { current }
+        let target = min(max(base + scroll.dx, bounds.lowerBound), bounds.upperBound)
+        if !config.animate {
+            group.strip.viewOffset = .static(target)
+        } else if case .animation(let animation) = group.strip.viewOffset {
+            group.strip.viewOffset = .animation(animation.retargeted(to: target, at: pass.now))
+        } else {
+            group.strip.viewOffset = .animation(SpringAnimation(from: current, to: target, initialVelocity: 0, startTime: pass.now,
+                                                                params: group.strip.scrollSpringParams))
+        }
+        groups[id] = group
+        pass.effects.append(.consumeInput)
+        pass.layout.insert(id)
+    }
+
+    /// `gap` counts columns left of the drop; past either end clamps there. The dropped tile takes focus.
+    private mutating func drop(_ tile: TileID, gap: Int, group id: UInt32, _ pass: inout Pass) {
+        guard var group = groups[id], let source = group.strip.columnIndex(of: tile) else { return }
+        let count = group.strip.columns.count
+        let gap = min(max(gap, 0), count)
+        let destination = min(gap > source ? gap - 1 : gap, count - 1)
+        group.strip.moveColumn(from: source, to: destination, at: pass.now)
+        groups[id] = group
+        pass.effects.append(.log("pointer: drop tile=\(tile.rawValue) from=\(source) to=\(destination)"))
+        focus(FocusIntent(tile: tile, source: .click), group: id, &pass)
+        pass.layout.insert(id)
+        pass.persist = true
+    }
+
+    /// A pill acts on the tile the menu opened for, whatever tile the command names.
+    private mutating func choose(_ action: Command, tile: TileID, group id: UInt32, _ pass: inout Pass) {
+        let targeted: Command
+        switch action {
+        case .setWidth(_, let width): targeted = .setWidth(tile, width)
+        case .toggleFloating: targeted = .toggleFloating(tile)
+        case .toggleFullWidth: targeted = .toggleFullWidth(tile)
+        case .close: targeted = .close(tile)
+        case .focus: targeted = .focus(tile)
+        case .focusLeft, .focusRight, .focusUp, .focusDown, .moveLeft, .moveRight, .cycleWidthPreset, .recover, .release,
+             .clearPositions: return
+        }
+        let outcome = run(targeted, source: .click, group: id, &pass)
+        pass.effects.append(.log("pointer: menu \(targeted) tile=\(tile.rawValue) outcome=\(outcome)"))
     }
 
     fileprivate mutating func beginSpaceChange(group id: UInt32, _ pass: inout Pass) {
-        if pointer.scope?.group == id { cancelPointer(&pass) }
+        cancelPointer(in: id, &pass)
         cancelTimers(group: id, &pass)
         guard var group = groups[id] else { return }
         for tile in group.windows.keys.ordered() { invalidate(tile, &pass) }
@@ -668,6 +787,7 @@ extension World {
     }
 
     fileprivate mutating func onTimer(_ token: TimerToken, group id: UInt32, _ pass: inout Pass) {
+        if let session = pointer, session.timer?.token == token { return onSessionTimer(session, &pass) }
         guard let work = timers[token], work.scope == pass.scope, pass.now >= work.deadline else { return }
         timers.removeValue(forKey: token)
         switch work.action {
@@ -680,15 +800,15 @@ extension World {
     fileprivate mutating func onTick(_ pass: inout Pass) {
         for id in groups.keys.sorted() {
             guard var group = groups[id], !group.phase.isChanging else { continue }
-            let momentum = if case .momentum(let scope, nil) = pointer { scope.group == id } else { false }
+            let momentum = if case .momentum(nil, _) = pointer?.phase { pointer?.scope.group == id } else { false }
             guard group.isAnimating || momentum else { continue }
             _ = group.strip.settleWidthAnimations(at: pass.now)
             _ = group.strip.settleRaiseAnimations(at: pass.now)
             if case .animation(let animation) = group.strip.viewOffset, animation.isDone(at: pass.now) {
                 group.strip.viewOffset = .static(animation.to)
             }
-            if momentum, case .momentum(let scope, nil) = pointer, !group.strip.viewOffset.isAnimating {
-                pointer = .momentum(scope, settledAt: pass.now)
+            if momentum, case .momentum(_, let tail) = pointer?.phase, !group.strip.viewOffset.isAnimating {
+                pointer?.phase = .momentum(settledAt: pass.now, tail: tail)
             }
             groups[id] = group
             pass.layout.insert(id)
@@ -802,6 +922,7 @@ extension World {
     }
 
     fileprivate mutating func onConfig(_ next: EngineConfig, _ pass: inout Pass) {
+        cancelPointer(&pass)
         config = next
         for id in groups.keys.sorted() {
             next.configure(&groups[id]!.strip)

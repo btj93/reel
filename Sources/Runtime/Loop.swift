@@ -142,7 +142,7 @@ public final class Loop {
             case .raise(let tile): if !paused, let pid = pid(of: tile) { executor.raise(tile, pid: pid) }
             case .close(let tile): if let pid = pid(of: tile) { executor.close(tile, pid: pid) }
             case .reply(let id, let payload): replies[id] = payload
-            case .overlay: break
+            case .overlay, .consumeInput, .replayPress: break
             case .persist(let book): store.save(book.persisted)
             case .requestCensus(let group, let after):
                 guard let owner = world.scope(for: group) else { continue }
