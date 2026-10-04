@@ -58,6 +58,7 @@ public final class Loop {
     public private(set) var store: SnapshotStore!
     private(set) var spaces: SpaceObserver!
     private(set) var displays: DisplayObserver!
+    private(set) var pointer: PointerObserver!
     private let frameLoop = FrameLoop()
     private let indicator = FocusIndicator()
     private let hotkeys = HotkeyManager()
@@ -80,6 +81,8 @@ public final class Loop {
         spaces = SpaceObserver(clock: TimeUtil.now, changed: { [unowned self] in spaceChanged(after: $0) }, log: logLine)
         displays = DisplayObserver(current: { [unowned self] in world.topology }, changed: { [unowned self] in topologyChanged($0) },
                                    log: logLine)
+        pointer = PointerObserver(world: { [unowned self] in world }, paused: { [unowned self] in paused },
+                                  send: { [unowned self] in send(.pointer($0, session: $1)) }, log: logLine)
         frameLoop.onTick = { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
         hotkeys.onAction = { [weak self] action in MainActor.assumeIsolated { self?.hotkey(action) } }
     }
@@ -93,6 +96,7 @@ public final class Loop {
         reloadConfig()
         frameLoop.start()
         displays.start()
+        pointer.start(log: logLine)
         observer.start(timeout: 1.5) { [weak self] in
             guard let self else { return }
             world.groups.keys.sorted().forEach(census(group:))
@@ -104,10 +108,11 @@ public final class Loop {
 
     /// Reduce `kind` in `group`, else the group the engine routes it to, under the scope that group had in `stamp`,
     /// when it was observed, or else its current scope.
-    public func send(_ kind: Event.Kind, group: UInt32? = nil, stamp: Stamp? = nil) {
+    @discardableResult
+    public func send(_ kind: Event.Kind, group: UInt32? = nil, stamp: Stamp? = nil) -> [Effect] {
         guard !quitting, let id = group ?? world.route(kind),
-              let scope = stamp.map({ world.scope(for: id, stamp: $0) }) ?? world.scope(for: id) else { return }
-        reduceAndRun(Event(scope: scope, kind: kind))
+              let scope = stamp.map({ world.scope(for: id, stamp: $0) }) ?? world.scope(for: id) else { return [] }
+        return reduceAndRun(Event(scope: scope, kind: kind))
     }
 
     /// A global event goes out even with no display, so a topology or config change is never lost.
@@ -117,12 +122,15 @@ public final class Loop {
         reduceAndRun(Event(scope: scope, kind: kind))
     }
 
-    private func reduceAndRun(_ event: Event) {
+    @discardableResult
+    private func reduceAndRun(_ event: Event) -> [Effect] {
         let effects = reduce(&world, event, now: max(TimeUtil.now(), world.time))
         observer.clock.current = world.stamp
         run(effects)
+        pointer.sync(world.pointer)
         if world.needsTicks || indicator.isAnimating { frameLoop.resume() }
         updateIndicator()
+        return effects
     }
 
     private func run(_ job: Scheduler.Job) {
@@ -142,7 +150,8 @@ public final class Loop {
             case .raise(let tile): if !paused, let pid = pid(of: tile) { executor.raise(tile, pid: pid) }
             case .close(let tile): if let pid = pid(of: tile) { executor.close(tile, pid: pid) }
             case .reply(let id, let payload): replies[id] = payload
-            case .overlay, .consumeInput, .replayPress: break
+            case .overlay(let overlay): pointer.show(overlay)
+            case .consumeInput, .replayPress: break
             case .persist(let book): store.save(book.persisted)
             case .requestCensus(let group, let after):
                 guard let owner = world.scope(for: group) else { continue }
@@ -257,6 +266,7 @@ public final class Loop {
     /// Pausing hands every window back as quitting does, so none waits out the pause as an off-screen sliver.
     public func setPaused(_ value: Bool) {
         guard value != paused else { return }
+        if value, let session = world.pointer { send(.pointer(.cancel, session: session.token)) }
         if value { everyGroup(.release) }
         paused = value
         logLine("loop: paused=\(value)")
@@ -323,6 +333,12 @@ public final class Loop {
         focus.cornerRadius = next.indicator.cornerRadius
         focus.raiseHeight = next.indicator.raiseHeight
         indicator.reloadConfig(focus)
+        pointer.modifier = switch next.gestureModifier {
+        case .fn: .maskSecondaryFn
+        case .ctrl: .maskControl
+        case .alt: .maskAlternate
+        case .cmd: .maskCommand
+        }
         indicatorTile = nil
         let bindings = Dictionary(uniqueKeysWithValues: next.keys.filter { !$0.value.isEmpty }.map { ($0.key.rawValue, $0.value) })
         hotkeys.registerFromConfig(bindings)
@@ -338,6 +354,7 @@ public final class Loop {
         setPaused(true)
         quitting = true
         hotkeys.stop()
+        pointer.stop()
         spaces.stop()
         displays.stop()
         store.flush()

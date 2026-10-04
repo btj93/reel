@@ -2,6 +2,37 @@ import CoreGraphics
 import Core
 import Foundation
 
+/// One scroll event as the tap saw it: the CGEvent scroll and momentum phases, the point deltas, the modifier flags and
+/// the cursor in CG coordinates.
+public struct ScrollEvent: Sendable {
+    public let phase: Int64
+    public let momentumPhase: Int64
+    public let continuous: Bool
+    public let dx: Double
+    public let dy: Double
+    public let flags: CGEventFlags
+    public let location: CGPoint
+
+    public init(phase: Int64, momentumPhase: Int64, continuous: Bool, dx: Double, dy: Double, flags: CGEventFlags, location: CGPoint) {
+        self.phase = phase
+        self.momentumPhase = momentumPhase
+        self.continuous = continuous
+        self.dx = dx
+        self.dy = dy
+        self.flags = flags
+        self.location = location
+    }
+
+    init(_ event: CGEvent) {
+        self.init(phase: event.getIntegerValueField(.scrollWheelEventScrollPhase),
+                  momentumPhase: event.getIntegerValueField(.scrollWheelEventMomentumPhase),
+                  continuous: event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0,
+                  dx: event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2),
+                  dy: event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1),
+                  flags: event.flags, location: event.location)
+    }
+}
+
 /// Captures trackpad scroll gestures via CGEventTap for strip scrolling.
 /// Separate from HotkeyManager (which handles keyboard events).
 ///
@@ -17,6 +48,9 @@ public final class GestureCapture: @unchecked Sendable {
 
     /// Called for discrete mouse scroll events (deltaX in points, timestamp).
     public var onDiscreteScroll: ((Double, Double) -> Void)?
+
+    /// When set, every scroll event goes here instead of the gesture logic below; returning true swallows it.
+    public var onScroll: ((ScrollEvent) -> Bool)?
 
     /// Gesture mode: locked at gesture begin based on finger count.
     enum GestureMode {
@@ -113,6 +147,7 @@ public final class GestureCapture: @unchecked Sendable {
     // MARK: - Event Handling
 
     fileprivate func handleScrollEvent(_ event: CGEvent) -> Bool {
+        if let onScroll { return onScroll(ScrollEvent(event)) }
         let flags = event.flags
         let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
         let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)

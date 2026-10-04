@@ -14,14 +14,14 @@ public struct FrameRequest: Equatable, Sendable {
     public let scope: EventScope
 }
 
-public struct MenuOverlay: Equatable, Sendable {
+public struct MenuRequest: Equatable, Sendable {
     public let session: PointerToken
     public let scope: EventScope
     public let press: TitlePress
 }
 
 /// `display` is the display under the cursor when the drag began. Once `released`, the runtime answers with the drop.
-public struct ReorderOverlay: Equatable, Sendable {
+public struct ReorderRequest: Equatable, Sendable {
     public let session: PointerToken
     public let scope: EventScope
     public let tile: TileID
@@ -31,8 +31,8 @@ public struct ReorderOverlay: Equatable, Sendable {
 
 public enum Overlay: Equatable, Sendable {
     case hidden
-    case menu(MenuOverlay)
-    case reorder(ReorderOverlay)
+    case menu(MenuRequest)
+    case reorder(ReorderRequest)
 }
 
 public enum CommandOutcome: Equatable, Sendable {

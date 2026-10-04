@@ -340,6 +340,11 @@ extension World {
             guard let index = group.strip.columnIndex(of: tile) else { return missing(tile) }
             group.strip.setWidth(.fixed(width), column: index, at: now, params: config.animate ? group.strip.scrollSpringParams : nil)
             recenter = index == group.strip.activeColumnIndex
+        case .setWidthPreset(let tile, let preset):
+            guard group.strip.widthPresets.indices.contains(preset) else { return .refused("no such preset") }
+            guard let index = group.strip.columnIndex(of: tile) else { return missing(tile) }
+            group.strip.setWidthPreset(index: preset, at: now, params: config.animate ? group.strip.scrollSpringParams : nil, column: index)
+            recenter = index == group.strip.activeColumnIndex
         case .cycleWidthPreset:
             guard !group.strip.columns.isEmpty else { return .refused("empty strip") }
             group.strip.cycleWidthPreset(at: now, params: config.animate ? group.strip.scrollSpringParams : nil)
@@ -592,6 +597,7 @@ extension World {
         let targeted: Command
         switch action {
         case .setWidth(_, let width): targeted = .setWidth(tile, width)
+        case .setWidthPreset(_, let preset): targeted = .setWidthPreset(tile, preset)
         case .toggleFloating: targeted = .toggleFloating(tile)
         case .toggleFullWidth: targeted = .toggleFullWidth(tile)
         case .close: targeted = .close(tile)

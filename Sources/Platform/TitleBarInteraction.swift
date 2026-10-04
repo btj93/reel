@@ -2,6 +2,21 @@ import AppKit
 import CoreGraphics
 import Core
 
+/// One left-button event or an Escape press, in CG coordinates. `modifier` says the required modifier was held.
+public enum MouseEvent: Sendable {
+    case down(CGPoint, modifier: Bool)
+    case dragged(CGPoint)
+    case up(CGPoint)
+    case escape
+}
+
+/// What the tap does with a `MouseEvent`: deliver it, swallow it, or deliver a press at the point before this release.
+public enum MouseVerdict: Equatable, Sendable {
+    case pass
+    case swallow
+    case replay(CGPoint)
+}
+
 @MainActor
 public final class TitleBarInteraction {
     static let reelSentinel: Int64 = 0x5245454C
@@ -42,6 +57,10 @@ public final class TitleBarInteraction {
     /// when the clicked window is already its app's focused window, so the
     /// strip would otherwise not know to slide the column into view.
     public var onWindowFrameClick: ((TileID) -> Void)?
+
+    /// When set, every left-button event and every Escape press while the Escape tap runs go here instead of the state
+    /// machine below.
+    public var onMouse: ((MouseEvent) -> MouseVerdict)?
 
     // Event taps
     var eventTap: CFMachPort?
@@ -136,6 +155,20 @@ public final class TitleBarInteraction {
         }
 
         let location = event.location
+
+        if let onMouse {
+            let verdict: MouseVerdict = switch type {
+            case .leftMouseDown: onMouse(.down(location, modifier: event.flags.contains(requiredModifier)))
+            case .leftMouseDragged: onMouse(.dragged(location))
+            case .leftMouseUp: onMouse(.up(location))
+            default: .pass
+            }
+            switch verdict {
+            case .pass: return event
+            case .swallow: return nil
+            case .replay(let point): return replay(event, pressAt: point)
+            }
+        }
 
         switch type {
         case .leftMouseDown:
@@ -250,22 +283,7 @@ public final class TitleBarInteraction {
         case .armed(_, _, let startPoint, let timer):
             timer.cancel()
             state = .idle
-            // Return the synthetic mouseDown from the callback (delivered first)
-            // and post the real mouseUp for later delivery (delivered second).
-            // The previous approach returned the mouseUp and posted the mouseDown
-            // async, which caused the window to receive mouseUp before mouseDown —
-            // breaking button tracking (buttons stuck in pressed state).
-            guard let syntheticDown = CGEvent(
-                mouseEventSource: nil,
-                mouseType: .leftMouseDown,
-                mouseCursorPosition: startPoint,
-                mouseButton: .left
-            ) else {
-                return event
-            }
-            syntheticDown.setIntegerValueField(.eventSourceUserData, value: Self.reelSentinel)
-            event.post(tap: .cghidEventTap)
-            return syntheticDown
+            return replay(event, pressAt: startPoint)
 
         case .dragging(let columnIndex, _):
             teardownEscapeTap()
@@ -295,6 +313,23 @@ public final class TitleBarInteraction {
         case .idle:
             return event
         }
+    }
+
+    /// Return the synthetic mouseDown from the callback (delivered first) and post the real mouseUp for later delivery
+    /// (delivered second). Returning the mouseUp and posting the mouseDown async delivered mouseUp before mouseDown,
+    /// which broke button tracking (buttons stuck in pressed state).
+    private func replay(_ up: CGEvent, pressAt point: CGPoint) -> CGEvent {
+        guard let syntheticDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point,
+                                          mouseButton: .left) else { return up }
+        syntheticDown.setIntegerValueField(.eventSourceUserData, value: Self.reelSentinel)
+        up.post(tap: .cghidEventTap)
+        return syntheticDown
+    }
+
+    /// Run the Escape tap only while a press, drag or menu is live, so keystrokes pay nothing otherwise.
+    public func setEscapeTap(_ enabled: Bool) {
+        if enabled, escapeEventTap == nil { setupEscapeTap() }
+        if !enabled, escapeEventTap != nil { teardownEscapeTap() }
     }
 
     func handleEscapeKey() {
@@ -349,23 +384,20 @@ public final class TitleBarInteraction {
         cgPoint: CGPoint,
         frames: [TileID: CGRect]
     ) -> (columnIndex: Int, tileID: TileID)? {
-
-        for (tileID, frame) in frames {
-            // Reserve a small inset at each end for macOS's native corner-resize.
-            let inset = min(titleBarCornerInsetPx, frame.width / 2)
-            let titleBarRect = CGRect(
-                x: frame.origin.x + inset,
-                y: frame.origin.y,
-                width: max(0, frame.width - inset * 2),
-                height: titleBarHeight
-            )
-            if titleBarRect.contains(cgPoint) {
-                if let colIdx = onNeedsTileColumnIndex?(tileID) {
-                    return (colIdx, tileID)
-                }
+        let hits = frames.filter { Self.titleBarContains(cgPoint, frame: $0.value, height: titleBarHeight, cornerInset: titleBarCornerInsetPx) }
+        for tileID in hits.keys {
+            if let colIdx = onNeedsTileColumnIndex?(tileID) {
+                return (colIdx, tileID)
             }
         }
         return nil
+    }
+
+    /// The title bar is the top `height` of `frame`, less `cornerInset` at each end, where macOS's native corner
+    /// resize must keep working.
+    public nonisolated static func titleBarContains(_ point: CGPoint, frame: CGRect, height: Double, cornerInset: Double) -> Bool {
+        let inset = min(cornerInset, frame.width / 2)
+        return CGRect(x: frame.minX + inset, y: frame.minY, width: max(0, frame.width - inset * 2), height: height).contains(point)
     }
 
     public func cancelIfActive() {
@@ -445,7 +477,10 @@ private func escapeCallback(
         }
         let handler = Unmanaged<TitleBarInteraction>.fromOpaque(userInfo).takeUnretainedValue()
         if input.event.getIntegerValueField(.keyboardEventKeycode) == 0x35 {
-            handler.handleEscapeKey()
+            if let onMouse = handler.onMouse, onMouse(.escape) == .pass {
+                return EventCallbackOutput(event: .passUnretained(input.event))
+            }
+            if handler.onMouse == nil { handler.handleEscapeKey() }
             return EventCallbackOutput(event: nil)
         }
         return EventCallbackOutput(event: .passUnretained(input.event))

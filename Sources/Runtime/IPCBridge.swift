@@ -11,7 +11,7 @@ import Platform
 public final class IPCBridge {
     private let loop: Loop
     private let server = SocketServer()
-    public static let version = "next-r5"
+    public static let version = "next-r6"
 
     public init(loop: Loop) {
         self.loop = loop

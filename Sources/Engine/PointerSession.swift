@@ -65,9 +65,9 @@ public struct PointerSession: Sendable {
     /// What the runtime shows for this session.
     public var overlay: Overlay {
         switch phase {
-        case .menuOpen(let press): .menu(MenuOverlay(session: token, scope: scope, press: press))
+        case .menuOpen(let press): .menu(MenuRequest(session: token, scope: scope, press: press))
         case .titleDragging(let press, let display, let released), .reorderDragging(let press, let display, let released):
-            .reorder(ReorderOverlay(session: token, scope: scope, tile: press.tile, display: display, released: released))
+            .reorder(ReorderRequest(session: token, scope: scope, tile: press.tile, display: display, released: released))
         default: .hidden
         }
     }

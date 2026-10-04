@@ -27,6 +27,8 @@ public class OverlayWindow {
     }
     public var accentColor: NSColor = .systemBlue
 
+    public init() {}
+
     public func ensurePanel(for screen: NSScreen) {
         let targetFrame = NSRect(origin: .zero, size: screen.frame.size)
         if panel == nil {

@@ -47,6 +47,7 @@ public enum Command: Sendable {
     case focus(TileID)
     case moveLeft, moveRight
     case setWidth(TileID, Double)
+    case setWidthPreset(TileID, Int)
     case cycleWidthPreset
     case toggleFullWidth(TileID)
     case toggleFloating(TileID)
@@ -60,7 +61,7 @@ public enum Command: Sendable {
 
     var tile: TileID? {
         switch self {
-        case .focus(let tile), .setWidth(let tile, _), .toggleFullWidth(let tile), .toggleFloating(let tile), .close(let tile): tile
+        case .focus(let tile), .setWidth(let tile, _), .setWidthPreset(let tile, _), .toggleFullWidth(let tile), .toggleFloating(let tile), .close(let tile): tile
         default: nil
         }
     }
