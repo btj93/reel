@@ -2251,6 +2251,10 @@ struct FuzzStream {
         var rules = Harness(rules: [Rule(bundleIDRegex: "^test[.]", titleRegex: "window-2$", floating: true)])
         rules.census(10, [window(1), window(2)])
         check(rules.world.groups[1]!.floating == [TileID(2)], "regex selects only its matching add-time title")
+        rules.send(.windowAdded(ObservedWindow(id: TileID(4), pid: 4, bundleID: nil, title: "window-2")))
+        rules.send(.windowAdded(ObservedWindow(id: TileID(5), pid: 5, bundleID: "other.app", title: "window-2")))
+        check(!rules.world.groups[1]!.floating.contains(TileID(4)) && !rules.world.groups[1]!.floating.contains(TileID(5)),
+              "matching titles with nil or wrong bundles stay tiled")
         rules.send(.windowAdded(window(3)))
         check(!rules.world.groups[1]!.floating.contains(TileID(3)), "nonmatching add stays tiled")
         let changed = ObservedWindow(id: TileID(2), pid: 2, bundleID: "test.app", title: "now not a match")
@@ -2268,6 +2272,52 @@ struct FuzzStream {
               "a new window matched to disk placement evaluates its own adoption title")
         do { _ = try AppConfig.parse("[[rules]]\ntitle_regex = \"[\"\nfloating = true"); check(false, "invalid regex rejected") }
         catch { check(String(describing: error).contains("title_regex"), "invalid regex names its key") }
+    }
+    section("R7: startup struts preserve disk order and widths before discovery") {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let paths = Paths(environment: ["REEL_CONFIG_DIR": dir + "/config", "REEL_STATE_DIR": dir + "/state"])
+        let loop = Loop(paths: paths)
+        guard let group = loop.world.topology.groups.first else { return check(false, "startup topology has a display") }
+        let saved = Snapshot(group: group.id, space: .skylight(42), columns: [
+            SnapshotColumn(windows: [window(2)], width: .fixed(333)),
+            SnapshotColumn(windows: [window(1)], width: .fixed(444)),
+        ])
+        loop.store.save([saved]); loop.store.flush()
+        check(loop.store.load().flatMap { $0.columns.flatMap(\.windows).map(\.id) } == [TileID(2), TileID(1)], "startup test seeds disk before configuration")
+        loop.send(.loadSnapshots(loop.store.load()), group: group.id)
+        do {
+            try FileManager.default.createDirectory(atPath: paths.configDir, withIntermediateDirectories: true)
+            let keys = KeyAction.allCases.map { "\($0.rawValue) = \"\"" }.joined(separator: "\n")
+            try ("[layout.struts]\ntop = 17\n[animation]\nenabled = false\n[indicator]\nstyle = \"none\"\n[keys]\n" + keys)
+                .write(toFile: paths.configFile, atomically: true, encoding: .utf8)
+        } catch { return check(false, "isolated startup config: \(error)") }
+        check(loop.reloadConfig() == nil, "startup struts parse")
+        check(loop.world.groups.values.allSatisfy { $0.space == nil } && loop.world.spaces.live.isEmpty,
+              "startup configuration does not commit a premature empty census")
+        loop.send(.spaceChanged(key: .skylight(42), epoch: 1, windows: [window(1), window(2)]), group: group.id)
+        let restored = loop.world.groups[group.id]!.strip.columns
+        check(restored.flatMap(\.tiles) == [TileID(2), TileID(1)] && restored.map(\.width) == [.fixed(333), .fixed(444)],
+              "first discovery restores saved order [2,1] and widths with startup struts")
+    }
+    section("R7: first matching rule wins when rules overlap") {
+        var rules = Harness(rules: [Rule(bundleID: "test.app", floating: true), Rule(bundleIDRegex: "^test[.]", floating: false)])
+        rules.census(10, [window(1)])
+        check(rules.world.groups[1]!.floating.contains(TileID(1)), "first exact rule wins over a later regex")
+        var inverse = Harness(rules: [Rule(bundleIDRegex: "^test[.]", floating: false), Rule(bundleID: "test.app", floating: true)])
+        inverse.census(10, [window(1, floating: true)])
+        check(!inverse.world.groups[1]!.floating.contains(TileID(1)), "first regex rule can force a matching window tiled")
+    }
+    section("R7: gesture modifier aliases retain trunk spellings") {
+        for (name, modifier) in [("control", GestureModifier.ctrl), ("opt", .alt), ("option", .alt), ("command", .cmd),
+                                 ("fn", .fn), ("ctrl", .ctrl), ("alt", .alt), ("cmd", .cmd)] {
+            let parsed = try? AppConfig.parse("[gesture]\nmodifier = \"\(name)\"")
+            check(parsed?.gestureModifier == modifier, "gesture modifier accepts \(name)")
+        }
+        for name in ["none", ""] {
+            do { _ = try AppConfig.parse("[gesture]\nmodifier = \"\(name)\""); check(false, "unmodified scroll remains rejected") }
+            catch { check(String(describing: error).contains("gesture.modifier"), "unmodified scroll error names its key") }
+        }
     }
     section("R7: bundled logs rotate at one MB with one backup") {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -2310,6 +2360,8 @@ struct FuzzStream {
         let snapshot = Snapshot(group: 1, space: .skylight(42), columns: [])
         store.save([snapshot])
         check(store.list().count == 1, "pending snapshot is listed before disk flush")
+        store.flush()
+        check(SnapshotStore(directory: dir, log: { _ in }).load().count == 1, "clear test starts with a nonempty disk book")
         store.clear()
         check(store.list().isEmpty && SnapshotStore(directory: dir, log: { _ in }).load().isEmpty, "clear persists empty book")
     }

@@ -47,7 +47,7 @@ public final class Loop {
     public private(set) var config = AppConfig()
     public private(set) var configError: String?
     public private(set) var paused = false
-    public let paths = Paths()
+    public let paths: Paths
     public let allowedPids = managedPidAllowlist()
     public var onChange: (() -> Void)?
 
@@ -66,7 +66,8 @@ public final class Loop {
     private var indicatorTile: TileID?
     private var quitting = false
 
-    public init() {
+    public init(paths: Paths = Paths()) {
+        self.paths = paths
         world = World(topology: DisplayObserver.read(revision: 1))
         executor = Executor(worker: { [unowned self] in observer.workers[$0] }, log: logLine)
         observer = Observer(executor: executor, allowedPids: allowedPids,
