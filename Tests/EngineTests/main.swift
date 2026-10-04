@@ -66,7 +66,6 @@ struct Harness {
     var effects: [Effect] = []
     var reduceTime: Duration = .zero
     var reduceCPU: Duration = .zero
-    var reduces = 0
     /// Restores that asked the OS for focus from a group other than the one commands acted on.
     var stolenFocus = 0
     /// Events after which a group's `focusedAt` moved back.
@@ -102,7 +101,6 @@ struct Harness {
         let leader = world.activeGroup
         let focusedAt = world.groups.mapValues(\.focusedAt)
         effects = reduce(&world, event, now: time)
-        reduces += 1
         for case .overlay(let shown) in effects { overlay = shown }
         if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
         if event.scope.group != leader, effects.contains(where: { if case .focus(_, .restore) = $0 { true } else { false } }) { stolenFocus += 1 }
@@ -4019,7 +4017,7 @@ struct FuzzStream {
     var cpu: [Duration] = []
     for _ in 0..<5 {
         var stream = FuzzStream(seed: 0)
-        while stream.h.reduces < 10_000 { stream.step() }
+        for _ in 0..<10_000 { stream.step() }
         check(stream.h.world.check().isEmpty, "benchmark invariants")
         wall.append(stream.h.reduceTime)
         cpu.append(stream.h.reduceCPU)
