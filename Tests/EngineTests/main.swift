@@ -2237,8 +2237,8 @@ struct FuzzStream {
         check(Topology(revision: 1, displays: [], separateSpaces: false, primaryScreenHeight: 900).groups.isEmpty, "empty display census has no groups")
     }
     section("R7: packaged defaults, struts and add-time regex rules") {
-        check(!AppConfig.defaultSource.isEmpty, "the shipped default config resource exists")
-        guard let config = try? AppConfig.parse(AppConfig.defaultSource) else { return check(false, "bundled defaults parse") }
+        check(!defaultConfigSource().isEmpty, "the shipped default config resource exists")
+        guard let config = try? AppConfig.parse(defaultConfigSource()) else { return check(false, "bundled defaults parse") }
         check(config.engine.gap == EngineConfig().gap && config.engine.widthPresets == EngineConfig().widthPresets
               && config.engine.bounceDistance == EngineConfig().bounceDistance && config.keys == AppConfig().keys, "bundled defaults match code defaults")
         var insets = WorkingInsets()

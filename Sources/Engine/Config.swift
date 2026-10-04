@@ -59,15 +59,6 @@ public struct AppConfig: Sendable {
 
     public init() {}
 
-    public static var defaultSource: String {
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("Reel_Engine.bundle/config.default.toml")
-        let url = bundled.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
-            ?? Bundle(path: Bundle.main.bundlePath + "/Reel_Engine.bundle")?.url(forResource: "config.default", withExtension: "toml")
-            ?? Bundle(path: Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Reel_Engine.bundle").path)?.url(forResource: "config.default", withExtension: "toml")
-            ?? Bundle(for: ConfigBundle.self).url(forResource: "config.default", withExtension: "toml", subdirectory: "Reel_Engine.bundle")
-        return url.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
-    }
-
     public static func parse(_ source: String) throws(ConfigError) -> AppConfig {
         do { return try read(TOMLTable(string: source)) } catch let error as ConfigError { throw error } catch {
             throw ConfigError(description: "syntax: \((error as? TOMLParseError)?.description ?? "\(error)")")
@@ -214,5 +205,3 @@ private func regex(_ value: TOMLValueConvertible, _ key: String) throws -> Strin
     }
     return pattern
 }
-
-private final class ConfigBundle {}

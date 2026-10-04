@@ -293,7 +293,7 @@ public final class Loop {
         do {
             if !FileManager.default.fileExists(atPath: path) {
                 try FileManager.default.createDirectory(atPath: paths.configDir, withIntermediateDirectories: true)
-                try AppConfig.defaultSource.write(toFile: path, atomically: true, encoding: .utf8)
+                try defaultConfigSource().write(toFile: path, atomically: true, encoding: .utf8)
             }
             let text = try String(contentsOfFile: path, encoding: .utf8)
             let next = try AppConfig.parse(text)
