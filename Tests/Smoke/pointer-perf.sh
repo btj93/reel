@@ -11,9 +11,10 @@
 #   PERF_BINS="a b"                      binaries to compare, trunk first (default: .build/debug/Reel .build/debug/ReelNext)
 #   SMOKE_DRY_RUN=1                      walk the steps and summarize a fixture trace; launch and post nothing
 #
-# Each run attaches `xctrace record --template 'Time Profiler'` to the binary, posts the swipe from pointer-lib.sh,
-# exports the time-profile table and sums the main thread's sample weights per 16.67 ms frame. Pass when head p95 is at
-# most trunk p95 times 1.1 and at most 8 ms.
+# Both binaries run the default config's [gesture] settings, and every run starts on column 2 of 6, so the swipe has
+# columns on both sides. Each run attaches `xctrace record --template 'Time Profiler'` to the binary, posts the swipe
+# from pointer-lib.sh, exports the time-profile table and sums the main thread's sample weights per 16.67 ms frame.
+# Pass when head p95 is at most trunk p95 times 1.1 and at most 8 ms.
 
 set -uo pipefail
 
@@ -50,6 +51,7 @@ trap cleanup EXIT INT TERM
 launch_reel() {  # <binary>
     BIN_REEL=$1
     write_test_config "$CFG" 16
+    gesture_config "$CFG" "$1"
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
     REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" \
         "$1" >> "$REEL_LOG" 2>&1 &
@@ -116,7 +118,7 @@ run_once() {  # <binary> <run>
     name=$(basename "$bin")
     trace="$NS/$name-$run.trace"
     launch_reel "$bin"
-    waitForSettle 10
+    focus_column 2
     x=$(reel_msg get-layout | jq "$AG | .currentColumns[.activeColumnIndex].frame | (.x + .w / 2 | floor)")
     y=$(reel_msg get-layout | jq "$AG | .currentColumns[.activeColumnIndex].frame | (.y + .h / 2 | floor)")
     if [ "$DRY" = 1 ]; then

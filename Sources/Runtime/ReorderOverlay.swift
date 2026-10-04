@@ -214,6 +214,7 @@ public final class ReorderOverlay {
     }
 
     private func hide() {
+        if let request { log("reorder: hide session=\(request.session.rawValue)") }
         tasks.forEach { $0.cancel() }
         tasks = []
         request = nil

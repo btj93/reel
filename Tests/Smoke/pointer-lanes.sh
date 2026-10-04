@@ -49,6 +49,7 @@ trap cleanup EXIT INT TERM
 launch_reel() {  # <binary>
     BIN_REEL=$1
     write_test_config "$CFG" 16
+    gesture_config "$CFG" "$1"
     : > "$REEL_LOG"
     [ "$DRY" = 1 ] && write_fixture_log
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
@@ -90,6 +91,7 @@ pointer: scroll tap=true mouse tap=true
 pointer: menu tile=1002 pills=Third@600,120;Half@680,120;Two-Thirds@770,120;Full@850,120;Float@920,120;Close@990,120
 reorder: trigger session=41 tiles=2 dragged=0 display=1
 reorder: ready session=41 reason=captures elapsedMs=120 slots=0:300,2:500 y=140
+reorder: hide session=41
 EOF
 }
 
@@ -115,17 +117,20 @@ active() { reel_msg get-layout | jq "$AG.activeColumnIndex"; }
 view_pos() { reel_msg get-layout | jq "$AG.viewPos"; }
 
 lane1() {
-    section "lane 1: the same flick settles on the same column on trunk and head"
-    local results=() bin index
+    section "lane 1: the same flick from column 1 of 4 settles on the same column on trunk and head"
+    local results=() bin
     for bin in "$BIN_TRUNK" "$BIN_HEAD"; do
         fresh 4 "$bin"
-        index=$(active)
-        post "lane1-flick" "$(flick_script "$(title_x "$index")" "$(center_y "$index")" -30)"
+        focus_column 1
+        on_display "$(title_x 1)" "$(center_y 1)"
+        post "lane1-flick" "$(flick_script "$(title_x 1)" "$(center_y 1)" -30)"
         waitForSettle 10
         results+=("$(active)")
         shot "flick-$(basename "$bin")"
     done
-    [ "$DRY" = 1 ] || cp "$OUT/flick-$(basename "$BIN_HEAD").png" "$OUT/flick.png"
+    [ "$DRY" = 1 ] && return 0
+    cp "$OUT/flick-$(basename "$BIN_HEAD").png" "$OUT/flick.png"
+    [ "${results[1]}" != 1 ] || fail "the flick left head on column 1"
     [ "${results[0]}" = "${results[1]}" ] || fail "trunk settled on column ${results[0]}, head on ${results[1]}"
     ok "both settled on column ${results[1]}"
 }
@@ -146,8 +151,7 @@ lane2() {
 lane3() {
     section "lane 3: a flick past the strip's start overshoots and comes back"
     fresh 3 "$BIN_HEAD"
-    for _ in 1 2 3; do reel_msg focus-left >/dev/null; done
-    waitForSettle 10
+    focus_column 0
     local samples="$NS/lane3-samples"
     : > "$samples"
     post "lane3-bounce" "$(flick_script "$(title_x 0)" "$(center_y 0)" 40)" &
@@ -155,7 +159,7 @@ lane3() {
     if [ "$DRY" != 1 ]; then
         for _ in $(seq 1 90); do view_pos >> "$samples"; sleep 0.016; done
     fi
-    wait "$poster"
+    wait "$poster" || fail "lane 3's flick was not posted"
     waitForSettle 10
     shot bounce
     local final; final=$(view_pos)
@@ -184,11 +188,13 @@ lane4() {
     ok "the strip stayed at $after and the window got $((count_after - count_before)) scroll events"
 }
 
-open_menu() {  # <column index> : the menu's log line ends up in LOG_LINE
-    local x y wid
-    x=$(title_x "$1"); y=$(title_y "$1")
+open_menu() {  # <column index> : focuses the column, presses it at (PRESS_X, PRESS_Y); the menu's log line ends up in LOG_LINE
+    local wid
+    focus_column "$1"
+    PRESS_X=$(title_x "$1"); PRESS_Y=$(title_y "$1")
+    on_display "$PRESS_X" "$PRESS_Y"
     wid=$(reel_msg get-layout | jq "$AG.currentColumns[$1].windowID")
-    post "menu-press-$1" "$(long_press_script "$x" "$y")"
+    post "menu-press-$1" "$(long_press_script "$PRESS_X" "$PRESS_Y")"
     [ "$DRY" = 1 ] && wid=1002
     log_wait 3 "pointer: menu tile=$wid "
 }
@@ -198,7 +204,7 @@ lane5() {
     fresh 3 "$BIN_HEAD"
     open_menu 1
     shot pill-menu
-    post "lane5-dismiss" "$(drag_release_script "$(title_x 1)" "$(title_y 1)" "$(title_x 1)" "$(( $(title_y 1) + 300 ))")"
+    post "lane5-dismiss" "$(drag_release_script "$PRESS_X" "$PRESS_Y" "$PRESS_X" $((PRESS_Y + 300)))"
     ok "the menu opened for column 1's window"
 }
 
@@ -214,7 +220,7 @@ lane6() {
     [ "$DRY" = 1 ] || [ "$(active)" = 0 ] || fail "focus did not reach column 0"
     close=$(printf '%s' "$line" | sed -E 's/.*Close@([-0-9]+),([-0-9]+).*/\1 \2/')
     read -r cx cy <<< "$close"
-    post "lane6-close" "$(drag_release_script "$(title_x 2)" "$(title_y 2)" "$cx" "$cy")"
+    post "lane6-close" "$(drag_release_script "$PRESS_X" "$PRESS_Y" "$cx" "$cy")"
     [ "$DRY" = 1 ] || poll_until 5 "[ \"\$(col_count)\" = 2 ]" || fail "no window closed"
     shot menu-target
     local ids; ids=$(col_window_ids)
@@ -228,7 +234,9 @@ lane7() {
     fresh 4 "$BIN_HEAD"
     local before x y line slot band
     before=$(col_window_ids)
+    focus_column 0
     x=$(title_x 0); y=$(title_y 0)
+    on_display "$x" "$y"
     post "lane7-drag" "$(drag_start_script "$x" "$y")"
     log_wait 3 'reorder: ready '
     line=$LOG_LINE
@@ -251,18 +259,21 @@ lane8() {
     fresh 3 "$BIN_HEAD"
     local regions second
     regions=$(reel_msg get-layout | jq -c '[.groups[].regions[]]')
-    [ "$DRY" = 1 ] || [ "$(printf '%s' "$regions" | jq length)" -ge 2 ] || fail "lane 8 needs two displays"
-    second=$(printf '%s' "$regions" | jq -c '.[-1]')
+    [ "$(printf '%s' "$regions" | jq length)" -ge 2 ] || fail "lane 8 needs two displays"
+    # Only the primary display's frame holds the CG origin, so its visible area starts nearest it.
+    second=$(printf '%s' "$regions" | jq -c 'sort_by((.minX | fabs) + (.minY | fabs)) | .[1]')
     quit_reel
     local id; id=$(host_window_ids MAIN | awk '{ print $2 }')
     host_cmd MAIN "$(printf '%s' "$second" | jq -c --argjson id "${id:-2}" \
-        '{cmd: "setFrame", id: $id, frame: {x: (.minX + 100), y: (.minY + 100), w: 700, h: 500}}')" >/dev/null
+        '{cmd: "setFrame", id: $id, x: (.minX + 100), y: (.minY + 100), w: 700, h: 500}')" | jq -e '.ok == true' >/dev/null \
+        || fail "TestWindowHost refused to move window $id onto display $(printf '%s' "$second" | jq .displayID)"
     launch_reel "$BIN_HEAD"
     waitForSettle 10
     local target x y line display
     target=$(reel_msg get-layout | jq -c --argjson r "$second" \
         '[.groups[].currentColumns[].frame | select(.x + .w / 2 >= $r.minX and .x + .w / 2 < $r.maxX)][0] // {x: 728, y: 25, w: 720}')
     x=$(printf '%s' "$target" | jq '(.x + .w / 2 | floor)'); y=$(printf '%s' "$target" | jq '(.y + 10 | floor)')
+    on_display "$x" "$y"
     post "lane8-drag" "$(drag_start_script "$x" "$y")"
     log_wait 3 'reorder: trigger '
     line=$LOG_LINE
@@ -277,10 +288,13 @@ lane8() {
 lane9() {
     section "lane 9: a modifier press in a window's corner resizes natively and starts no reorder"
     fresh 2 "$BIN_HEAD"
-    local wid before after
+    focus_column 0
+    local wid before after x y
     wid=$(reel_msg get-layout | jq "$AG.currentColumns[0].windowID")
     before=$(host_report MAIN | jq "[.windows[] | select(.cgWindowID == $wid) | .frameCG.w][0] // 0")
-    post "lane9-corner" "$(corner_script $(( $(column_field 0 '.x | floor') + 3 )) $(( $(column_field 0 '.y | floor') + 3 )))"
+    x=$(( $(column_field 0 '.x | floor') + 3 )); y=$(( $(column_field 0 '.y | floor') + 3 ))
+    on_display "$x" "$y"
+    post "lane9-corner" "$(corner_script "$x" "$y")"
     sleep 1
     after=$(host_report MAIN | jq "[.windows[] | select(.cgWindowID == $wid) | .frameCG.w][0] // 0")
     shot corner
@@ -299,12 +313,16 @@ switch_space() {  # <key code>: 124 is Ctrl-Right, 123 is Ctrl-Left
 lane10() {
     section "lane 10: a Space switch mid-drag hides the overlay and keeps the order"
     fresh 3 "$BIN_HEAD"
-    local before x y
+    local before x y session
     before=$(col_window_ids)
+    focus_column 1
     x=$(title_x 1); y=$(title_y 1)
+    on_display "$x" "$y"
     post "lane10-drag" "$(drag_start_script "$x" "$y")"
     log_wait 3 'reorder: ready '
+    session=$(printf '%s' "$LOG_LINE" | sed -E 's/.*session=([0-9]+).*/\1/')
     switch_space 124
+    log_wait 3 "reorder: hide session=$session\$"
     post "lane10-release" "$(jq -nc --argjson x $((x + 40)) --argjson y "$y" '[{mouse: "up", x: $x, y: $y, modifier: "fn"}]')"
     switch_space 123
     waitForSettle 10
@@ -323,8 +341,9 @@ main() {
     mkdir -p "$NS" "$CFG" "$STATE"
     write_fixtures
     if [ "$DRY" = 1 ]; then
-        # Four columns, so lanes 6 and 7 find the columns they press.
-        jq '.groups[0].currentColumns += [.groups[0].currentColumns[] | .index += 2 | .windowID += 2 | .frame.x += 1472]' \
+        # Four columns on two displays, so lanes 6 to 8 find the columns and the display they press.
+        jq '.groups[0].currentColumns += [.groups[0].currentColumns[] | .index += 2 | .windowID += 2 | .frame.x += 1472]
+            | .groups[0].regions += [{displayID: 2, minX: 1440, minY: 0, maxX: 3360, maxY: 1080, width: 1920, height: 1080}]' \
             "$NS/fixture-layout.json" > "$NS/fixture-4.json" && mv "$NS/fixture-4.json" "$NS/fixture-layout.json"
     fi
     local lanes=("$@")
