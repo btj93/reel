@@ -80,7 +80,7 @@ perf_rule() {  # <script> <trunk sample> <head sample>: runs the script's rule o
         report
     ) 2>/dev/null
 }
-for rule in "space-perf.sh 1000 1050 1051" "display-perf.sh 1000 1200 1201" "pointer-perf.sh 5 5.5 5.6"; do
+for rule in "space-perf.sh 1000 1050 1051" "display-perf.sh 1000 1200 1201" "pointer-perf.sh 5 5.5 5.6" "pointer-perf.sh 8 8 8.001"; do
     read -r script trunk inside over <<< "$rule"
     perf_rule "$script" "$trunk" "$inside" || { printf 'FAIL: %s rejected head %s\n' "$script" "$inside"; exit 1; }
     if perf_rule "$script" "$trunk" "$over"; then printf 'FAIL: %s passed head %s\n' "$script" "$over"; exit 1; fi
