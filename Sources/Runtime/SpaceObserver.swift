@@ -42,12 +42,15 @@ public final class SpaceObserver {
     private let clock: () -> Double
     private let changed: (_ delay: Double) -> Void
     private let log: (String) -> Void
+    private let readSpace: (CGDirectDisplayID, Bool) -> SpaceSnapshot?
 
     /// `changed` tears down the strips concerned and reads their census now (delay 0) or after the churn settles.
-    public init(clock: @escaping () -> Double, changed: @escaping (_ delay: Double) -> Void, log: @escaping (String) -> Void) {
+    public init(clock: @escaping () -> Double, changed: @escaping (_ delay: Double) -> Void, log: @escaping (String) -> Void,
+                readSpace: @escaping (CGDirectDisplayID, Bool) -> SpaceSnapshot? = SpaceObserver.space) {
         self.clock = clock
         self.changed = changed
         self.log = log
+        self.readSpace = readSpace
     }
 
     public func start() {
@@ -80,7 +83,7 @@ public final class SpaceObserver {
     /// The key for a census of `windows` on `display`: the window server's Space id, or the fingerprint of the read when
     /// SkyLight cannot answer. Nil for a system Space, which no strip belongs to.
     public func key(display: CGDirectDisplayID, shared: Bool, windows: [ObservedWindow]) -> SpaceKey? {
-        if let space = Self.space(display: display, shared: shared) {
+        if let space = readSpace(display, shared) {
             fallbackLogged = false
             return space.isUserSpace ? space.key : nil
         }

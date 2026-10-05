@@ -294,7 +294,7 @@ extension AXCallError {
 /// epoch and topology revision it was observed under. It keeps the runtime's registry of windows but never touches the
 /// world.
 @MainActor
-public final class Observer {
+public final class Observer: CensusObserver {
     /// Windows to manage; the ones their app classified `.ignore` are in `ignored` instead.
     public private(set) var known: [CGWindowID: WindowFacts] = [:]
     private(set) var workers: [Int32: AppWorker] = [:]
@@ -369,13 +369,13 @@ public final class Observer {
     }
 
     /// Fresh from the window server, never cached: the managed-candidate windows on screen right now.
-    func census(_ onScreen: [CGWindowInfo] = getAllWindowInfo(), space: SpaceKey? = nil) -> [ObservedWindow] {
+    package func census(_ onScreen: [CGWindowInfo] = getAllWindowInfo(), space: SpaceKey? = nil) -> [ObservedWindow] {
         let frames = Dictionary(onScreen.map { ($0.windowID, $0.bounds) }, uniquingKeysWith: { first, _ in first })
         return known.values.filter { frames[$0.id] != nil && (space == nil || censusMembership(SpaceIdentity.spaces(ofWindow: $0.id), matches: space)) }
             .sorted { $0.id < $1.id }.map { $0.observed(at: frames[$0.id]) }
     }
 
-    func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping () -> Void) {
+    package func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping () -> Void) {
         let unknown = onScreen.filter {
             $0.layer == 0 && known[$0.windowID] == nil && !ignored.contains($0.windowID) &&
                 (allowedPids?.contains($0.ownerPID) ?? true)

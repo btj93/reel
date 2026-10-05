@@ -2204,7 +2204,100 @@ struct FuzzStream {
     }
 }
 
+@MainActor
+final class CensusFixture: CensusObserver {
+    var known: [CGWindowID: WindowFacts] { [:] }
+    var windows: [ObservedWindow] = []
+    var pending: [() -> Void] = []
+    var reads = 0
+
+    func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping () -> Void) {
+        pending.append(completion)
+    }
+
+    func census(_ onScreen: [CGWindowInfo], space: SpaceKey?) -> [ObservedWindow] {
+        reads += 1
+        return windows
+    }
+}
+
 @MainActor func runtimeTests() {
+    section("Loop census delivery waits for injected discovery before committing a new Space") {
+        var h = Harness()
+        h.census(4, [window(1)])
+        let fixture = CensusFixture()
+        var effects: [Effect] = []
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-loop-config", "REEL_STATE_DIR": "/tmp/reel-loop-state"]),
+                        censusObserver: fixture,
+                        reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: 5, uuid: nil, isUserSpace: true) },
+                                         screen: { [] }, memberships: { _ in [5] }),
+                        effects: { effects += $0 })
+        loop.send(.spaceWillChange)
+        effects = []
+        loop.census(group: 1)
+        check(fixture.pending.count == 1 && fixture.reads == 0, "Loop requests discovery without reading an incomplete registry")
+        check(loop.world.groups[1]!.space == .skylight(4) && effects.isEmpty, "no census or effects are delivered before discovery")
+        fixture.windows = [window(2)]
+        fixture.pending.first?()
+        check(fixture.reads == 1, "Loop reads the fresh registry after discovery completes")
+        check(loop.world.groups[1]!.space == .skylight(5), "Loop delivers the destination census to Engine")
+        check(Set(loop.world.groups[1]!.windows.keys) == [TileID(2)], "Engine adopts only the newly discovered destination window")
+        check(effects.contains { if case .setFrame(let request) = $0 { request.tile == TileID(2) } else { false } },
+              "the delivered census produces the destination frame effect")
+    }
+    section("Loop rejects injected cross-Space adoption and delivers matching additions") {
+        var h = Harness()
+        h.census(4, [])
+        let fixture = CensusFixture()
+        var sid: UInt64 = 5
+        var effects: [Effect] = []
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-loop-config", "REEL_STATE_DIR": "/tmp/reel-loop-state"]),
+                        censusObserver: fixture,
+                        reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: sid, uuid: nil, isUserSpace: true) },
+                                         screen: { [] }, memberships: { id in id == 3 ? [4] : [5] }),
+                        effects: { effects += $0 })
+        loop.send(.windowAdded(window(2)))
+        check(loop.world.groups[1]!.windows.isEmpty && effects.isEmpty, "an observed destination window cannot enter the still-departing strip")
+        loop.census(group: 1)
+        fixture.pending.first?()
+        check(loop.world.groups[1]!.space == .skylight(5), "the empty destination census commits before adoption")
+        effects = []
+        loop.send(.windowAdded(window(3)))
+        check(loop.world.groups[1]!.windows.isEmpty && effects.isEmpty, "a departing-Space window cannot enter the settled destination")
+        loop.send(.windowAdded(window(2)))
+        check(Set(loop.world.groups[1]!.windows.keys) == [TileID(2)], "matching injected observation reaches Engine adoption")
+        check(effects.contains { if case .focus(let tile, .adoption) = $0 { tile == TileID(2) } else { false } },
+              "matching adoption produces a focus effect through Loop")
+        sid = 4
+        effects = []
+        loop.send(.windowAdded(window(4)))
+        check(Set(loop.world.groups[1]!.windows.keys) == [TileID(2)] && effects.isEmpty, "later OS Space changes hold additions until their census")
+    }
+    section("Loop drops stale discovery completions after Space, scope or request changes") {
+        for change in ["space", "scope", "request"] {
+            var h = Harness()
+            h.census(4, [window(1)])
+            let fixture = CensusFixture()
+            var sid: UInt64 = 5
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-loop-config", "REEL_STATE_DIR": "/tmp/reel-loop-state"]),
+                            censusObserver: fixture,
+                            reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: sid, uuid: nil, isUserSpace: true) },
+                                             screen: { [] }, memberships: { _ in [5] }), effects: { _ in })
+            loop.census(group: 1)
+            fixture.windows = [window(2)]
+            switch change {
+            case "space": sid = 6
+            case "scope": loop.send(.topologyChanged(topology(2, [display()])))
+            default: loop.census(group: 1)
+            }
+            fixture.pending.first?()
+            check(fixture.reads == 0 && loop.world.groups[1]!.space == .skylight(4), "stale \(change) completion never reads or delivers a census")
+            if change == "request" {
+                fixture.pending.last?()
+                check(fixture.reads == 1 && loop.world.groups[1]!.space == .skylight(5), "the newest pending census still reaches Engine")
+            }
+        }
+    }
     section("census discovery waits for fresh AX facts instead of submitting an empty unvisited Space") {
         var requested: [Int32] = []
         var known = Set<UInt32>()

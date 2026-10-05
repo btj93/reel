@@ -28,6 +28,12 @@ public struct SpaceSnapshot: Equatable, Sendable {
     /// user Space would wipe the strip, so every caller must check this.
     public let isUserSpace: Bool
 
+    package init(sid: UInt64, uuid: String?, isUserSpace: Bool) {
+        self.sid = sid
+        self.uuid = uuid
+        self.isUserSpace = isUserSpace
+    }
+
     public var key: SpaceKey { .skylight(sid) }
 }
 

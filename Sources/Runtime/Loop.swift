@@ -48,6 +48,9 @@ public final class Loop {
     public private(set) var world: World
     private var censusSerial: UInt64 = 0
     private var pendingCensuses: [UInt32: UInt64] = [:]
+    private var reads = LoopReads()
+    private var censusObserver: (any CensusObserver)!
+    private var effectsSink: (([Effect]) -> Void)?
     /// The group commands act on.
     public var group: UInt32 { world.activeGroup ?? 0 }
     public private(set) var config = AppConfig()
@@ -64,9 +67,9 @@ public final class Loop {
     private(set) var spaces: SpaceObserver!
     private(set) var displays: DisplayObserver!
     private(set) var pointer: PointerObserver!
-    private let frameLoop = FrameLoop()
-    private let indicator = FocusIndicator()
-    private let hotkeys = HotkeyManager()
+    private lazy var frameLoop = FrameLoop()
+    private lazy var indicator = FocusIndicator()
+    private lazy var hotkeys = HotkeyManager()
     private var replies: [UInt64: ReplyPayload] = [:]
     private var lastRequest: UInt64 = 0
     private var indicatorTile: TileID?
@@ -85,13 +88,25 @@ public final class Loop {
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },
                               deliver: { [unowned self] in run($0) }, log: logLine)
         store = SnapshotStore(directory: paths.stateDir, log: logLine)
-        spaces = SpaceObserver(clock: TimeUtil.now, changed: { [unowned self] in spaceChanged(after: $0) }, log: logLine)
+        censusObserver = observer
+        spaces = SpaceObserver(clock: TimeUtil.now, changed: { [unowned self] in spaceChanged(after: $0) }, log: logLine,
+                               readSpace: reads.space)
         displays = DisplayObserver(current: { [unowned self] in world.topology }, changed: { [unowned self] in topologyChanged($0) },
                                    log: logLine)
         pointer = PointerObserver(world: { [unowned self] in world }, paused: { [unowned self] in paused },
                                   send: { [unowned self] in send(.pointer($0, session: $1)) }, log: logLine)
         frameLoop.onTick = { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
         hotkeys.onAction = { [weak self] action in MainActor.assumeIsolated { self?.hotkey(action) } }
+    }
+
+    package init(world: World, paths: Paths, censusObserver: any CensusObserver, reads: LoopReads,
+                 effects: @escaping ([Effect]) -> Void) {
+        self.world = world
+        self.paths = paths
+        self.censusObserver = censusObserver
+        self.reads = reads
+        effectsSink = effects
+        spaces = SpaceObserver(clock: TimeUtil.now, changed: { _ in }, log: { _ in }, readSpace: reads.space)
     }
 
     public func start() {
@@ -121,8 +136,8 @@ public final class Loop {
         guard !quitting, let id = group ?? world.route(kind),
               let scope = stamp.map({ world.scope(for: id, stamp: $0) }) ?? world.scope(for: id) else { return [] }
         if case .windowAdded(let window) = kind {
-            let observed = SpaceObserver.space(display: id, shared: !world.topology.separateSpaces)?.key
-            guard censusAdoption(SpaceIdentity.spaces(ofWindow: window.id.rawValue), observed: observed, settled: world.groups[id]?.space) else {
+            let observed = reads.space(id, !world.topology.separateSpaces)?.key
+            guard censusAdoption(reads.memberships(window.id.rawValue), observed: observed, settled: world.groups[id]?.space) else {
                 logLine("loop: adoption held for Space census tile=\(window.id.rawValue) group=\(id)")
                 return []
             }
@@ -140,6 +155,10 @@ public final class Loop {
     @discardableResult
     private func reduceAndRun(_ event: Event) -> [Effect] {
         let effects = reduce(&world, event, now: max(TimeUtil.now(), world.time))
+        if let effectsSink {
+            effectsSink(effects)
+            return effects
+        }
         observer.clock.current = world.stamp
         run(effects)
         pointer.sync(world.pointer)
@@ -188,23 +207,23 @@ public final class Loop {
 
     /// A fresh on-screen read, sent as a new `spaceChanged`; a deferred census is never answered from a cache. Every
     /// census proposes the next epoch, so the one `reduce` commits retires the old Space's focus events and timers.
-    private func census(group: UInt32) {
+    package func census(group: UInt32) {
         guard let owner = world.scope(for: group) else { return }
         let shared = !world.topology.separateSpaces
-        let target = SpaceObserver.space(display: group, shared: shared)?.key
+        let target = reads.space(group, shared)?.key
         censusSerial += 1
         let serial = censusSerial
         pendingCensuses[group] = serial
-        observer.prepareCensus(getAllWindowInfo()) { [weak self] in
+        censusObserver.prepareCensus(reads.screen()) { [weak self] in
             guard let self, !quitting, pendingCensuses[group] == serial else { return }
             pendingCensuses[group] = nil
             guard world.scope(for: group) == owner,
-                  SpaceObserver.space(display: group, shared: shared)?.key == target else { return }
-            let screen = getAllWindowInfo()
-            let candidates = observer.census(screen, space: target)
+                  reads.space(group, shared)?.key == target else { return }
+            let screen = reads.screen()
+            let candidates = censusObserver.census(screen, space: target)
             let windows = world.routed(candidates, to: group)
             if runtimeTimestamps {
-                logLine("loop: census input group=\(group) screen=\(screen.filter { $0.layer == 0 }.map(\.windowID)) known=\(observer.known.keys.sorted()) candidates=\(candidates.map { $0.id.rawValue }) memberships=\(candidates.map { "\($0.id.rawValue)=\(SpaceIdentity.spaces(ofWindow: $0.id.rawValue) ?? [])" })")
+                logLine("loop: census input group=\(group) screen=\(screen.filter { $0.layer == 0 }.map(\.windowID)) known=\(censusObserver.known.keys.sorted()) candidates=\(candidates.map { $0.id.rawValue }) memberships=\(candidates.map { "\($0.id.rawValue)=\(reads.memberships($0.id.rawValue) ?? [])" })")
             }
             guard let key = spaces.key(display: group, shared: shared, windows: windows) else {
                 return logLine("loop: census skipped on a system Space group=\(group)")
@@ -212,7 +231,7 @@ public final class Loop {
             let epoch = (world.groups[group]?.epoch ?? 0) + 1
             logLine("loop: census group=\(group) key=\(key.debugDescription) windows=\(windows.count)")
             send(.spaceChanged(key: key, epoch: epoch, windows: windows), group: group)
-            reportFrontmostFocus()
+            if effectsSink == nil { reportFrontmostFocus() }
         }
     }
 

@@ -14,11 +14,14 @@ func runRuntimeWriteTests() {
         let w = FakeAXWindow(windowID: 90, pid: 99001, frame: .zero)
         w.shortNextFrame = CGSize(width: 700, height: 767)
         var cache = SizeCache()
-        _ = cache.write(tiled, to: w)
+        let first = cache.write(tiled, to: w)
         assertEq(w.currentFrame.height, 767, "the startup short height reproduces")
-        _ = cache.write(tiled, to: w)
+        check(first.result == .sizeUnconfirmed, "the first short write requests delayed size confirmation")
+        let second = cache.write(tiled, to: w)
         assertEq(w.currentFrame, tiled, "a settled write resends the refused size")
-        _ = cache.write(tiled.offsetBy(dx: 10, dy: 0), to: w)
+        check(second.result == .sizeUnconfirmed, "the retry requests a fresh delayed read after resizing")
+        let confirmed = cache.write(tiled.offsetBy(dx: 10, dy: 0), to: w)
+        check(confirmed.result == .applied, "a verified kept size stops delayed confirmation")
         assertEq(w.frameWriteCount, 2, "a successful retry returns to position-only writes")
     }
 
@@ -80,7 +83,10 @@ func runRuntimeWriteTests() {
         let w = FakeAXWindow(windowID: 91, pid: 99001, frame: .zero)
         w.minSize = CGSize(width: 900, height: 0)
         var cache = SizeCache()
-        for _ in 0..<20 { _ = cache.write(tiled, to: w) }
+        let results = (0..<20).map { _ in cache.write(tiled, to: w).result }
+        check(results[0] == .sizeUnconfirmed && results[1] == .sizeUnconfirmed,
+              "the first two refused writes request delayed confirmation")
+        check(results.dropFirst(2).allSatisfy { $0 == .applied }, "the refusal bound stops confirmation requests")
         assertEq(w.frameWriteCount, 3, "only three full writes for an identical refused size")
         assertEq(w.positionWriteCount, 17, "subsequent settles keep the cheap position path")
         _ = cache.write(CGRect(x: 100, y: 25, width: 750, height: 850), to: w)
