@@ -14,7 +14,9 @@ public struct WindowFacts: Equatable, Sendable {
     public let frame: CGRect?
     public let classification: WindowClassification
 
-    var observed: ObservedWindow {
+    var observed: ObservedWindow { observed(at: frame) }
+
+    func observed(at frame: CGRect?) -> ObservedWindow {
         ObservedWindow(id: TileID(id), pid: pid, bundleID: bundleID, title: title, floating: classification == .float,
                        initialFrame: frame.map(AXRect.init))
     }
@@ -54,6 +56,8 @@ public struct SizeCache {
     private struct Size {
         let asked: CGSize
         let kept: CGSize
+        let lastRefused: CGSize?
+        let retryOrigin: CGPoint
         let refusals: Int
     }
     private var sizes: [CGWindowID: Size] = [:]
@@ -65,31 +69,44 @@ public struct SizeCache {
     public mutating func write(_ frame: CGRect, to window: AXWindow, animating: Bool = false) -> (result: FrameResult, landed: CGRect?) {
         let id = window.windowID
         let previous = sizes[id].flatMap { $0.asked == frame.size ? $0 : nil }
-        let retry = previous.map { !animating && !Self.matches($0.kept, frame.size) && $0.refusals < 3 } ?? false
-        let kept = retry ? nil : previous?.kept
+        let actual = !animating && previous != nil ? (try? window.getFrame().get())?.size : nil
+        let current = actual ?? previous?.kept
+        let sameOrigin = previous?.retryOrigin == frame.origin
+        let sameRefusal = sameOrigin && (current.flatMap { size in previous?.lastRefused.map { Self.matches($0, size) } } ?? false)
+        let refusals = sameRefusal ? previous?.refusals ?? 0 : 0
+        let retry = current.map { !animating && !Self.matches($0, frame.size) && refusals < 3 } ?? false
+        let kept = retry ? nil : current
+        runtimeTrace("size cache: tile=\(id) asked=\(frame.size) cached=\(String(describing: previous?.kept)) actual=\(String(describing: actual)) animating=\(animating) full=\(kept == nil) refusals=\(refusals)")
         switch kept == nil ? window.setFrame(frame) : window.setPosition(frame.origin) {
         case .success:
             let landed = if let kept { CGRect(origin: frame.origin, size: kept) } else {
                 (try? window.getFrame().get()).map { CGRect(origin: frame.origin, size: $0.size) }
             }
+            let size = landed?.size ?? frame.size
+            let refused = !Self.matches(size, frame.size) ? size : current.flatMap { Self.matches($0, frame.size) ? nil : $0 }
             if kept == nil {
-                let size = landed?.size ?? frame.size
-                let refusals = Self.matches(size, frame.size) ? 0 :
-                    (previous.map { Self.matches($0.kept, size) ? $0.refusals : 0 } ?? 0) + 1
-                sizes[id] = Size(asked: frame.size, kept: size, refusals: refusals)
+                let repeats = sameOrigin && (refused.flatMap { value in previous?.lastRefused.map { Self.matches($0, value) } } ?? false)
+                sizes[id] = Size(asked: frame.size, kept: size, lastRefused: refused, retryOrigin: frame.origin,
+                                 refusals: refused == nil ? 0 : (repeats ? previous?.refusals ?? 0 : 0) + 1)
+            } else if !animating {
+                sizes[id] = Size(asked: frame.size, kept: size, lastRefused: refused, retryOrigin: frame.origin,
+                                 refusals: refused == nil ? 0 : refusals)
             }
-            return (.applied, landed)
+            let confirm = !animating && kept == nil && (sizes[id]?.refusals ?? 0) < 3
+            runtimeTrace("size cache: tile=\(id) landed=\(String(describing: landed?.size)) confirm=\(confirm)")
+            return (confirm ? .sizeUnconfirmed : .applied, landed)
         case .failure(let error):
             sizes[id] = nil
             return (error.isTimeout ? .timedOut : .failed, nil)
         }
     }
 
-    /// Someone else sized the window, so the next write must set the size again, not just the position. A size within
-    /// the ledger's slop of the one the app kept is rounding.
+    /// A notification replaces the immediate read-back without spending another resize attempt.
     public mutating func observed(_ id: CGWindowID, frame: CGRect) {
-        guard let kept = sizes[id]?.kept else { return }
-        if abs(kept.width - frame.width) > EchoLedger.slop || abs(kept.height - frame.height) > EchoLedger.slop { sizes[id] = nil }
+        guard let size = sizes[id], !Self.matches(size.kept, frame.size) else { return }
+        let repeats = size.lastRefused.map { Self.matches($0, frame.size) } ?? false
+        sizes[id] = Size(asked: size.asked, kept: frame.size, lastRefused: frame.size,
+                         retryOrigin: size.retryOrigin, refusals: repeats ? size.refusals : 0)
     }
 
     private static func matches(_ lhs: CGSize, _ rhs: CGSize) -> Bool {
@@ -298,6 +315,15 @@ public final class Observer {
     /// While paused, the engine hears only removals and retitles; the registry still tracks everything for the resume census.
     private let paused: () -> Bool
 
+    private lazy var censusDiscovery: CensusDiscovery = CensusDiscovery { [weak self] pid in
+        guard let self else { return }
+        if let worker = workers[pid] { worker.rediscover([]) }
+        else {
+            if let app = NSRunningApplication(processIdentifier: pid) { register(app) }
+            if workers[pid] == nil { censusDiscovery.reported(pid) }
+        }
+    }
+
     public static let healthInterval = 0.5
 
     init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
@@ -343,10 +369,18 @@ public final class Observer {
     }
 
     /// Fresh from the window server, never cached: the managed-candidate windows on screen right now.
-    func census(_ onScreen: [CGWindowInfo] = getAllWindowInfo()) -> [ObservedWindow] {
-        let onScreen = Set(onScreen.map(\.windowID))
-        return known.values.filter { onScreen.contains($0.id) }
-            .sorted { $0.id < $1.id }.map(\.observed)
+    func census(_ onScreen: [CGWindowInfo] = getAllWindowInfo(), space: SpaceKey? = nil) -> [ObservedWindow] {
+        let frames = Dictionary(onScreen.map { ($0.windowID, $0.bounds) }, uniquingKeysWith: { first, _ in first })
+        return known.values.filter { frames[$0.id] != nil && (space == nil || censusMembership(SpaceIdentity.spaces(ofWindow: $0.id), matches: space)) }
+            .sorted { $0.id < $1.id }.map { $0.observed(at: frames[$0.id]) }
+    }
+
+    func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping () -> Void) {
+        let unknown = onScreen.filter {
+            $0.layer == 0 && known[$0.windowID] == nil && !ignored.contains($0.windowID) &&
+                (allowedPids?.contains($0.ownerPID) ?? true)
+        }
+        censusDiscovery.refresh(Set(unknown.map(\.ownerPID)), completion: completion)
     }
 
     /// Removals for windows that died without a notification, additions for on-screen windows the engine lacks.
@@ -458,6 +492,7 @@ public final class Observer {
             guard workers[pid] != nil else { return }
             windows.forEach(learn)
             awaitingDiscovery.remove(pid)
+            censusDiscovery.reported(pid)
             if awaitingDiscovery.isEmpty { finishDiscovery() }
         case .created(let facts):
             learn(facts)

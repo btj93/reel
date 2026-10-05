@@ -132,7 +132,7 @@ extension World {
     }
 
     /// With `quietSince`, the decision is recorded at that time and the OS is not asked to focus.
-    fileprivate mutating func focus(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass, quietSince: Double? = nil) {
+    fileprivate mutating func focus(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass, quietSince: Double? = nil, animated: Bool? = nil) {
         guard var group = groups[id] else { return }
         if let observed = intent.observedSpace, observed.isAuthoritative,
            let current = group.space, current.isAuthoritative, observed != current { return }
@@ -154,9 +154,9 @@ extension World {
                 group.strip.viewOffset.shiftBy(previousX - group.strip.columnX(at: index, time: pass.now))
                 group.strip.activeColumnIndex = index
                 group.strip.snapIndices[index] = group.strip.defaultSnapIndex
-                group.strip.recenter(animated: config.animate, at: pass.now)
+                group.strip.recenter(animated: animated ?? config.animate, at: pass.now)
             } else {
-                group.strip.focusColumnIncremental(colIndex: index, at: pass.now, animated: config.animate)
+                group.strip.focusColumnIncremental(colIndex: index, at: pass.now, animated: animated ?? config.animate)
             }
             group.strip.columns[index].activeTileIndex = group.strip.columns[index].tiles.firstIndex(of: tile)!
         }
@@ -763,7 +763,7 @@ extension World {
         // One display takes OS focus: the one the Dock click crossed to, else the one that had it. The rest restore
         // at their old decision time, so they neither take the commands nor hold off a focus report.
         let quiet = source == .appActivation || leads ? nil : departing.focus.decision?.time ?? -.infinity
-        focus(FocusIntent(tile: restore, source: source), group: id, &pass, quietSince: quiet)
+        focus(FocusIntent(tile: restore, source: source), group: id, &pass, quietSince: quiet, animated: false)
         pass.layout.insert(id)
         pass.persist = true
     }
@@ -815,9 +815,10 @@ extension World {
         guard let request = frames[tile], request.revision == revision, request.scope == pass.scope else { return }
         switch result {
         case .applied: appliedFrames[tile] = request
-        case .failed, .timedOut:
+        case .failed, .timedOut, .sizeUnconfirmed:
             frames.removeValue(forKey: tile)
-            appliedFrames.removeValue(forKey: tile)
+            if case .sizeUnconfirmed = result { appliedFrames[tile] = request }
+            else { appliedFrames.removeValue(forKey: tile) }
             if !timers.values.contains(where: { if case .retryFrames = $0.action { return $0.scope == pass.scope }; return false }) {
                 schedule(.retryFrames, delay: EngineConfig.frameRetryDelay, &pass)
             }

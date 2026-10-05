@@ -22,6 +22,46 @@ func runRuntimeWriteTests() {
         assertEq(w.frameWriteCount, 2, "a successful retry returns to position-only writes")
     }
 
+    section("late resize notifications do not reset a stable refusal budget forever")
+    do {
+        let w = FakeAXWindow(windowID: 95, pid: 99001, frame: .zero)
+        var cache = SizeCache()
+        _ = cache.write(tiled, to: w)
+        for _ in 0..<20 {
+            w.currentFrame.size.height = 767
+            cache.observed(w.windowID, frame: w.currentFrame)
+            _ = cache.write(tiled, to: w)
+        }
+        assertEq(w.frameWriteCount, 4, "one initial write and three refused retries despite late AX notifications")
+        assertEq(w.currentFrame.height, 767, "a stable asynchronous clamp eventually keeps the cheap path")
+    }
+
+    section("a position-dependent refusal is retried when the column reaches a new settled origin")
+    do {
+        let w = FakeAXWindow(windowID: 94, pid: 99001, frame: .zero)
+        w.minSize = CGSize(width: 900, height: 0)
+        var cache = SizeCache()
+        for _ in 0..<20 { _ = cache.write(tiled, to: w) }
+        assertEq(w.frameWriteCount, 3, "a stable clamp remains bounded")
+        w.minSize = .zero
+        _ = cache.write(tiled.offsetBy(dx: 400, dy: 0), to: w)
+        assertEq(w.currentFrame.size, tiled.size, "a new fully visible position does not inherit offscreen refusals forever")
+        assertEq(w.frameWriteCount, 4, "the new origin gets one fresh full write")
+    }
+
+    section("a late clamp after a successful read-back is repaired on settle")
+    do {
+        let w = FakeAXWindow(windowID: 93, pid: 99001, frame: .zero)
+        var cache = SizeCache()
+        _ = cache.write(tiled, to: w, animating: true)
+        w.currentFrame.size.height = 767
+        _ = cache.write(tiled, to: w, animating: true)
+        assertEq(w.currentFrame.height, 767, "animation does not reread a late clamp")
+        _ = cache.write(tiled, to: w)
+        assertEq(w.currentFrame, tiled, "settle rereads actual size rather than trusting immediate read-back forever")
+        assertEq(w.frameWriteCount, 2, "late clamping is retried once")
+    }
+
     section("animation never burns the settled resize retry budget")
     do {
         let w = FakeAXWindow(windowID: 92, pid: 99001, frame: .zero)
@@ -56,7 +96,7 @@ func runRuntimeWriteTests() {
         var cache = SizeCache()
         _ = cache.write(tiled, to: w)
         w.currentFrame.size.height = 500  // changed with no notification
-        let (result, landed) = cache.write(tiled.offsetBy(dx: -50, dy: 0), to: w)
+        let (result, landed) = cache.write(tiled.offsetBy(dx: -50, dy: 0), to: w, animating: true)
         check(result == .applied, "the position write applies")
         assertEq(w.currentFrame, CGRect(x: 50, y: 25, width: 700, height: 500), "only the position moved")
         assertEq(landed, CGRect(x: 50, y: 25, width: 700, height: 850), "landed is the size the app kept at the last full write")
@@ -69,7 +109,7 @@ func runRuntimeWriteTests() {
         var cache = SizeCache()
         let first = cache.write(tiled, to: w)
         assertEq(first.landed, CGRect(x: 100, y: 25, width: 900, height: 850), "the read-back carries the clamped width")
-        let second = cache.write(tiled.offsetBy(dx: 40, dy: 0), to: w)
+        let second = cache.write(tiled.offsetBy(dx: 40, dy: 0), to: w, animating: true)
         assertEq(second.landed, CGRect(x: 140, y: 25, width: 900, height: 850), "the scroll reports the kept width")
         assertEq(w.currentFrame, CGRect(x: 140, y: 25, width: 900, height: 850), "the window keeps its clamp")
     }
@@ -114,7 +154,7 @@ func runRuntimeWriteTests() {
         _ = cache.write(tiled, to: w)
         cache.observed(w.windowID, frame: CGRect(x: 100, y: 25, width: 700.5, height: 849.5))
         w.currentFrame.size.height = 500
-        _ = cache.write(tiled.offsetBy(dx: 10, dy: 0), to: w)
+        _ = cache.write(tiled.offsetBy(dx: 10, dy: 0), to: w, animating: true)
         assertEq(w.currentFrame.height, 500, "still a position write")
     }
 

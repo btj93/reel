@@ -103,6 +103,7 @@ public enum PointerInput: Sendable {
 
 public enum FrameResult: Sendable {
     case applied
+    case sizeUnconfirmed
     case failed
     case timedOut
 }

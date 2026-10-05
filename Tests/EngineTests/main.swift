@@ -198,6 +198,33 @@ struct Harness {
 }
 
 @MainActor func replayTests() throws {
+    section("an unvisited Space starts at its final viewport instead of animating from offset zero") {
+        var h = Harness(animate: true)
+        h.census(4, [window(1), window(2)])
+        check(!h.world.needsTicks, "first Space layout is already settled")
+        check(h.requests.allSatisfy { !$0.animating }, "first Space frames do not add a post-switch scroll animation")
+        h.send(.spaceWillChange)
+        h.census(5, [window(3), window(4)])
+        check(!h.world.needsTicks, "unvisited destination has no invented previous viewport")
+        check(h.requests.allSatisfy { !$0.animating }, "unvisited Space frames are final")
+        h.send(.command(.focusRight, .keyboard))
+        check(h.world.needsTicks, "real focus changes still animate")
+    }
+    section("a settled size confirmation uses the scoped frame retry timer") {
+        var h = Harness()
+        h.census(4, [window(1), window(2)])
+        let first = h.requests.first!
+        h.send(.frameCompleted(tile: first.tile, revision: first.revision, result: .sizeUnconfirmed))
+        check(h.world.timers.count == 1, "one deferred confirmation is scheduled")
+        h.advance(EngineConfig.frameRetryDelay + margin)
+        let retry = h.requests.first { $0.tile == first.tile }
+        check(retry != nil && retry!.revision > first.revision && !retry!.animating, "a new settled write confirms the actual kept size")
+        h.send(.frameCompleted(tile: first.tile, revision: first.revision, result: .sizeUnconfirmed))
+        check(h.world.timers.isEmpty, "a stale completion cannot schedule another resize")
+        h.send(.frameCompleted(tile: first.tile, revision: retry!.revision, result: .sizeUnconfirmed))
+        h.send(.spaceWillChange)
+        check(h.world.timers.isEmpty, "Space teardown cancels pending confirmation")
+    }
     section("animation ends with a settled size-confirming frame request") {
         var h = Harness(animate: true)
         h.census(1, [window(1), window(2), window(3)])
@@ -2171,6 +2198,44 @@ struct FuzzStream {
 }
 
 @MainActor func runtimeTests() {
+    section("census discovery waits for fresh AX facts instead of submitting an empty unvisited Space") {
+        var requested: [Int32] = []
+        var known = Set<UInt32>()
+        var censuses: [Set<UInt32>] = []
+        let discovery = CensusDiscovery { requested.append($0) }
+        discovery.refresh([101, 102]) { censuses.append(known) }
+        discovery.refresh([101, 102]) { censuses.append(known) }
+        check(censuses.isEmpty, "no false empty census before app discovery")
+        check(requested == [101, 102], "display groups share one discovery per app")
+        known.insert(1)
+        discovery.reported(101)
+        check(censuses.isEmpty, "the second app is still pending")
+        known.insert(2)
+        discovery.reported(102)
+        check(censuses == [[1, 2], [1, 2]], "both groups census fresh registry facts as soon as discovery completes")
+        discovery.reported(102)
+        check(censuses.count == 2, "duplicate reports do not deliver duplicate censuses")
+        discovery.refresh([]) { censuses.append(known) }
+        check(censuses.count == 3, "visited Spaces do not wait for discovery")
+    }
+    section("census discovery bounds a hung app without caching a substitute census") {
+        var completions = 0
+        let discovery = CensusDiscovery { _ in }
+        discovery.refresh([999]) { completions += 1 }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.6))
+        check(completions == 1, "deadline permits a fresh read even when an app never reports")
+        discovery.reported(999)
+        check(completions == 1, "late discovery cannot answer the timed-out request again")
+    }
+    section("Space census and health adoption reject departing-Space windows") {
+        check(!censusMembership([4], matches: .skylight(5)), "CG transition overlap is not a destination census")
+        check(censusMembership([4, 5], matches: .skylight(5)), "a window on both Spaces belongs to the destination")
+        check(!censusAdoption([4], observed: .skylight(5), settled: .skylight(5)), "health cannot adopt old-Space windows on an empty destination")
+        check(!censusAdoption([5], observed: .skylight(5), settled: .skylight(4)), "new-Space windows cannot land on the Space not yet torn down")
+        check(censusAdoption([5], observed: .skylight(5), settled: .skylight(5)), "settled matching membership permits normal adoption")
+        check(censusMembership(nil, matches: .skylight(5)), "unavailable SkyLight membership keeps conservative Engine census guards")
+        check(censusMembership([4], matches: .fingerprint([1])), "fingerprint fallback still relies on permanent census guards")
+    }
     section("R3 config: every key parses into the schema") {
         let text = """
         [layout]

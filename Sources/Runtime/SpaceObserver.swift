@@ -65,6 +65,7 @@ public final class SpaceObserver {
 
     private func spaceDidChange() {
         if let space = SpaceIdentity.currentSpace(), !space.isUserSpace { return log("space: system Space ignored sid=\(space.sid)") }
+        runtimeTrace("space: notification key=\(String(describing: SpaceIdentity.currentSpace()?.key))")
         let delay = storm.notified(at: clock())
         if delay > 0 { log("space: storm, coalesced \(storm.coalesced) notification(s)") }
         changed(delay)

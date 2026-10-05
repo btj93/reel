@@ -9,7 +9,11 @@ import Platform
 /// One flush per main run-loop turn, so a scroll that logs every write and echo costs one syscall per turn.
 @MainActor
 public func logLine(_ line: String) {
-    print(line)
+    if runtimeTimestamps {
+        print(String(format: "[%.6f] %@", TimeUtil.now(), line))
+    } else {
+        print(line)
+    }
     guard !flushQueued else { return }
     flushQueued = true
     DispatchQueue.main.async { MainActor.assumeIsolated { flushQueued = false; fflush(stdout) } }
@@ -42,6 +46,8 @@ public func managedPidAllowlist(_ environment: [String: String] = ProcessInfo.pr
 @MainActor
 public final class Loop {
     public private(set) var world: World
+    private var censusSerial: UInt64 = 0
+    private var pendingCensuses: [UInt32: UInt64] = [:]
     /// The group commands act on.
     public var group: UInt32 { world.activeGroup ?? 0 }
     public private(set) var config = AppConfig()
@@ -114,6 +120,13 @@ public final class Loop {
     public func send(_ kind: Event.Kind, group: UInt32? = nil, stamp: Stamp? = nil) -> [Effect] {
         guard !quitting, let id = group ?? world.route(kind),
               let scope = stamp.map({ world.scope(for: id, stamp: $0) }) ?? world.scope(for: id) else { return [] }
+        if case .windowAdded(let window) = kind {
+            let observed = SpaceObserver.space(display: id, shared: !world.topology.separateSpaces)?.key
+            guard censusAdoption(SpaceIdentity.spaces(ofWindow: window.id.rawValue), observed: observed, settled: world.groups[id]?.space) else {
+                logLine("loop: adoption held for Space census tile=\(window.id.rawValue) group=\(id)")
+                return []
+            }
+        }
         return reduceAndRun(Event(scope: scope, kind: kind))
     }
 
@@ -176,15 +189,31 @@ public final class Loop {
     /// A fresh on-screen read, sent as a new `spaceChanged`; a deferred census is never answered from a cache. Every
     /// census proposes the next epoch, so the one `reduce` commits retires the old Space's focus events and timers.
     private func census(group: UInt32) {
-        let windows = world.routed(observer.census(), to: group)
-        guard let key = spaces.key(display: group, shared: !world.topology.separateSpaces, windows: windows) else {
-            return logLine("loop: census skipped on a system Space group=\(group)")
+        guard let owner = world.scope(for: group) else { return }
+        let shared = !world.topology.separateSpaces
+        let target = SpaceObserver.space(display: group, shared: shared)?.key
+        censusSerial += 1
+        let serial = censusSerial
+        pendingCensuses[group] = serial
+        observer.prepareCensus(getAllWindowInfo()) { [weak self] in
+            guard let self, !quitting, pendingCensuses[group] == serial else { return }
+            pendingCensuses[group] = nil
+            guard world.scope(for: group) == owner,
+                  SpaceObserver.space(display: group, shared: shared)?.key == target else { return }
+            let screen = getAllWindowInfo()
+            let candidates = observer.census(screen, space: target)
+            let windows = world.routed(candidates, to: group)
+            if runtimeTimestamps {
+                logLine("loop: census input group=\(group) screen=\(screen.filter { $0.layer == 0 }.map(\.windowID)) known=\(observer.known.keys.sorted()) candidates=\(candidates.map { $0.id.rawValue }) memberships=\(candidates.map { "\($0.id.rawValue)=\(SpaceIdentity.spaces(ofWindow: $0.id.rawValue) ?? [])" })")
+            }
+            guard let key = spaces.key(display: group, shared: shared, windows: windows) else {
+                return logLine("loop: census skipped on a system Space group=\(group)")
+            }
+            let epoch = (world.groups[group]?.epoch ?? 0) + 1
+            logLine("loop: census group=\(group) key=\(key.debugDescription) windows=\(windows.count)")
+            send(.spaceChanged(key: key, epoch: epoch, windows: windows), group: group)
+            reportFrontmostFocus()
         }
-        let epoch = (world.groups[group]?.epoch ?? 0) + 1
-        logLine("loop: census group=\(group) key=\(key.debugDescription) windows=\(windows.count)")
-        send(.spaceChanged(key: key, epoch: epoch, windows: windows), group: group)
-        // A display that restored quietly may now hold the OS focus, whose report came while its window was unknown.
-        reportFrontmostFocus()
     }
 
     /// Only strips whose display now shows another Space are torn down and read again, so a switch on one display
