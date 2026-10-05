@@ -10,10 +10,14 @@ struct Pass {
 }
 
 public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [Effect] {
-    guard now.isFinite, now >= world.time else { return [.log("rejected clock")] }
+    guard now.isFinite, now >= world.time else {
+        if case .focus(let intent) = event.kind { return [.log(intent.droppedLog(reason: "rejected-clock"))] }
+        return [.log("rejected clock")]
+    }
     guard event.scope.topologyRevision == world.topology.revision,
           event.kind.isGlobal || world.scope(for: event.scope.group) == event.scope else {
         switch event.kind {
+        case .focus(let intent): return [.log(intent.droppedLog(reason: "stale-scope"))]
         case .ipc(let requestID, _): return [.reply(id: requestID, payload: .command(.refused("stale scope")))]
         case .query(let requestID): return [.reply(id: requestID, payload: .snapshots([]))]
         default:
@@ -86,6 +90,7 @@ extension World {
             guard let work = timers[token], work.scope.group == group else { continue }
             if focusOnly, case .retryFrames = work.action { continue }
             timers.removeValue(forKey: token)
+            if case .focus(let intent) = work.action { pass.effects.append(.log(intent.droppedLog(reason: "timer-cancelled"))) }
             pass.effects.append(.cancel(token))
         }
     }
@@ -126,31 +131,54 @@ extension World {
 
     fileprivate mutating func onFocusObserved(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
         let group = groups[id]!
-        guard group.phase.acceptsFocus || intent.source == .appActivation else { return }
-        cancelTimers(group: id, &pass, focusOnly: true)
+        guard group.phase.acceptsFocus || intent.source == .appActivation else {
+            return pass.effects.append(.log(intent.droppedLog(reason: "space-changing")))
+        }
+        if let observed = intent.observedSpace, observed.isAuthoritative,
+           let current = group.space, current.isAuthoritative, observed != current {
+            return pass.effects.append(.log(intent.droppedLog(reason: "different-space")))
+        }
         let local = intent.source == .appActivation && group.windows.values.contains { $0.pid == intent.pid }
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
-        // A report this soon after a focus Reel made, here or on the display commands act on, is stale.
         let recent = [group.focus.decision, activeGroup.flatMap { groups[$0]?.focus.decision }].compactMap { $0 }
-        if recent.contains(where: { $0.source.protectsFocus && pass.now - $0.time < EngineConfig.focusDebounce }) { return }
-        guard let tile = intent.tile else { return }
-        if group.windows[tile] != nil { schedule(.focus(intent), delay: EngineConfig.focusDebounce, &pass) }
-        else if group.hidden[tile] != nil { groups[id]!.focus = .crossing(intent: intent, time: pass.now, previous: group.focus.decision) }
+        if recent.contains(where: { decision in
+            guard decision.source.protectsFocus, pass.now - decision.time < EngineConfig.focusDebounce else { return false }
+            if intent.source == .appActivation, let pid = intent.pid, let owner = owner(of: decision.tile),
+               let decidedPID = groups[owner]?.windows[decision.tile]?.pid { return pid == decidedPID }
+            return true
+        }) {
+            return pass.effects.append(.log(intent.droppedLog(reason: "debounce")))
+        }
+        guard let tile = intent.tile else { return pass.effects.append(.log(intent.droppedLog(reason: "missing-tile"))) }
+        if group.windows[tile] != nil {
+            cancelTimers(group: id, &pass, focusOnly: true)
+            schedule(.focus(intent), delay: EngineConfig.focusDebounce, &pass)
+        } else if group.hidden[tile] != nil {
+            cancelTimers(group: id, &pass, focusOnly: true)
+            groups[id]!.focus = .crossing(intent: intent, time: pass.now, previous: group.focus.decision)
+        } else {
+            pass.effects.append(.log(intent.droppedLog(reason: "unmanaged-tile")))
+        }
     }
 
     /// With `quietSince`, the decision is recorded at that time and the OS is not asked to focus.
     fileprivate mutating func focus(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass, quietSince: Double? = nil, animated: Bool? = nil) {
-        guard var group = groups[id] else { return }
+        guard var group = groups[id] else { return pass.effects.append(.log(intent.droppedLog(reason: "missing-group"))) }
         if let observed = intent.observedSpace, observed.isAuthoritative,
-           let current = group.space, current.isAuthoritative, observed != current { return }
+           let current = group.space, current.isAuthoritative, observed != current {
+            return pass.effects.append(.log(intent.droppedLog(reason: "different-space")))
+        }
         if intent.source == .appActivation, let pid = intent.pid, !group.windows.values.contains(where: { $0.pid == pid }) {
             // The app may be on another Space of any display, so whichever display changes Space next takes the click.
             for other in groups.keys where !groups[other]!.windows.values.contains(where: { $0.pid == pid }) {
+                cancelTimers(group: other, &pass, focusOnly: true)
                 groups[other]!.focus = .crossing(intent: intent, time: pass.now, previous: groups[other]!.focus.decision)
             }
             return
         }
-        guard group.phase.acceptsFocus, let tile = intent.tile, group.windows[tile] != nil else { return }
+        guard group.phase.acceptsFocus else { return pass.effects.append(.log(intent.droppedLog(reason: "space-changing"))) }
+        guard let tile = intent.tile else { return pass.effects.append(.log(intent.droppedLog(reason: "missing-tile"))) }
+        guard group.windows[tile] != nil else { return pass.effects.append(.log(intent.droppedLog(reason: "unmanaged-tile"))) }
         if pointer.isSwiping(group: id), intent.source.centers {
             cancelPointer(&pass)
             group = groups[id]!
@@ -166,6 +194,10 @@ extension World {
                 group.strip.focusColumnIncremental(colIndex: index, at: pass.now, animated: animated ?? config.animate)
             }
             group.strip.columns[index].activeTileIndex = group.strip.columns[index].tiles.firstIndex(of: tile)!
+        }
+        if case .crossing(let held, _, _) = group.focus {
+            let fulfilled = held.tile.map { $0 == tile } ?? (held.pid == group.windows[tile]?.pid)
+            if !fulfilled { pass.effects.append(.log(held.droppedLog(reason: "crossing-superseded"))) }
         }
         group.focus = .resolved(FocusDecision(tile: tile, source: intent.source, time: quietSince ?? pass.now))
         group.focusedAt = max(group.focusedAt, quietSince ?? pass.now)
@@ -657,7 +689,8 @@ extension World {
             // A pending re-read no longer holds: focus from here on is an echo.
             group.phase = .changing(from: key, deferred: group.phase.deferred.map { DeferredCensus(key: $0.key, since: $0.since) })
             // A Dock click counts from the first notification of a change, not the last one of a storm.
-            if case .crossing(_, let time, let previous) = group.focus, pass.now - time > EngineConfig.crossingTTL {
+            if case .crossing(let intent, let time, let previous) = group.focus, pass.now - time > EngineConfig.crossingTTL {
+                pass.effects.append(.log(intent.droppedLog(reason: "crossing-expired")))
                 group.focus = previous.map(FocusState.resolved) ?? .none
             }
         }
@@ -767,6 +800,10 @@ extension World {
             let appWindows = windows.filter { $0.pid == pid }
             if let tile = intent.tile, appWindows.contains(where: { $0.id == tile }) { restore = tile; source = .appActivation }
             else if let tile = appWindows.map(\.id).ordered().first { restore = tile; source = .appActivation }
+        }
+        if case .crossing(let intent, _, _) = departing.focus, source != .appActivation {
+            let fulfilled = intent.tile.map { $0 == restore } ?? (restore.flatMap { group.windows[$0]?.pid } == intent.pid)
+            if !fulfilled { pass.effects.append(.log(intent.droppedLog(reason: "crossing-not-in-census"))) }
         }
         // One display takes OS focus: the one the Dock click crossed to, else the one that had it. The rest restore
         // at their old decision time, so they neither take the commands nor hold off a focus report.

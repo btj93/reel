@@ -448,11 +448,14 @@ public final class Observer: CensusObserver {
     /// A Dock click or Cmd+Tab. The app is named at once, with the Space it was activated on, so a Space change that
     /// follows cannot commit before `reduce` hears of it; the app thread then names the window.
     private func activated(_ pid: Int32) {
-        guard let worker = workers[pid] else { return }
-        let space = SpaceObserver.observedSpace()
-        if !paused(), let stamp = clock.current {
-            emit(.focus(FocusIntent(tile: nil, pid: pid, source: .appActivation, observedSpace: space)), stamp)
+        guard let worker = workers[pid] else {
+            return log(FocusIntent(tile: nil, pid: pid, source: .appActivation).droppedLog(reason: "untracked-app"))
         }
+        let space = SpaceObserver.observedSpace()
+        let intent = FocusIntent(tile: nil, pid: pid, source: .appActivation, observedSpace: space)
+        if paused() { log(intent.droppedLog(reason: "paused")) }
+        else if let stamp = clock.current { emit(.focus(intent), stamp) }
+        else { log(intent.droppedLog(reason: "missing-scope")) }
         worker.reportFocus(activation: true, space: space)
     }
 
@@ -545,9 +548,10 @@ public final class Observer: CensusObserver {
             guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
         case .focused(let pid, let id, let activation, let space):
-            guard !paused() else { return }
-            emitObserved(.focus(FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus,
-                                            observedSpace: space)))
+            let intent = FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus, observedSpace: space)
+            guard !paused() else { return log(intent.droppedLog(reason: "paused")) }
+            guard let stamp else { return log(intent.droppedLog(reason: "missing-scope")) }
+            emit(.focus(intent), stamp)
         case .wrote(let tile, let revision, let frame, let landed, let result, let scope):
             executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
             emit(.frameCompleted(tile: tile, revision: revision, result: result), Stamp(scope))

@@ -25,6 +25,10 @@ public struct FocusIntent: Sendable {
         self.source = source
         self.observedSpace = observedSpace
     }
+
+    public func droppedLog(reason: String) -> String {
+        "focus dropped source=\(source.rawValue) tile=\(tile.map { String($0.rawValue) } ?? "nil") pid=\(pid.map { String($0) } ?? "nil") reason=\(reason)"
+    }
 }
 
 public struct FocusDecision: Sendable {

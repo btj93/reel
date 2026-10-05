@@ -134,7 +134,10 @@ public final class Loop {
     @discardableResult
     public func send(_ kind: Event.Kind, group: UInt32? = nil, stamp: Stamp? = nil) -> [Effect] {
         guard !quitting, let id = group ?? world.route(kind),
-              let scope = stamp.map({ world.scope(for: id, stamp: $0) }) ?? world.scope(for: id) else { return [] }
+              let scope = stamp.map({ world.scope(for: id, stamp: $0) }) ?? world.scope(for: id) else {
+            if case .focus(let intent) = kind { logLine(intent.droppedLog(reason: quitting ? "quitting" : "missing-group")) }
+            return []
+        }
         if case .windowAdded(let window) = kind {
             let observed = reads.space(id, !world.topology.separateSpaces)?.key
             guard censusAdoption(reads.memberships(window.id.rawValue), observed: observed, settled: world.groups[id]?.space) else {
