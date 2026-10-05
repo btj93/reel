@@ -54,11 +54,15 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
         super.init(element: AXUIElementCreateApplication(pid), windowID: windowID, pid: pid)
     }
 
-    override func getFrame() -> AXResult<CGRect> { .success(currentFrame) }
+    override func getFrame() -> AXResult<CGRect> {
+        failsFrameRead ? .failure(.transientFailure(.failure)) : .success(currentFrame)
+    }
 
     var frameWriteCount = 0
     var positionWriteCount = 0
     var shortNextFrame: CGSize?
+    var positionOffset: CGFloat = 0
+    var failsFrameRead = false
 
     override func setFrame(_ frame: CGRect) -> AXResult<Void> {
         frameWriteCount += 1
@@ -73,7 +77,9 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
     override func setPosition(_ point: CGPoint) -> AXResult<Void> {
         positionWriteCount += 1
         if resistsOffscreen { return .failure(.transientFailure(.failure)) }
-        return apply(CGRect(origin: point, size: currentFrame.size))
+        let result = apply(CGRect(origin: point, size: currentFrame.size))
+        if case .success = result { currentFrame.origin.x += positionOffset }
+        return result
     }
 
     override func setSize(_ size: CGSize) -> AXResult<Void> {

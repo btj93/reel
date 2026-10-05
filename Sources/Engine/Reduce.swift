@@ -934,8 +934,12 @@ extension World {
     }
 
     private mutating func write(_ writes: [(tile: TileID, pid: Int32, frame: AXRect)], group id: UInt32, _ pass: inout Pass) {
-        guard let scope = scope(for: id) else { return }
-        for (tile, pid, frame) in writes { write(tile, pid: pid, frame: frame, scope: scope, purpose: .release, &pass) }
+        guard let scope = scope(for: id), let display = topology.group(id: id) else { return }
+        for (tile, pid, frame) in writes {
+            let point = CGPoint(x: frame.rect.midX, y: frame.rect.midY)
+            let area = display.displays.min { $0.distance(to: point) < $1.distance(to: point) }!.area
+            write(tile, pid: pid, frame: frame, scope: scope, purpose: .release(AXRect(area)), &pass)
+        }
     }
 
     /// Release brings clipped tiles fully inside their display, cascaded so none hides another completely. Columns

@@ -44,15 +44,43 @@ func runRuntimeWriteTests() {
         _ = reduce(&world, Event(scope: world.scope(for: 1)!, kind: .spaceChanged(key: .skylight(4), epoch: 1, windows: windows)), now: 1)
         let effects = reduce(&world, Event(scope: world.scope(for: 1)!, kind: .command(.release, .ipc)), now: 2)
         let requests = effects.compactMap { if case .setFrame(let request) = $0 { return request }; return nil }
+        check(!requests.isEmpty, "release emits requests for clipped windows")
         for request in requests {
+            if case .release(let bounds) = request.purpose {
+                assertEq(bounds.rect, area, "the release request carries its owning display's bounds")
+            } else { check(false, "release bounds reach the write path") }
             let w = FakeAXWindow(windowID: request.tile.rawValue, pid: 99001, frame: CGRect(x: -499, y: 30, width: 500, height: 600))
             w.minSize = CGSize(width: 990, height: 800)
             var cache = SizeCache()
             let outcome = cache.write(request, to: w)
-            check(area.contains(w.currentFrame), "risk successful release of clamped window is fully contained")
+            check(outcome.result == .applied && area.contains(w.currentFrame), "successful release of a clamped window is fully contained")
+            assertEq(outcome.landed, w.currentFrame, "release reports the real corrected frame, including its origin")
+            check(w.positionWriteCount <= 1, "release uses at most one position-only correction")
             w.failNextSet = true
             var failedCache = SizeCache()
-            check(failedCache.write(request, to: w).result != .applied, "risk real AX write failure not treated as success")
+            check(failedCache.write(request, to: w).result == .failed, "real AX write failures remain failures")
+            w.timeoutNextSet = true
+            var timedCache = SizeCache()
+            check(timedCache.write(request, to: w).result == .timedOut, "real AX timeouts remain timeouts")
+            w.minSize.width = 1001
+            var impossibleCache = SizeCache()
+            check(impossibleCache.write(request, to: w).result == .failed, "an app wider than its display cannot report successful release")
+            w.minSize.width = 990
+            w.failsFrameRead = true
+            var unreadableCache = SizeCache()
+            check(unreadableCache.write(request, to: w).result == .failed, "unreadable landed frames cannot confirm release")
+            w.failsFrameRead = false
+            if request.frame.rect.minX > 10 {
+                w.resistsOffscreen = true
+                var refusedCache = SizeCache()
+                check(refusedCache.write(request, to: w).result == .failed, "a rejected corrective position remains a failure")
+                w.resistsOffscreen = false
+                w.positionOffset = 50
+                let writesBefore = w.positionWriteCount
+                var shiftedCache = SizeCache()
+                check(shiftedCache.write(request, to: w).result == .failed, "a successful AX call that still leaves clipping is not a successful release")
+                assertEq(w.positionWriteCount - writesBefore, 1, "a refused correction is bounded to one attempt")
+            }
         }
     }
 

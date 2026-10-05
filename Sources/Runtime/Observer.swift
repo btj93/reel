@@ -65,12 +65,37 @@ public struct SizeCache {
     public init() {}
 
     public mutating func write(_ request: FrameRequest, to window: AXWindow) -> (result: FrameResult, landed: CGRect?) {
-        write(request.frame.rect, to: window, animating: request.animating, purpose: request.purpose)
+        switch request.purpose {
+        case .layout: return write(request.frame.rect, to: window, animating: request.animating)
+        case .release(let bounds): return release(request.frame.rect, inside: bounds.rect, to: window)
+        }
+    }
+
+    private mutating func release(_ frame: CGRect, inside bounds: CGRect, to window: AXWindow) -> (result: FrameResult, landed: CGRect?) {
+        let initial = write(frame, to: window)
+        guard initial.result == .applied || initial.result == .sizeUnconfirmed else { return initial }
+        for attempt in 0..<2 {
+            let landed: CGRect
+            switch window.getFrame() {
+            case .success(let actual):
+                guard [actual.minX, actual.minY, actual.width, actual.height].allSatisfy(\.isFinite) else { return (.failed, actual) }
+                landed = actual
+            case .failure(let error): return (error.isTimeout ? .timedOut : .failed, nil)
+            }
+            guard !bounds.contains(landed) else { return (.applied, landed) }
+            guard attempt == 0, landed.width <= bounds.width, landed.height <= bounds.height else { return (.failed, landed) }
+            let origin = CGPoint(x: min(max(landed.minX, bounds.minX), bounds.maxX - landed.width),
+                                 y: min(max(landed.minY, bounds.minY), bounds.maxY - landed.height))
+            if case .failure(let error) = window.setPosition(origin) {
+                return (error.isTimeout ? .timedOut : .failed, landed)
+            }
+        }
+        return (.failed, nil)
     }
 
     /// Write `frame` and return the result with the frame the app kept, when known. Only the read-back's size is
     /// taken: an app clamps sizes, and a different origin is more likely the user dragging mid-write.
-    public mutating func write(_ frame: CGRect, to window: AXWindow, animating: Bool = false, purpose: FrameRequest.Purpose = .layout) -> (result: FrameResult, landed: CGRect?) {
+    public mutating func write(_ frame: CGRect, to window: AXWindow, animating: Bool = false) -> (result: FrameResult, landed: CGRect?) {
         let id = window.windowID
         let previous = sizes[id].flatMap { $0.asked == frame.size ? $0 : nil }
         let actual = !animating && previous != nil ? (try? window.getFrame().get())?.size : nil
@@ -96,7 +121,7 @@ public struct SizeCache {
                 sizes[id] = Size(asked: frame.size, kept: size, lastRefused: refused, retryOrigin: frame.origin,
                                  refusals: refused == nil ? 0 : refusals)
             }
-            let confirm = purpose == .layout && !animating && kept == nil && (sizes[id]?.refusals ?? 0) < 3
+            let confirm = !animating && kept == nil && (sizes[id]?.refusals ?? 0) < 3
             runtimeTrace("size cache: tile=\(id) landed=\(String(describing: landed?.size)) confirm=\(confirm)")
             return (confirm ? .sizeUnconfirmed : .applied, landed)
         case .failure(let error):

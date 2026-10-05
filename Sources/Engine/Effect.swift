@@ -7,7 +7,7 @@ public struct TimerToken: Hashable, Comparable, Sendable {
 }
 
 public struct FrameRequest: Equatable, Sendable {
-    public enum Purpose: Sendable { case layout, release }
+    public enum Purpose: Equatable, Sendable { case layout, release(AXRect) }
 
     public let tile: TileID
     public let pid: Int32
