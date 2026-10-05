@@ -245,7 +245,9 @@ public final class Loop {
             guard let space = SpaceObserver.space(display: id, shared: shared) else { continue }
             if space.isUserSpace { reads[id] = space.key } else { system.insert(id) }
         }
-        for id in world.groupsOnAnotherSpace(reads) where !system.contains(id) {
+        let changing = world.groupsOnAnotherSpace(reads)
+        logLine("space: routing reads=\(reads) changing=\(changing) system=\(system.sorted()) pointer=\(String(describing: world.pointer?.token.rawValue))")
+        for id in changing where !system.contains(id) {
             send(.spaceWillChange, group: id)
             census(group: id, after: delay)
         }

@@ -229,6 +229,7 @@ sec_canary() {
     section "adoption canary — Reel adopts host windows (Accessibility oracle)"
     ensure_clean
     host_create MAIN 2 >/dev/null
+    activate_process "${HOST_PID[MAIN]}"
     if ! poll_col_count 5 2 "canary: 2 windows adopted within 5s"; then
         cat >&2 <<EOF
 ${_c_red}${_c_bld}Canary failed: the test Reel did not adopt the host windows.${_c_reset}

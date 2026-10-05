@@ -39,11 +39,19 @@ OUT="${LANE_OUT:-$NS/shots}"
 TEST_REEL_PID=""
 
 cleanup() {
+    local status=${1:-$?}
     quit_reel
     host_quit MAIN
-    if [ "${SMOKE_KEEP_NS:-0}" = 1 ]; then warn "kept $NS"; else rm -rf "$NS"; fi
+    if [ "$status" != 0 ] || [ "${SMOKE_KEEP_NS:-0}" = 1 ]; then
+        mkdir -p "$OUT"
+        [ ! -f "$REEL_LOG" ] || cp "$REEL_LOG" "$OUT/reel.log" || warn "could not copy $REEL_LOG to $OUT"
+        warn "kept $NS"
+    else
+        rm -rf "$NS"
+    fi
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup $?' EXIT
+trap 'exit 130' INT TERM
 
 launch_reel() {  # <binary>
     BIN_REEL=$1
@@ -309,15 +317,20 @@ switch_space() {  # <key code>: 124 is Ctrl-Right, 123 is Ctrl-Left
 lane10() {
     section "lane 10: a Space switch mid-drag hides the overlay and keeps the order"
     fresh 3 "$BIN_HEAD"
-    local before x y session
+    local before x y session space_before space_after
     before=$(col_window_ids)
+    space_before=$(reel_msg get-layout | jq -c "$AG | .space")
     focus_column 1
     x=$(title_x 1); y=$(title_y 1)
     on_display "$x" "$y"
     post "lane10-drag" "$(drag_start_script "$x" "$y")"
     log_wait 3 'reorder: ready '
     session=$(printf '%s' "$LOG_LINE" | sed -E 's/.*session=([0-9]+).*/\1/')
+    info "lane10: Ctrl-Right requested with button held session=$session space=$space_before"
     switch_space 124
+    space_after=$(reel_msg get-layout | jq -c "$AG | .space")
+    info "lane10: after Ctrl-Right engineSpace=$space_after; runtime Space notifications follow"
+    grep 'space:' "$REEL_LOG" >&2 || true
     log_wait 3 "reorder: hide session=$session\$"
     post "lane10-release" "$(jq -nc --argjson x $((x + 40)) --argjson y "$y" '[{mouse: "up", x: $x, y: $y, modifier: "fn"}]')"
     switch_space 123
