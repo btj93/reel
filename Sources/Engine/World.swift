@@ -292,6 +292,7 @@ public struct World: Sendable {
     /// and momentum are swallowed, whatever ended the swipe, until its momentum ends, a new gesture begins, a pause, or
     /// it goes quiet.
     public internal(set) var gestureTail: Double?
+    var parkedOwners: [TileID: UInt32] = [:]
     public internal(set) var frames: [TileID: FrameRequest] = [:]
     public internal(set) var appliedFrames: [TileID: FrameRequest] = [:]
     public internal(set) var timers: [TimerToken: ScheduledWork] = [:]
@@ -368,7 +369,9 @@ public struct World: Sendable {
     }
 
     private func home(_ window: ObservedWindow) -> UInt32? {
-        window.initialFrame.flatMap { topology.nearestGroup(to: CGPoint(x: $0.rect.midX, y: $0.rect.midY))?.id }
+        if let hidden = groups.keys.sorted().first(where: { groups[$0]?.hidden[window.id] != nil }) { return hidden }
+        if let group = parkedOwners[window.id], groups[group] != nil { return group }
+        return window.initialFrame.flatMap { topology.nearestGroup(to: CGPoint(x: $0.rect.midX, y: $0.rect.midY))?.id }
     }
 
     /// The groups a Space notification concerns: each whose display now shows another Space than the one it settled

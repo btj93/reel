@@ -131,6 +131,7 @@ extension World {
     /// its own columns only takes the new area. With no display left, every strip is saved until one returns.
     mutating func onTopology(_ next: Topology, _ pass: inout Pass) {
         guard next.revision > topology.revision, next.isValid else { return }
+        parkedOwners = [:]
         cancelPointer(&pass)
         for id in groups.keys.sorted() { cancelTimers(group: id, &pass) }
         for tile in frames.keys.ordered() { invalidate(tile, &pass) }

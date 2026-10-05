@@ -64,9 +64,13 @@ public struct SizeCache {
 
     public init() {}
 
+    public mutating func write(_ request: FrameRequest, to window: AXWindow) -> (result: FrameResult, landed: CGRect?) {
+        write(request.frame.rect, to: window, animating: request.animating, purpose: request.purpose)
+    }
+
     /// Write `frame` and return the result with the frame the app kept, when known. Only the read-back's size is
     /// taken: an app clamps sizes, and a different origin is more likely the user dragging mid-write.
-    public mutating func write(_ frame: CGRect, to window: AXWindow, animating: Bool = false) -> (result: FrameResult, landed: CGRect?) {
+    public mutating func write(_ frame: CGRect, to window: AXWindow, animating: Bool = false, purpose: FrameRequest.Purpose = .layout) -> (result: FrameResult, landed: CGRect?) {
         let id = window.windowID
         let previous = sizes[id].flatMap { $0.asked == frame.size ? $0 : nil }
         let actual = !animating && previous != nil ? (try? window.getFrame().get())?.size : nil
@@ -92,7 +96,7 @@ public struct SizeCache {
                 sizes[id] = Size(asked: frame.size, kept: size, lastRefused: refused, retryOrigin: frame.origin,
                                  refusals: refused == nil ? 0 : refusals)
             }
-            let confirm = !animating && kept == nil && (sizes[id]?.refusals ?? 0) < 3
+            let confirm = purpose == .layout && !animating && kept == nil && (sizes[id]?.refusals ?? 0) < 3
             runtimeTrace("size cache: tile=\(id) landed=\(String(describing: landed?.size)) confirm=\(confirm)")
             return (confirm ? .sizeUnconfirmed : .applied, landed)
         case .failure(let error):
@@ -126,7 +130,7 @@ final class AppWorker: @unchecked Sendable {
     private var windows: [CGWindowID: AXWindow] = [:]
     private var sizes = SizeCache()
     private let lock = NSLock()
-    private var queuedFrames: [TileID: (revision: UInt64, frame: CGRect, scope: EventScope, animating: Bool)] = [:]
+    private var queuedFrames: [TileID: FrameRequest] = [:]
     private var drainQueued = false
     private var forgetSizesQueued = false
     private var rediscoveryQueued = false
@@ -174,9 +178,9 @@ final class AppWorker: @unchecked Sendable {
     }
 
     /// Coalesced per window: a write still queued when the next one arrives is replaced, never run late.
-    func write(_ tile: TileID, revision: UInt64, frame: CGRect, scope: EventScope, animating: Bool) {
+    func write(_ request: FrameRequest) {
         lock.lock()
-        queuedFrames[tile] = (revision, frame, scope, animating)
+        queuedFrames[request.tile] = request
         let schedule = !drainQueued
         drainQueued = true
         lock.unlock()
@@ -225,11 +229,11 @@ final class AppWorker: @unchecked Sendable {
         for (tile, write) in batch {
             let id = CGWindowID(tile.rawValue)
             guard let window = windows[id] else {
-                post(.wrote(tile, revision: write.revision, frame: write.frame, landed: nil, .failed, scope: write.scope))
+                post(.wrote(tile, revision: write.revision, frame: write.frame.rect, landed: nil, .failed, scope: write.scope))
                 continue
             }
-            let (result, landed) = sizes.write(write.frame, to: window, animating: write.animating)
-            post(.wrote(tile, revision: write.revision, frame: write.frame, landed: landed, result, scope: write.scope))
+            let (result, landed) = sizes.write(write, to: window)
+            post(.wrote(tile, revision: write.revision, frame: write.frame.rect, landed: landed, result, scope: write.scope))
         }
     }
 

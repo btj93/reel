@@ -1,3 +1,4 @@
+import Core
 import CoreGraphics
 import Engine
 import Runtime
@@ -8,6 +9,31 @@ func runRuntimeWriteTests() {
     print()
     print("Runtime frame writes (SizeCache)")
     let tiled = CGRect(x: 100, y: 25, width: 700, height: 850)
+
+    section("release requests accept successful positioning without a delayed layout confirmation")
+    do {
+        let area = CGRect(x: 0, y: 30, width: 1000, height: 800)
+        let display = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 830), area: area)
+        var world = World(topology: Topology(revision: 1, displays: [display], separateSpaces: true, primaryScreenHeight: 830),
+                          config: EngineConfig(animate: false))
+        let windows = (1...5).map { ObservedWindow(id: TileID(UInt32($0)), pid: 99001, bundleID: nil) }
+        let scope = world.scope(for: 1)!
+        _ = reduce(&world, Event(scope: scope, kind: .spaceChanged(key: .skylight(4), epoch: 1, windows: windows)), now: 1)
+        let effects = reduce(&world, Event(scope: world.scope(for: 1)!, kind: .command(.release, .ipc)), now: 2)
+        let requests = effects.compactMap { effect -> FrameRequest? in
+            if case .setFrame(let request) = effect { return request }
+            return nil
+        }
+        check(!requests.isEmpty, "the five-column strip emits release writes")
+        for request in requests {
+            let w = FakeAXWindow(windowID: request.tile.rawValue, pid: 99001, frame: CGRect(x: -499, y: 30, width: 500, height: 600))
+            w.shortNextFrame = CGSize(width: request.frame.rect.width, height: 705)
+            var cache = SizeCache()
+            let outcome = cache.write(request, to: w)
+            check(outcome.result == .applied, "release is applied even when the first size read is short")
+            check(area.contains(w.currentFrame), "the released fake AX window is fully on screen")
+        }
+    }
 
     section("a short startup read is repaired by the next settled write")
     do {

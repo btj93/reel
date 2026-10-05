@@ -33,6 +33,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .windowAdded(let window): world.onWindowAdded(window, group: id, &pass)
     case .windowChanged(let window): world.onWindowChanged(window, &pass)
     case .windowRemoved(let tile):
+        world.parkedOwners[tile] = nil
         world.remove(tile, from: id, &pass)
         pass.persist = true
     case .windowsHidden(let tiles):
@@ -927,24 +928,22 @@ extension World {
 
     private mutating func write(_ writes: [(tile: TileID, pid: Int32, frame: AXRect)], group id: UInt32, _ pass: inout Pass) {
         guard let scope = scope(for: id) else { return }
-        for (tile, pid, frame) in writes { write(tile, pid: pid, frame: frame, scope: scope, &pass) }
+        for (tile, pid, frame) in writes { write(tile, pid: pid, frame: frame, scope: scope, purpose: .release, &pass) }
     }
 
-    /// Where quitting leaves each tile: off-screen ones come back on screen at their own size, cascaded so none hides
-    /// another completely, and columns the raise style lowered, or whose last write failed, go to their full frame.
-    /// The cascade starts one step further for each hidden window, so successive hides do not stack exactly. Each
-    /// lands on the display of the group nearest where it was parked.
+    /// Release brings clipped tiles fully inside their display, cascaded so none hides another completely. Columns
+    /// the raise style lowered, or whose last write failed, go to their full frame. Hidden windows advance the cascade.
     private func releaseFrames(group id: UInt32, at time: Double) -> [(tile: TileID, pid: Int32, frame: AXRect)] {
         guard let group = groups[id], let display = topology.group(id: id) else { return [] }
         var step = 30 * Double(group.hidden.count)
         return computeTargetFrames(strip: group.strip, time: time).compactMap { target in
             guard let pid = group.windows[target.tileID]?.pid else { return nil }
             let frame = axRect(ViewportRect(target.frame), on: display)
-            guard target.isOffScreen else {
+            let area = display.displays.min { abs($0.area.midX - frame.rect.midX) < abs($1.area.midX - frame.rect.midX) }!.area
+            guard !area.contains(frame.rect) else {
                 return config.raiseHeight > 0 || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
             }
-            let size = target.frame.size
-            let area = display.displays.min { abs($0.area.midX - frame.rect.midX) < abs($1.area.midX - frame.rect.midX) }!.area
+            let size = CGSize(width: min(target.frame.width, area.width), height: min(target.frame.height, area.height))
             defer { step += 30 }
             return (target.tileID, pid, AXRect(CGRect(x: area.minX + step.truncatingRemainder(dividingBy: max(1, area.width - size.width)),
                                                       y: area.minY + step.truncatingRemainder(dividingBy: max(1, area.height - size.height)),
@@ -954,12 +953,12 @@ extension World {
 
     /// One frame write. A non-finite frame never leaves the engine.
     @discardableResult
-    private mutating func write(_ tile: TileID, pid: Int32, frame: AXRect, scope: EventScope, animating: Bool = false, _ pass: inout Pass) -> FrameRequest? {
+    private mutating func write(_ tile: TileID, pid: Int32, frame: AXRect, scope: EventScope, animating: Bool = false, purpose: FrameRequest.Purpose = .layout, _ pass: inout Pass) -> FrameRequest? {
         guard frame.rect.isFinite else {
             pass.effects.append(.log("invalid layout rejected"))
             return nil
         }
-        let request = FrameRequest(tile: tile, pid: pid, frame: frame, revision: nextRevision(), scope: scope, animating: animating)
+        let request = FrameRequest(tile: tile, pid: pid, frame: frame, revision: nextRevision(), scope: scope, animating: animating, purpose: purpose)
         pass.effects.append(.setFrame(request))
         return request
     }
@@ -984,6 +983,7 @@ extension World {
                 groups[id] = group
             }
             for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) {
+                parkedOwners[target.tileID] = target.isOffScreen ? id : nil
                 let frame = axRect(ViewportRect(target.frame), on: display)
                 guard let pid = group.windows[target.tileID]?.pid else { continue }
                 if let existing = frames[target.tileID], existing.frame == frame, existing.scope == scope,
