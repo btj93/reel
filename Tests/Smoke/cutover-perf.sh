@@ -49,6 +49,7 @@ fresh() {
     TEST_REEL_PID=$!
     poll_until 10 "REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-status >/dev/null" || fail "runtime did not start"
     activate_process "${HOST_PID[MAIN]}"
+    poll_col_count 10 4
     waitForSettle 10
     warm_focus_walk
 }

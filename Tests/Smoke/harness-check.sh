@@ -126,6 +126,72 @@ printf 'PASS: activation targets the host process, not the previously focused di
 )
 printf 'PASS: warm-up visits every column and returns to the left before sampling\n'
 (
+    source "$SCRIPT_DIR/cutover-perf.sh"
+    trap - EXIT INT TERM
+    NS="$TMP/startup" SOCK="$TMP/startup/socket" CFG="$TMP/startup/config" STATE="$TMP/startup/state"
+    REEL_LOG="$TMP/startup/reel.log" BIN_MSG="$TMP/startup/msg-stub"
+    mkdir -p "$CFG" "$STATE"
+    write_fixtures
+    jq '.groups[0].currentColumns += [.groups[0].currentColumns[] | .windowID += 2 | .index += 2]' \
+        "$NS/fixture-layout.json" > "$NS/four-columns.json"
+    export HARNESS_STARTUP="$NS"
+    cat > "$BIN_MSG" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+case "$1" in
+    get-status) echo '{}' ;;
+    get-layout)
+        n=$(cat "$HARNESS_STARTUP/reads" 2>/dev/null || echo 0)
+        n=$((n + 1)); echo "$n" > "$HARNESS_STARTUP/reads"
+        count=0
+        if [ "$n" -ge 16 ]; then count=4
+        elif [ "$n" -ge 11 ]; then count=3
+        elif [ "$n" -ge 6 ]; then count=1; fi
+        echo "$count" > "$HARNESS_STARTUP/count"
+        jq --argjson count "$count" '.groups[0].currentColumns |= .[:$count]' "$HARNESS_STARTUP/four-columns.json"
+        ;;
+    focus-*) echo "$1" >> "$HARNESS_STARTUP/focus" ;;
+esac
+STUB
+    printf '#!/bin/sh\nexit 0\n' > "$NS/runtime-stub"
+    chmod +x "$BIN_MSG" "$NS/runtime-stub"
+    DRY=0
+    stop_reel() { :; }
+    host_quit() { :; }
+    host_start() { HOST_PID[MAIN]=12345; }
+    host_create() { [ "$2" = 4 ]; }
+    write_test_config() { :; }
+    activate_process() { echo "$1" >> "$NS/activated"; }
+    sleep() { :; }
+    fresh head "$NS/runtime-stub"
+    wait "$TEST_REEL_PID"
+    [ "$(cat "$NS/count")" = 4 ] || { echo 'FAIL: fresh returned before all four windows were discovered'; exit 1; }
+    [ "$(cat "$NS/activated" 2>/dev/null)" = 12345 ] || { echo 'FAIL: fresh did not activate the host'; exit 1; }
+    expected=$(printf 'focus-left\nfocus-left\nfocus-left\nfocus-left\nfocus-right\nfocus-right\nfocus-right\nfocus-left\nfocus-left\nfocus-left')
+    [ "$(cat "$NS/focus" 2>/dev/null)" = "$expected" ] || { echo 'FAIL: fresh did not warm every discovered column'; exit 1; }
+)
+printf 'PASS: fresh waits for delayed discovery, activates the host and warms all four columns\n'
+(
+    source "$SCRIPT_DIR/cutover-perf.sh"
+    trap - EXIT INT TERM
+    NS="$TMP/physical" SOCK="$TMP/physical/socket" CFG="$TMP/physical/config" STATE="$TMP/physical/state"
+    REEL_LOG="$TMP/physical/reel.log" BIN_MSG=/usr/bin/false
+    mkdir -p "$NS"
+    write_fixtures
+    DRY=0
+    reel_msg() { jq '.groups[0].currentColumns[1].isOffScreen = true' "$NS/fixture-layout.json"; }
+    host_report() { jq '.windows[1].frameCG.h = 100' "$NS/fixture-report.json"; }
+    poll_until() { eval "$2"; }
+    physical_settle
+    for dimension in x y w; do
+        host_report() { jq --arg dimension "$dimension" '.windows[0].frameCG[$dimension] += 10' "$NS/fixture-report.json"; }
+        if (assertFramesAgree MAIN 2 visible) >/dev/null 2>&1; then
+            echo "FAIL: visible frame check ignored $dimension mismatch"; exit 1
+        fi
+    done
+)
+printf 'PASS: physical_settle uses visible mode and checks x, y and width independently\n'
+(
     source "$SCRIPT_DIR/space-perf.sh"
     trap - EXIT INT TERM
     DRY=0 NS="$TMP/preflight" OUT="$TMP/preflight-evidence" REEL_LOG="$TMP/preflight/reel.log"
