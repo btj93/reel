@@ -257,15 +257,19 @@ pointer_switch_probe() {
         switch_space 124
         [ "$(cat "$NS/space")" = 5 ] || { echo 'FAIL: returned without a registered Space change'; exit 1; }
         [ "$(cat "$NS/reads")" -ge 2 ] || { echo 'FAIL: switch did not verify head identity'; exit 1; }
-        if [ "$mode" = immediate ]; then [ "$(cat "$NS/keys")" = 1 ]; else [ "$(cat "$NS/keys")" = 2 ]; fi
+        [ "$(cat "$NS/keys")" = 1 ]
     )
 }
 pointer_switch_probe immediate
-pointer_switch_probe retry
+# A key that lands only on a resend must fail: the helper never sends a second key, so it cannot switch twice.
+if pointer_switch_probe retry > "$TMP/retry-switch.log" 2>&1; then
+    echo 'FAIL: a Space switch passed on a second key'; exit 1
+fi
+[ "$(cat "$TMP/switch-retry/keys")" = 1 ] || { echo 'FAIL: switch_space sent more than one key'; exit 1; }
 if pointer_switch_probe ignored > "$TMP/ignored-switch.log" 2>&1; then
     echo 'FAIL: ignored Space switches passed'; exit 1
 fi
-[ "$(cat "$TMP/switch-ignored/keys")" = 2 ]
+[ "$(cat "$TMP/switch-ignored/keys")" = 1 ]
 grep -q 'Space switch not registered' "$TMP/ignored-switch.log"
 if pointer_switch_probe unavailable > "$TMP/unavailable-head.log" 2>&1; then
     echo 'FAIL: unavailable head passed'; exit 1
@@ -273,4 +277,4 @@ fi
 [ "$(cat "$TMP/switch-unavailable/keys")" = 0 ]
 grep -q 'head Space identity unavailable' "$TMP/unavailable-head.log"
 if grep -q 'Space switch not registered' "$TMP/unavailable-head.log"; then echo 'FAIL: head failure was labeled an ignored key'; exit 1; fi
-printf 'PASS: pointer Space switching verifies identity, retries once and distinguishes unregistered keys\n'
+printf 'PASS: pointer Space switching verifies identity, sends one key and distinguishes unregistered keys\n'

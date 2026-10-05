@@ -316,15 +316,13 @@ space_changed() {
 
 switch_space() {  # <key code>: 124 is Ctrl-Right, 123 is Ctrl-Left
     if [ "$DRY" = 1 ]; then dry_echo "osascript key code $1 using control down"; return 0; fi
-    local before attempt
+    # One key only: a resend after a slow head update would switch twice, so a miss fails as a harness problem.
+    local before
     before=$(reel_msg get-layout | jq -ce "$AG | (.space // .currentSpaceFingerprint)") || fail "head Space identity unavailable before switch"
-    for attempt in 1 2; do
-        osascript -e "tell application \"System Events\" to key code $1 using control down"
-        if poll_until 3 "space_changed '$before'"; then return 0; fi
-        [ "$attempt" = 2 ] || warn "Space key $1 not registered; retrying once"
-    done
+    osascript -e "tell application \"System Events\" to key code $1 using control down"
+    poll_until 10 "space_changed '$before'" && return 0
     reel_msg get-layout | jq -ce "$AG | (.space // .currentSpaceFingerprint)" >/dev/null || fail "head Space identity unavailable after switch"
-    fail "Space switch not registered after key $1 and one retry (head still reports $before)"
+    fail "Space switch not registered within 10 s of key $1 (head still reports $before; harness or macOS, not a head defect by itself)"
 }
 
 lane10() {
