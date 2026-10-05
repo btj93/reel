@@ -125,3 +125,14 @@ printf 'PASS: activation targets the host process, not the previously focused di
     [ "$(cat "$TMP/warm-walk")" = "$expected" ] || { echo 'FAIL: warm-up skipped a column'; exit 1; }
 )
 printf 'PASS: warm-up visits every column and returns to the left before sampling\n'
+(
+    source "$SCRIPT_DIR/space-perf.sh"
+    trap - EXIT INT TERM
+    DRY=0 NS="$TMP/preflight" OUT="$TMP/preflight-evidence" REEL_LOG="$TMP/preflight/reel.log"
+    SMOKE_KEEP_NS=1
+    unset 'HOST_OUT[MAIN]'
+    quit_reel() { :; }
+    host_quit() { :; }
+    cleanup
+)
+printf 'PASS: evidence cleanup tolerates a preflight failure before host launch\n'

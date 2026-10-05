@@ -47,7 +47,7 @@ cleanup() {
     if [ "$OUT" != "$NS" ] && [ "$DRY" != 1 ]; then
         mkdir -p "$OUT"
         cp "$REEL_LOG" "$OUT/reel.log" 2>/dev/null || true
-        cp "${HOST_OUT[MAIN]}" "$OUT/host.log" 2>/dev/null || true
+        cp "${HOST_OUT[MAIN]:-}" "$OUT/host.log" 2>/dev/null || true
     fi
     host_quit MAIN
     if [ "${SMOKE_KEEP_NS:-0}" = 1 ]; then warn "kept $NS"; else rm -rf "$NS"; fi

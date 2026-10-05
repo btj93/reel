@@ -1627,7 +1627,14 @@ struct FuzzStream {
             h.send(.windowAdded(window(nextID, bundle: rng.next(2) == 0 ? nil : "fuzz", floating: rng.next(4) == 0)), group: id)
         case 10:
             let request = h.world.frames.values.sorted { $0.tile.rawValue < $1.tile.rawValue }.first { $0.scope.group == id }
-            if let request { h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: rng.next(2) == 0 ? .applied : .timedOut), group: id) }
+            if let request {
+                let result: FrameResult = switch rng.next(3) {
+                case 0: .applied
+                case 1: .timedOut
+                default: .sizeUnconfirmed
+                }
+                h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: result), group: id)
+            }
             else { h.send(.tick, group: id) }
         case 11:
             if let timer = h.world.timers.min(by: { $0.key < $1.key }) {
