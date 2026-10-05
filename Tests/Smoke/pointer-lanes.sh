@@ -308,10 +308,23 @@ lane9() {
     ok "the native resize changed the width from $before to $after"
 }
 
+space_changed() {
+    local current
+    current=$(reel_msg get-layout | jq -ce "$AG | (.space // .currentSpaceFingerprint)") || return 1
+    [ "$current" != "$1" ]
+}
+
 switch_space() {  # <key code>: 124 is Ctrl-Right, 123 is Ctrl-Left
     if [ "$DRY" = 1 ]; then dry_echo "osascript key code $1 using control down"; return 0; fi
-    osascript -e "tell application \"System Events\" to key code $1 using control down"
-    sleep 1.5
+    local before attempt
+    before=$(reel_msg get-layout | jq -ce "$AG | (.space // .currentSpaceFingerprint)") || fail "head Space identity unavailable before switch"
+    for attempt in 1 2; do
+        osascript -e "tell application \"System Events\" to key code $1 using control down"
+        if poll_until 3 "space_changed '$before'"; then return 0; fi
+        [ "$attempt" = 2 ] || warn "Space key $1 not registered; retrying once"
+    done
+    reel_msg get-layout | jq -ce "$AG | (.space // .currentSpaceFingerprint)" >/dev/null || fail "head Space identity unavailable after switch"
+    fail "Space switch not registered after key $1 and one retry (head still reports $before)"
 }
 
 lane10() {
