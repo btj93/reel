@@ -2222,6 +2222,47 @@ final class CensusFixture: CensusObserver {
 }
 
 @MainActor func runtimeTests() {
+    section("stacked displays retain saved ownership despite parked census frames") {
+        let builtIn = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+                              area: CGRect(x: 0, y: 39, width: 1800, height: 1032))
+        let external = Display(id: 3, frame: CGRect(x: -379, y: -1440, width: 2560, height: 1440),
+                               area: CGRect(x: -379, y: -1440, width: 2560, height: 1440))
+        var h = Harness(displays: [builtIn, external], separateSpaces: false)
+        let original = (1...5).map { window($0) }
+        h.census(4, original)
+        h.census(4, [], group: 3)
+        let positions = h.world.frames.mapValues { $0.frame.rect }
+        h.send(.spaceWillChange)
+        h.send(.spaceWillChange, group: 3)
+        h.census(5, [])
+        h.census(5, [], group: 3)
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(5, [])
+        h.census(5, [], group: 3)
+        check(h.world.groups[1]!.windows.isEmpty, "the destination commits an empty built-in strip")
+        let parked = original.map { item in
+            ObservedWindow(id: item.id, pid: item.pid, bundleID: item.bundleID, initialFrame: AXRect(CGRect(x: positions[item.id]!.minX, y: 39, width: 900, height: 705)))
+        }
+        check(parked.allSatisfy { h.world.route(.windowAdded($0)) == 1 }, "rediscovery belongs to the group that parked the window")
+        check(h.world.routed(parked, to: 3).isEmpty, "the external census excludes the built-in parked windows")
+        let returning = h.world.routed(parked, to: 1)
+        check(returning.map(\.id) == original.map(\.id), "the built-in census retains all five windows")
+        h.census(4, returning)
+        h.census(4, h.world.routed(parked, to: 3), group: 3)
+        check(h.world.groups[1]!.strip.columns.flatMap(\.tiles) == original.map(\.id), "the round trip preserves built-in order")
+        check(h.world.groups[3]!.windows.isEmpty, "the external strip remains empty")
+    }
+    section("release brings partially visible columns fully on screen") {
+        var h = Harness()
+        h.census(4, (1...5).map { window($0) })
+        let area = h.world.topology.groups[0].displays[0].area
+        let outside = Set(h.world.frames.values.filter { !area.contains($0.frame.rect) }.map(\.tile))
+        check(!outside.isEmpty, "the focused five-column strip has clipped columns")
+        h.send(.command(.release, .ipc))
+        let requests = h.requests
+        check(outside.isSubset(of: Set(requests.map(\.tile))), "release writes every fully or partially off-screen tile")
+        check(requests.allSatisfy { area.contains($0.frame.rect) }, "every released tile is fully inside its display")
+    }
     section("Loop census delivery waits for injected discovery before committing a new Space") {
         var h = Harness()
         h.census(4, [window(1)])
@@ -2914,11 +2955,11 @@ final class CensusFixture: CensusObserver {
         var h = Harness()
         h.census(10, (1...6).map { window($0) })
         let area = h.world.topology.groups[0].frame
-        let offScreen = h.world.frames.values.filter { $0.frame.rect.intersection(area).width < 2 }.map(\.tile)
+        let offScreen = h.world.frames.values.filter { !area.contains($0.frame.rect) }.map(\.tile)
         check(!offScreen.isEmpty, "a six-column strip hides some columns")
         h.send(.command(.release, .ipc))
         let released = Dictionary(uniqueKeysWithValues: h.requests.map { ($0.tile, $0.frame.rect) })
-        check(Set(released.keys) == Set(offScreen), "only off-screen windows move")
+        check(Set(released.keys) == Set(offScreen), "only fully or partially off-screen windows move")
         check(released.values.allSatisfy { area.contains($0) }, "each lands fully inside the working area")
         check(Set(released.values.map(\.origin)).count == released.count, "cascaded, so none hides another exactly")
         var changing = Harness()
@@ -3073,7 +3114,11 @@ final class CensusFixture: CensusObserver {
         let released = Dictionary(uniqueKeysWithValues: h.requests.map { ($0.tile, $0.frame.rect) })
         check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minY == raised.minY && released[$0]?.height == raised.height + 20 },
               "every column comes back up at full height")
-        check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minX == before[$0]?.minX }, "in its own column, not cascaded")
+        let area = h.world.topology.groups[0].displays[0].area
+        check([TileID(1), TileID(2)].allSatisfy { tile in
+            guard let frame = released[tile], let original = before[tile] else { return false }
+            return area.contains(frame) && (!area.contains(original) || frame.minX == original.minX)
+        }, "fully visible columns retain their place; clipped columns come fully on screen")
     }
     section("R3 release: a window hidden or minimized while off screen still comes back on screen") {
         var h = Harness()

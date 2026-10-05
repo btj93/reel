@@ -202,3 +202,32 @@ printf 'PASS: physical_settle uses visible mode and checks x, y and width indepe
     cleanup
 )
 printf 'PASS: evidence cleanup tolerates a preflight failure before host launch\n'
+(
+    source <(sed '/^SCRIPT_DIR=/d; /^main "\$@"$/d' "$SCRIPT_DIR/smoke.sh")
+    trap - EXIT INT TERM
+    NS="$TMP/smoke-activation" DRY=0 BIN_MSG=/usr/bin/false
+    mkdir -p "$NS"
+    HOST_PID[MAIN]=12345
+    ensure_clean() { :; }
+    waitForSettle() { :; }
+    assertFramesAgree() { :; }
+    host_create() { [ "$2" = 2 ]; }
+    activate_process() { printf '%s\n' "$1" > "$NS/activated"; }
+    poll_col_count() { [ "$(cat "$NS/activated" 2>/dev/null)" = 12345 ]; }
+    sec_canary
+)
+printf 'PASS: smoke activates its host before inspecting the active display canary\n'
+(
+    source "$SCRIPT_DIR/pointer-lanes.sh"
+    trap - EXIT INT TERM
+    NS="$TMP/failed-pointer" OUT="$TMP/pointer-evidence" REEL_LOG="$TMP/failed-pointer/reel.log"
+    mkdir -p "$NS"
+    printf 'space notification evidence\n' > "$REEL_LOG"
+    SMOKE_KEEP_NS=0
+    quit_reel() { :; }
+    host_quit() { :; }
+    cleanup 1
+    [ -d "$NS" ] || { echo 'FAIL: failed pointer lane deleted its namespace'; exit 1; }
+    cmp "$REEL_LOG" "$OUT/reel.log" || { echo 'FAIL: failed pointer lane did not export the runtime log'; exit 1; }
+)
+printf 'PASS: failed pointer lanes keep their namespace and export the runtime log\n'
