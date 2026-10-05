@@ -35,6 +35,27 @@ func runRuntimeWriteTests() {
         }
     }
 
+    section("release clamped size stays on screen and errors remain errors")
+    do {
+        let area = CGRect(x: 0, y: 30, width: 1000, height: 800)
+        let display = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 830), area: area)
+        var world = World(topology: Topology(revision: 1, displays: [display], separateSpaces: true, primaryScreenHeight: 830), config: EngineConfig(animate: false))
+        let windows = (1...5).map { ObservedWindow(id: TileID(UInt32($0)), pid: 99001, bundleID: nil) }
+        _ = reduce(&world, Event(scope: world.scope(for: 1)!, kind: .spaceChanged(key: .skylight(4), epoch: 1, windows: windows)), now: 1)
+        let effects = reduce(&world, Event(scope: world.scope(for: 1)!, kind: .command(.release, .ipc)), now: 2)
+        let requests = effects.compactMap { if case .setFrame(let request) = $0 { return request }; return nil }
+        for request in requests {
+            let w = FakeAXWindow(windowID: request.tile.rawValue, pid: 99001, frame: CGRect(x: -499, y: 30, width: 500, height: 600))
+            w.minSize = CGSize(width: 990, height: 800)
+            var cache = SizeCache()
+            let outcome = cache.write(request, to: w)
+            check(area.contains(w.currentFrame), "risk successful release of clamped window is fully contained")
+            w.failNextSet = true
+            var failedCache = SizeCache()
+            check(failedCache.write(request, to: w).result != .applied, "risk real AX write failure not treated as success")
+        }
+    }
+
     section("a short startup read is repaired by the next settled write")
     do {
         let w = FakeAXWindow(windowID: 90, pid: 99001, frame: .zero)

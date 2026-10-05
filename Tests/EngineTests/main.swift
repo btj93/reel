@@ -2222,6 +2222,56 @@ final class CensusFixture: CensusObserver {
 }
 
 @MainActor func runtimeTests() {
+    section("R7 parking survives topology and genuine moves override parking") {
+        let builtIn = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+                              area: CGRect(x: 0, y: 39, width: 1800, height: 1032))
+        let external = Display(id: 3, frame: CGRect(x: -379, y: -1440, width: 2560, height: 1440),
+                               area: CGRect(x: -379, y: -1440, width: 2560, height: 1440))
+        var h = Harness(displays: [builtIn, external], separateSpaces: false)
+        let original = (1...5).map { window($0) }
+        h.census(4, original)
+        h.census(4, [], group: 3)
+        let positions = h.world.frames.mapValues { $0.frame.rect }
+        h.send(.spaceWillChange)
+        h.send(.spaceWillChange, group: 3)
+        h.census(5, [])
+        h.census(5, [], group: 3)
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(5, [])
+        h.census(5, [], group: 3)
+        let parked = original.map { item in
+            ObservedWindow(id: item.id, pid: item.pid, bundleID: item.bundleID, initialFrame: AXRect(CGRect(x: positions[item.id]!.minX, y: 39, width: 900, height: 705)))
+        }
+        let lost = parked.filter { h.world.route(.windowAdded($0)) == 1 && topology(2, [builtIn, external], separateSpaces: false).nearestGroup(to: CGPoint(x: $0.initialFrame!.rect.midX, y: $0.initialFrame!.rect.midY))?.id == 3 }
+        check(!lost.isEmpty, "risk fixture includes parked windows nearest external")
+        let moved = lost.map { ObservedWindow(id: $0.id, pid: $0.pid, bundleID: $0.bundleID, initialFrame: AXRect(CGRect(x: 100, y: -1000, width: 900, height: 705))) }
+        check(moved.allSatisfy { h.world.route(.windowAdded($0)) == 3 }, "risk genuine move onto external overrides old parking")
+        var retitled = h
+        retitled.send(.windowChanged(moved[0]))
+        check(retitled.world.route(.windowAdded(lost[0])) == 3, "a genuine observed move revokes affinity even if a later read resembles old parking")
+        var movedHarness = h
+        movedHarness.census(5, movedHarness.world.routed(moved, to: 3), group: 3)
+        movedHarness.advance(EngineConfig.censusSettle + margin)
+        movedHarness.census(5, movedHarness.world.routed(moved, to: 3), group: 3)
+        check(moved.allSatisfy { movedHarness.world.groups[3]!.windows[$0.id] != nil }, "risk destination census actually adopts moved parked tiles")
+        h.send(.topologyChanged(topology(2, [builtIn, external], separateSpaces: false)))
+        check(lost.allSatisfy { h.world.route(.windowAdded($0)) == 1 }, "risk no-op topology revision preserves parked ownership")
+        var unplugged = h
+        let right = Display(id: 5, frame: CGRect(x: 2400, y: 0, width: 1800, height: 1169),
+                            area: CGRect(x: 2400, y: 39, width: 1800, height: 1032))
+        unplugged.send(.topologyChanged(topology(3, [external, right], separateSpaces: false)))
+        check(lost.allSatisfy { unplugged.world.route(.windowAdded($0)) == 3 }, "departed groups remap parking to the surviving display")
+        unplugged.send(.topologyChanged(topology(4, [], separateSpaces: false)), group: 3)
+        unplugged.send(.topologyChanged(topology(5, [builtIn, external], separateSpaces: false)),
+                       scope: EventScope(topologyRevision: 4, group: 0, spaceEpoch: 0))
+        check(lost.allSatisfy { unplugged.world.route(.windowAdded($0)) == 1 }, "physical display identity survives an all-displays-disconnected interval")
+        h.census(4, h.world.routed(parked, to: 3), group: 3)
+        h.census(4, h.world.routed(parked, to: 1))
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(4, h.world.routed(parked, to: 3), group: 3)
+        h.census(4, h.world.routed(parked, to: 1))
+        check(original.allSatisfy { h.world.groups[1]!.windows[$0.id] != nil }, "risk topology round trip retains original built-in membership")
+    }
     section("stacked displays retain saved ownership despite parked census frames") {
         let builtIn = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1800, height: 1169),
                               area: CGRect(x: 0, y: 39, width: 1800, height: 1032))

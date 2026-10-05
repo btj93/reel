@@ -231,3 +231,46 @@ printf 'PASS: smoke activates its host before inspecting the active display cana
     cmp "$REEL_LOG" "$OUT/reel.log" || { echo 'FAIL: failed pointer lane did not export the runtime log'; exit 1; }
 )
 printf 'PASS: failed pointer lanes keep their namespace and export the runtime log\n'
+pointer_switch_probe() {
+    (
+        local mode=$1
+        source "$SCRIPT_DIR/pointer-lanes.sh"
+        trap - EXIT INT TERM
+        NS="$TMP/switch-$mode" DRY=0
+        mkdir -p "$NS"
+        echo 4 > "$NS/space"
+        echo 0 > "$NS/keys"
+        echo 0 > "$NS/reads"
+        sleep() { :; }
+        osascript() {
+            local n; n=$(cat "$NS/keys"); n=$((n+1)); echo "$n" > "$NS/keys"
+            if [ "$mode" = immediate ] || { [ "$mode" = retry ] && [ "$n" = 2 ]; }; then echo 5 > "$NS/space"; fi
+        }
+        reel_msg() {
+            if [ "$1" = get-status ]; then echo '{}'; return; fi
+            [ "$mode" != unavailable ] || return 1
+            local n; n=$(cat "$NS/reads"); echo "$((n+1))" > "$NS/reads"
+            printf '{"activeDisplayID":1,"groups":[{"isActive":true,"space":"sid:%s"}]}\n' "$(cat "$NS/space")"
+        }
+        poll_until() { for _ in 1 2 3; do if eval "$2"; then return 0; fi; done; return 1; }
+        fail() { echo "FAIL: $*" >&2; exit 1; }
+        switch_space 124
+        [ "$(cat "$NS/space")" = 5 ] || { echo 'FAIL: returned without a registered Space change'; exit 1; }
+        [ "$(cat "$NS/reads")" -ge 2 ] || { echo 'FAIL: switch did not verify head identity'; exit 1; }
+        if [ "$mode" = immediate ]; then [ "$(cat "$NS/keys")" = 1 ]; else [ "$(cat "$NS/keys")" = 2 ]; fi
+    )
+}
+pointer_switch_probe immediate
+pointer_switch_probe retry
+if pointer_switch_probe ignored > "$TMP/ignored-switch.log" 2>&1; then
+    echo 'FAIL: ignored Space switches passed'; exit 1
+fi
+[ "$(cat "$TMP/switch-ignored/keys")" = 2 ]
+grep -q 'Space switch not registered' "$TMP/ignored-switch.log"
+if pointer_switch_probe unavailable > "$TMP/unavailable-head.log" 2>&1; then
+    echo 'FAIL: unavailable head passed'; exit 1
+fi
+[ "$(cat "$TMP/switch-unavailable/keys")" = 0 ]
+grep -q 'head Space identity unavailable' "$TMP/unavailable-head.log"
+if grep -q 'Space switch not registered' "$TMP/unavailable-head.log"; then echo 'FAIL: head failure was labeled an ignored key'; exit 1; fi
+printf 'PASS: pointer Space switching verifies identity, retries once and distinguishes unregistered keys\n'
