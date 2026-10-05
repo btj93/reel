@@ -131,16 +131,20 @@ extension World {
     /// its own columns only takes the new area. With no display left, every strip is saved until one returns.
     mutating func onTopology(_ next: Topology, _ pass: inout Pass) {
         guard next.revision > topology.revision, next.isValid else { return }
-        parkedOwners = [:]
         cancelPointer(&pass)
         for id in groups.keys.sorted() { cancelTimers(group: id, &pass) }
         for tile in frames.keys.ordered() { invalidate(tile, &pass) }
         let previous = groups, before = topology
         topology = next
-        func destination(_ display: UInt32) -> UInt32? {
+        func destination(_ display: UInt32, remembered: CGRect? = nil) -> UInt32? {
             if let group = next.group(of: display) { return group.id }
-            let frame = before.displays.first { $0.id == display }?.frame ?? .zero
+            let frame = before.displays.first { $0.id == display }?.frame ?? remembered ?? .zero
             return next.nearestGroup(to: CGPoint(x: frame.midX, y: frame.midY))?.id
+        }
+        for (tile, parked) in parkedOwners {
+            let home = next.group(of: parked.display.id)?.id
+                ?? (next.group(id: parked.group) != nil ? parked.group : destination(parked.display.id, remembered: parked.display.frame))
+            if let home { parkedOwners[tile]!.group = home }
         }
         var arrivals: [UInt32: [Arrival]] = [:]
         for old in before.groups {

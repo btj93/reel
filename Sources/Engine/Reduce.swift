@@ -30,8 +30,12 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .topologyChanged(let topology): world.onTopology(topology, &pass)
     case .configChanged(let config): world.onConfig(config, &pass)
     case .loadSnapshots(let snapshots): world.spaces.disk = snapshots.filter(\.isValid)
-    case .windowAdded(let window): world.onWindowAdded(window, group: id, &pass)
-    case .windowChanged(let window): world.onWindowChanged(window, &pass)
+    case .windowAdded(let window):
+        world.revokeParking(window.id, frame: window.initialFrame)
+        world.onWindowAdded(window, group: id, &pass)
+    case .windowChanged(let window):
+        world.revokeParking(window.id, frame: window.initialFrame)
+        world.onWindowChanged(window, &pass)
     case .windowRemoved(let tile):
         world.parkedOwners[tile] = nil
         world.remove(tile, from: id, &pass)
@@ -39,7 +43,9 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .windowsHidden(let tiles):
         world.hide(tiles, &pass)
         pass.persist = true
-    case .windowMoved(let tile, let frame): world.onWindowMoved(tile, frame: frame, group: id, &pass)
+    case .windowMoved(let tile, let frame):
+        world.revokeParking(tile, frame: frame)
+        world.onWindowMoved(tile, frame: frame, group: id, &pass)
     case .focus(let intent): world.onFocusObserved(intent, group: id, &pass)
     case .command(let command, let source): _ = world.run(command, source: source, group: id, &pass)
     case .ipc(let requestID, let command):
@@ -670,6 +676,7 @@ extension World {
         guard let group = groups[id], !key.isEmpty || (observed.isEmpty && !key.isAuthoritative) else {
             return pass.effects.append(.log("space census without identity ignored"))
         }
+        for window in observed { revokeParking(window.id, frame: window.initialFrame) }
         let mine = Set(routed(observed, to: id).map(\.id))
         let windows = observed.filter { $0.isValid && mine.contains($0.id) }
         for window in observed where !window.isValid || owner(of: window.id).map({ $0 != id }) == true {
@@ -983,8 +990,14 @@ extension World {
                 groups[id] = group
             }
             for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) {
-                parkedOwners[target.tileID] = target.isOffScreen ? id : nil
                 let frame = axRect(ViewportRect(target.frame), on: display)
+                if target.isOffScreen {
+                    let column = group.strip.columnIndex(of: target.tileID)!
+                    let physical = display.displays.first { $0.id == group.strip.regionForColumn(column, at: pass.now).displayID }!
+                    parkedOwners[target.tileID] = ParkedWindow(group: id, display: physical, origin: AXPoint(frame.rect.origin))
+                } else {
+                    parkedOwners[target.tileID] = nil
+                }
                 guard let pid = group.windows[target.tileID]?.pid else { continue }
                 if let existing = frames[target.tileID], existing.frame == frame, existing.scope == scope,
                    existing.animating == group.isAnimating { continue }

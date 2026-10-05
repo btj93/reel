@@ -283,6 +283,18 @@ public struct Stamp: Equatable, Sendable {
     }
 }
 
+struct ParkedWindow: Sendable {
+    var group: UInt32
+    let display: Display
+    let origin: AXPoint
+
+    func matches(_ frame: AXRect?) -> Bool {
+        guard let frame else { return true }
+        return abs(frame.rect.minX - origin.point.x) <= EngineConfig.userResizeSlop
+            && abs(frame.rect.minY - origin.point.y) <= EngineConfig.userResizeSlop
+    }
+}
+
 public struct World: Sendable {
     public internal(set) var topology: Topology
     public internal(set) var groups: [UInt32: GroupState]
@@ -292,7 +304,7 @@ public struct World: Sendable {
     /// and momentum are swallowed, whatever ended the swipe, until its momentum ends, a new gesture begins, a pause, or
     /// it goes quiet.
     public internal(set) var gestureTail: Double?
-    var parkedOwners: [TileID: UInt32] = [:]
+    var parkedOwners: [TileID: ParkedWindow] = [:]
     public internal(set) var frames: [TileID: FrameRequest] = [:]
     public internal(set) var appliedFrames: [TileID: FrameRequest] = [:]
     public internal(set) var timers: [TimerToken: ScheduledWork] = [:]
@@ -368,9 +380,14 @@ public struct World: Sendable {
         return windows.filter { (owner(of: $0.id) ?? home($0) ?? group) == group }
     }
 
+    mutating func revokeParking(_ tile: TileID, frame: AXRect?) {
+        guard let frame, frame.rect.isFinite else { return }
+        if let parked = parkedOwners[tile], !parked.matches(frame) { parkedOwners[tile] = nil }
+    }
+
     private func home(_ window: ObservedWindow) -> UInt32? {
         if let hidden = groups.keys.sorted().first(where: { groups[$0]?.hidden[window.id] != nil }) { return hidden }
-        if let group = parkedOwners[window.id], groups[group] != nil { return group }
+        if let parked = parkedOwners[window.id], groups[parked.group] != nil, parked.matches(window.initialFrame) { return parked.group }
         return window.initialFrame.flatMap { topology.nearestGroup(to: CGPoint(x: $0.rect.midX, y: $0.rect.midY))?.id }
     }
 
