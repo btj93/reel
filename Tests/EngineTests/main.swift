@@ -198,6 +198,75 @@ struct Harness {
 }
 
 @MainActor func replayTests() throws {
+    section("R7 focus: a different app activation within 100 ms brings Fork into the middle snap") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(animate: false, snapPoints: [.middle])))
+        h.census(4, [window(321, app: 9001, bundle: "net.kovidgoyal.kitty"), window(104, app: 1245, bundle: "com.DanPristupov.Fork")])
+        h.send(.command(.focus(TileID(321)), .keyboard))
+        h.send(.command(.moveLeft, .keyboard))
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.focus(FocusIntent(tile: TileID(321), pid: 9001, source: .appActivation)))
+        h.advance(EngineConfig.focusDebounce)
+        check(h.world.groups[1]!.focus.decision?.source == .appActivation && h.active == TileID(321), "kitty activation has committed")
+        let before = h.world.frames[TileID(104)]!.frame.rect
+        check(before.minX < 1000 && before.maxX > 1000, "Fork starts partly off the right edge")
+        h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation)), advance: 0.1)
+        h.advance(EngineConfig.focusDebounce)
+        check(h.active == TileID(104), "different-pid Fork activation is not a stale kitty echo")
+        check(h.world.groups[1]!.focus.decision?.source == .appActivation, "Fork is committed as an activation, not a keyboard focus")
+        check(h.offset == -250, "incremental snap centres Fork at the middle-only snap")
+        check(h.world.frames[TileID(104)]!.frame.rect == CGRect(x: 250, y: 30, width: 500, height: 800), "Fork is fully in view with its centre at x=500")
+    }
+    section("R7 focus: an absent app activation still crosses Spaces after a recent kitty decision") {
+        var h = Harness()
+        h.census(4, [window(321, app: 9001)])
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.focus(FocusIntent(tile: TileID(321), pid: 9001, source: .appActivation)))
+        h.advance(EngineConfig.focusDebounce)
+        h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation, observedSpace: .skylight(4))), advance: 0.1)
+        if case .crossing(let intent, _, _) = h.world.groups[1]!.focus {
+            check(intent.tile == TileID(104) && intent.pid == 1245, "Fork's later activation is held for the destination census")
+        } else { check(false, "the absent Fork activation crosses Spaces") }
+        h.send(.spaceWillChange)
+        h.census(5, [window(104, app: 1245)])
+        check(h.active == TileID(104) && h.world.groups[1]!.focus.decision?.source == .appActivation,
+              "the crossing census commits Fork, not the earlier kitty activation")
+    }
+    section("R7 focus: protected same-app activation and AX echoes still drop with diagnostics") {
+        for source in [FocusSource.appActivation, .axFocus] {
+            var h = Harness()
+            h.census(4, [window(321, app: 9001), window(322, app: 9001), window(104, app: 1245)])
+            h.send(.command(.focus(TileID(321)), .keyboard))
+            let tile = source == .appActivation ? TileID(322) : TileID(104)
+            let pid: Int32 = source == .appActivation ? 9001 : 1245
+            h.send(.focus(FocusIntent(tile: tile, pid: pid, source: source)), advance: 0.1)
+            h.advance(EngineConfig.focusDebounce)
+            check(h.active == TileID(321), "\(source) echo cannot replace keyboard focus")
+            check(h.logged("focus dropped source=\(source.rawValue) tile=\(tile.rawValue) pid=\(pid) reason=debounce"), "\(source) rejection identifies its source, tile, pid and reason")
+        }
+    }
+    section("R7 focus: rejected echoes and missing tiles cannot cancel a pending later app activation") {
+        var h = Harness()
+        h.census(4, [window(321, app: 9001), window(104, app: 1245)])
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.focus(FocusIntent(tile: TileID(321), pid: 9001, source: .appActivation)))
+        h.advance(EngineConfig.focusDebounce)
+        h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation)), advance: 0.1)
+        let pending = h.world.timers.keys
+        check(!pending.isEmpty, "Fork's activation is pending")
+        for intent in [FocusIntent(tile: TileID(321), pid: 9001, source: .appActivation),
+                       FocusIntent(tile: TileID(321), pid: 9001, source: .axFocus),
+                       FocusIntent(tile: nil, pid: 1245, source: .appActivation),
+                       FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation, observedSpace: .skylight(5)),
+                       FocusIntent(tile: TileID(999), pid: 1245, source: .appActivation)] {
+            h.send(.focus(intent), advance: 0.01)
+            check(Set(h.world.timers.keys) == Set(pending), "a rejected report leaves Fork's pending timer intact")
+        }
+        h.send(.focus(FocusIntent(tile: nil, pid: 1245, source: .appActivation)))
+        check(h.logged("focus dropped source=appActivation tile=nil pid=1245 reason=missing-tile"), "a tile-less report is diagnosed without guessing its window")
+        h.advance(EngineConfig.focusDebounce)
+        check(h.active == TileID(104), "the pending Fork activation still commits")
+    }
     section("an unvisited Space starts at its final viewport instead of animating from offset zero") {
         var h = Harness(animate: true)
         h.census(4, [window(1), window(2)])
@@ -291,7 +360,8 @@ struct Harness {
         h.census(20, [window(4)])
         h.send(.timer(deferred), scope: old)
         let staleEffects = h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)), scope: old)
-        check(staleEffects.isEmpty, "old-epoch focus produces no effects")
+        check(staleEffects.count == 1 && h.logged("focus dropped source=axFocus tile=1 pid=nil reason=stale-scope"),
+              "old-epoch focus produces only its diagnostic")
         h.census(10, [window(1), window(2), window(3)])
         check(h.active == TileID(3), "echo did not change saved active column")
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
