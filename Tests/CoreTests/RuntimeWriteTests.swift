@@ -9,6 +9,47 @@ func runRuntimeWriteTests() {
     print("Runtime frame writes (SizeCache)")
     let tiled = CGRect(x: 100, y: 25, width: 700, height: 850)
 
+    section("a short startup read is repaired by the next settled write")
+    do {
+        let w = FakeAXWindow(windowID: 90, pid: 99001, frame: .zero)
+        w.shortNextFrame = CGSize(width: 700, height: 767)
+        var cache = SizeCache()
+        _ = cache.write(tiled, to: w)
+        assertEq(w.currentFrame.height, 767, "the startup short height reproduces")
+        _ = cache.write(tiled, to: w)
+        assertEq(w.currentFrame, tiled, "a settled write resends the refused size")
+        _ = cache.write(tiled.offsetBy(dx: 10, dy: 0), to: w)
+        assertEq(w.frameWriteCount, 2, "a successful retry returns to position-only writes")
+    }
+
+    section("animation never burns the settled resize retry budget")
+    do {
+        let w = FakeAXWindow(windowID: 92, pid: 99001, frame: .zero)
+        w.shortNextFrame = CGSize(width: 700, height: 767)
+        var cache = SizeCache()
+        _ = cache.write(tiled, to: w, animating: true)
+        for x in 0..<100 { _ = cache.write(tiled.offsetBy(dx: Double(x), dy: 0), to: w, animating: true) }
+        assertEq(w.frameWriteCount, 1, "scroll ticks remain position-only")
+        _ = cache.write(tiled, to: w)
+        assertEq(w.currentFrame, tiled, "settle repairs the short startup read after animation")
+        assertEq(w.frameWriteCount, 2, "animation did not exhaust retries")
+    }
+
+    section("a stable clamp stops retrying after three actual size writes")
+    do {
+        let w = FakeAXWindow(windowID: 91, pid: 99001, frame: .zero)
+        w.minSize = CGSize(width: 900, height: 0)
+        var cache = SizeCache()
+        for _ in 0..<20 { _ = cache.write(tiled, to: w) }
+        assertEq(w.frameWriteCount, 3, "only three full writes for an identical refused size")
+        assertEq(w.positionWriteCount, 17, "subsequent settles keep the cheap position path")
+        _ = cache.write(CGRect(x: 100, y: 25, width: 750, height: 850), to: w)
+        assertEq(w.frameWriteCount, 4, "a new request resets the refusal bound")
+        cache.forgetAll()
+        _ = cache.write(tiled, to: w)
+        assertEq(w.frameWriteCount, 5, "recover resets the bound")
+    }
+
     section("a scroll keeps the size and sets only the position")
     do {
         let w = FakeAXWindow(windowID: 1, pid: 99001, frame: .zero)

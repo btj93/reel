@@ -48,24 +48,36 @@ final class ScopeClock: @unchecked Sendable {
     }
 }
 
-/// The size last asked for and the size the app kept, per window. While a write asks for the same size, only the
-/// position is set: a scroll then costs one AX call instead of a full frame's three. Lives on one app thread.
+/// Scroll writes keep the last size. Settled writes retry a refused size until three identical read-backs.
+/// Lives on one app thread.
 public struct SizeCache {
-    private var sizes: [CGWindowID: (asked: CGSize, kept: CGSize)] = [:]
+    private struct Size {
+        let asked: CGSize
+        let kept: CGSize
+        let refusals: Int
+    }
+    private var sizes: [CGWindowID: Size] = [:]
 
     public init() {}
 
     /// Write `frame` and return the result with the frame the app kept, when known. Only the read-back's size is
     /// taken: an app clamps sizes, and a different origin is more likely the user dragging mid-write.
-    public mutating func write(_ frame: CGRect, to window: AXWindow) -> (result: FrameResult, landed: CGRect?) {
+    public mutating func write(_ frame: CGRect, to window: AXWindow, animating: Bool = false) -> (result: FrameResult, landed: CGRect?) {
         let id = window.windowID
-        let kept = sizes[id].flatMap { $0.asked == frame.size ? $0.kept : nil }
+        let previous = sizes[id].flatMap { $0.asked == frame.size ? $0 : nil }
+        let retry = previous.map { !animating && !Self.matches($0.kept, frame.size) && $0.refusals < 3 } ?? false
+        let kept = retry ? nil : previous?.kept
         switch kept == nil ? window.setFrame(frame) : window.setPosition(frame.origin) {
         case .success:
             let landed = if let kept { CGRect(origin: frame.origin, size: kept) } else {
                 (try? window.getFrame().get()).map { CGRect(origin: frame.origin, size: $0.size) }
             }
-            sizes[id] = (frame.size, landed?.size ?? frame.size)
+            if kept == nil {
+                let size = landed?.size ?? frame.size
+                let refusals = Self.matches(size, frame.size) ? 0 :
+                    (previous.map { Self.matches($0.kept, size) ? $0.refusals : 0 } ?? 0) + 1
+                sizes[id] = Size(asked: frame.size, kept: size, refusals: refusals)
+            }
             return (.applied, landed)
         case .failure(let error):
             sizes[id] = nil
@@ -78,6 +90,10 @@ public struct SizeCache {
     public mutating func observed(_ id: CGWindowID, frame: CGRect) {
         guard let kept = sizes[id]?.kept else { return }
         if abs(kept.width - frame.width) > EchoLedger.slop || abs(kept.height - frame.height) > EchoLedger.slop { sizes[id] = nil }
+    }
+
+    private static func matches(_ lhs: CGSize, _ rhs: CGSize) -> Bool {
+        abs(lhs.width - rhs.width) <= EchoLedger.slop && abs(lhs.height - rhs.height) <= EchoLedger.slop
     }
 
     public mutating func forget(_ id: CGWindowID) { sizes[id] = nil }
@@ -93,7 +109,7 @@ final class AppWorker: @unchecked Sendable {
     private var windows: [CGWindowID: AXWindow] = [:]
     private var sizes = SizeCache()
     private let lock = NSLock()
-    private var queuedFrames: [TileID: (revision: UInt64, frame: CGRect, scope: EventScope)] = [:]
+    private var queuedFrames: [TileID: (revision: UInt64, frame: CGRect, scope: EventScope, animating: Bool)] = [:]
     private var drainQueued = false
     private var forgetSizesQueued = false
     private var rediscoveryQueued = false
@@ -141,9 +157,9 @@ final class AppWorker: @unchecked Sendable {
     }
 
     /// Coalesced per window: a write still queued when the next one arrives is replaced, never run late.
-    func write(_ tile: TileID, revision: UInt64, frame: CGRect, scope: EventScope) {
+    func write(_ tile: TileID, revision: UInt64, frame: CGRect, scope: EventScope, animating: Bool) {
         lock.lock()
-        queuedFrames[tile] = (revision, frame, scope)
+        queuedFrames[tile] = (revision, frame, scope, animating)
         let schedule = !drainQueued
         drainQueued = true
         lock.unlock()
@@ -195,7 +211,7 @@ final class AppWorker: @unchecked Sendable {
                 post(.wrote(tile, revision: write.revision, frame: write.frame, landed: nil, .failed, scope: write.scope))
                 continue
             }
-            let (result, landed) = sizes.write(write.frame, to: window)
+            let (result, landed) = sizes.write(write.frame, to: window, animating: write.animating)
             post(.wrote(tile, revision: write.revision, frame: write.frame, landed: landed, result, scope: write.scope))
         }
     }

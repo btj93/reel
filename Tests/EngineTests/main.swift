@@ -198,6 +198,19 @@ struct Harness {
 }
 
 @MainActor func replayTests() throws {
+    section("animation ends with a settled size-confirming frame request") {
+        var h = Harness(animate: true)
+        h.census(1, [window(1), window(2), window(3)])
+        h.send(.command(.focusRight, .keyboard))
+        check(h.requests.contains { $0.animating }, "moving frames carry animation ownership")
+        h.send(.tick, advance: 10)
+        check(!h.requests.isEmpty, "settle emits a final frame even when geometry matches the previous tick")
+        check(h.requests.allSatisfy { !$0.animating }, "final frames permit size retry")
+        let frames = h.world.frames
+        h.send(.command(.recover, .ipc))
+        check(h.requests.allSatisfy { !$0.animating }, "recover permits size retry")
+        check(!frames.isEmpty, "settle retains current frame revisions")
+    }
     section("2d4bb1d: mixed and empty census preserve both Space stashes") {
         var h = Harness()
         h.census(10, [window(1), window(2)])

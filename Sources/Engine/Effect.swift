@@ -12,6 +12,7 @@ public struct FrameRequest: Equatable, Sendable {
     public let frame: AXRect
     public let revision: UInt64
     public let scope: EventScope
+    public var animating: Bool = false
 }
 
 public struct MenuRequest: Equatable, Sendable {

@@ -953,12 +953,12 @@ extension World {
 
     /// One frame write. A non-finite frame never leaves the engine.
     @discardableResult
-    private mutating func write(_ tile: TileID, pid: Int32, frame: AXRect, scope: EventScope, _ pass: inout Pass) -> FrameRequest? {
+    private mutating func write(_ tile: TileID, pid: Int32, frame: AXRect, scope: EventScope, animating: Bool = false, _ pass: inout Pass) -> FrameRequest? {
         guard frame.rect.isFinite else {
             pass.effects.append(.log("invalid layout rejected"))
             return nil
         }
-        let request = FrameRequest(tile: tile, pid: pid, frame: frame, revision: nextRevision(), scope: scope)
+        let request = FrameRequest(tile: tile, pid: pid, frame: frame, revision: nextRevision(), scope: scope, animating: animating)
         pass.effects.append(.setFrame(request))
         return request
     }
@@ -985,8 +985,9 @@ extension World {
             for target in computeTargetFrames(strip: group.strip, time: pass.now, raiseHeight: config.raiseHeight) {
                 let frame = axRect(ViewportRect(target.frame), on: display)
                 guard let pid = group.windows[target.tileID]?.pid else { continue }
-                if let existing = frames[target.tileID], existing.frame == frame, existing.scope == scope { continue }
-                if let request = write(target.tileID, pid: pid, frame: frame, scope: scope, &pass) { frames[target.tileID] = request }
+                if let existing = frames[target.tileID], existing.frame == frame, existing.scope == scope,
+                   existing.animating == group.isAnimating { continue }
+                if let request = write(target.tileID, pid: pid, frame: frame, scope: scope, animating: group.isAnimating, &pass) { frames[target.tileID] = request }
             }
         }
         guard pass.persist else { return }

@@ -56,9 +56,22 @@ final class FakeAXWindow: AXWindow, @unchecked Sendable {
 
     override func getFrame() -> AXResult<CGRect> { .success(currentFrame) }
 
-    override func setFrame(_ frame: CGRect) -> AXResult<Void> { apply(frame) }
+    var frameWriteCount = 0
+    var positionWriteCount = 0
+    var shortNextFrame: CGSize?
+
+    override func setFrame(_ frame: CGRect) -> AXResult<Void> {
+        frameWriteCount += 1
+        let result = apply(frame)
+        if let shortNextFrame {
+            currentFrame.size = shortNextFrame
+            self.shortNextFrame = nil
+        }
+        return result
+    }
 
     override func setPosition(_ point: CGPoint) -> AXResult<Void> {
+        positionWriteCount += 1
         if resistsOffscreen { return .failure(.transientFailure(.failure)) }
         return apply(CGRect(origin: point, size: currentFrame.size))
     }

@@ -79,7 +79,7 @@ public final class Executor {
             return log("executor: no app thread pid=\(request.pid) tile=\(request.tile.rawValue) rev=\(request.revision)")
         }
         owners[request.tile] = request.pid
-        worker.write(request.tile, revision: request.revision, frame: request.frame.rect, scope: request.scope)
+        worker.write(request.tile, revision: request.revision, frame: request.frame.rect, scope: request.scope, animating: request.animating)
     }
 
     /// The engine dropped the window or its frame: a write still queued for it must not run. The ledger keeps what was
