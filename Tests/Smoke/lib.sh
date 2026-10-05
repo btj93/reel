@@ -273,14 +273,18 @@ assertFramesAgree() {  # <host_name> [tolerance_px] [visible]
     rows=$(jq -rn \
         --argjson r "$report" \
         --argjson l "$layout" \
-        --argjson visible "$visible" '
+        --argjson visible "$visible" \
+        --argjson tolerance "$tol" '
         ($l | '"$AG"'.currentColumns
               | map(select(.windowID != 0 and ($visible == false or .isOffScreen != true)))
-              | map({ (.windowID|tostring): .frame }) | add // {}) as $byWid
+              | map({ (.windowID|tostring): {frame: .frame,
+                    fullHeight: ($visible == false or (([.regionOverlaps[]?.interW] | add // 0) >= .frame.w - $tolerance))} })
+              | add // {}) as $byWid
         | $r.windows[]
-        | ($byWid[(.cgWindowID|tostring)]) as $cf
-        | select($cf != null)
-        | "\(.cgWindowID) \((.frameCG.x - $cf.x)) \((.frameCG.y - $cf.y)) \((.frameCG.w - $cf.w)) \((.frameCG.h - $cf.h))"
+        | ($byWid[(.cgWindowID|tostring)]) as $column
+        | select($column != null)
+        | $column.frame as $cf
+        | "\(.cgWindowID) \((.frameCG.x - $cf.x)) \((.frameCG.y - $cf.y)) \((.frameCG.w - $cf.w)) \(if $column.fullHeight then (.frameCG.h - $cf.h) else 0 end)"
         ')
     if [ "$DRY" = 1 ]; then dry_note "assertFramesAgree($name, ±${tol}px): matched $(printf '%s' "$rows" | grep -c . ) window(s) in fixture"; return 0; fi
     if [ -z "$rows" ]; then

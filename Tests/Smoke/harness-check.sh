@@ -100,11 +100,13 @@ printf 'PASS: perf rules compare trunk and head samples although both binaries a
         printf 'FAIL: all-column check skipped the off-screen mismatch\n'; exit 1
     fi
     host_report() { jq '.windows[0].frameCG.h = 100' "$NS/fixture-report.json"; }
+    (assertFramesAgree MAIN 2 visible) >/dev/null
+    reel_msg() { jq '.groups[0].currentColumns[1].isOffScreen = true | .groups[0].currentColumns[0].regionOverlaps[0].interW = 720' "$NS/fixture-layout.json"; }
     if (assertFramesAgree MAIN 2 visible) >/dev/null 2>&1; then
         printf 'FAIL: visible check skipped a visible mismatch\n'; exit 1
     fi
 )
-printf 'PASS: physical settle checks visible columns; default still checks all columns\n'
+printf 'PASS: physical settle checks visible columns; height is checked only when fully visible; default still checks all columns\n'
 (
     source "$SCRIPT_DIR/lib.sh"
     DRY=0

@@ -141,7 +141,7 @@ main() {
     mkdir -p "$CFG" "$STATE" "$OUT"
     write_fixtures
     : > "$SAMPLES"; : > "$OUT/idle.tsv"
-    for _ in $(seq 1 20); do sample trunk "$TRUNK"; sample head "$HEAD"; done
+    for _ in $(seq 1 "${PERF_SAMPLES:-20}"); do sample trunk "$TRUNK"; sample head "$HEAD"; done
     idle trunk "$TRUNK"; idle head "$HEAD"
     for metric in focus space; do
         local trunk head
