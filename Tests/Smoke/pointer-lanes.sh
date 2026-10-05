@@ -73,6 +73,7 @@ fresh() {
     host_start MAIN
     host_create MAIN "$1" >/dev/null
     launch_reel "$2"
+    activate_process "${HOST_PID[MAIN]}"
     waitForSettle 10
 }
 

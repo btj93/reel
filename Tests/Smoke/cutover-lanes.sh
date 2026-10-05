@@ -62,6 +62,7 @@ fresh() {
     gesture_config "$CFG"
     launch_reel
     if [ "$DRY" != 1 ]; then poll_until 10 "REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-status >/dev/null" || fail "no signed runtime"; fi
+    activate_process "${HOST_PID[MAIN]}"
     waitForSettle 10
 }
 

@@ -35,7 +35,8 @@ SOCK="$NS/reel.sock"
 CFG="$NS/config"
 STATE="$NS/state"
 REEL_LOG="$NS/reel.log"
-SAMPLES="$NS/samples"
+OUT="${LANE_OUT:-$NS}"
+SAMPLES="$OUT/samples"
 TEST_REEL_PID=""
 BIN_REEL="${BINS[0]}"
 # Global, so the switches alternate across blocks too: a block never starts by switching past the last Space.
@@ -43,6 +44,11 @@ DIRECTION=right
 
 cleanup() {
     quit_reel
+    if [ "$OUT" != "$NS" ] && [ "$DRY" != 1 ]; then
+        mkdir -p "$OUT"
+        cp "$REEL_LOG" "$OUT/reel.log" 2>/dev/null || true
+        cp "${HOST_OUT[MAIN]}" "$OUT/host.log" 2>/dev/null || true
+    fi
     host_quit MAIN
     if [ "${SMOKE_KEEP_NS:-0}" = 1 ]; then warn "kept $NS"; else rm -rf "$NS"; fi
 }
@@ -88,6 +94,7 @@ quit_reel() {
 measure() {  # <binary> <count>
     local bin=$1 count=$2 before t0 t1
     launch_reel "$bin"
+    activate_process "${HOST_PID[MAIN]}"
     waitForSettle 10
     for _ in $(seq 1 "$count"); do
         before="$(space_id)"
@@ -115,7 +122,7 @@ main() {
     if [ "$DRY" != 1 ] && { pgrep -x Reel >/dev/null || pgrep -x ReelNext >/dev/null; }; then
         fail "stop the running Reel or ReelNext first"
     fi
-    mkdir -p "$NS" "$CFG" "$STATE"
+    mkdir -p "$NS" "$CFG" "$STATE" "$OUT"
     : > "$SAMPLES"
     write_fixtures
     host_start MAIN

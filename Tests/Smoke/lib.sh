@@ -193,6 +193,11 @@ host_quit() {  # <name>
     unset 'HOST_PID[$name]' 'HOST_FD[$name]' 'HOST_OUT[$name]'
 }
 
+activate_process() {  # <pid>
+    if [ "$DRY" = 1 ]; then dry_note "bring host process $1 frontmost"; return; fi
+    osascript -e "tell application \"System Events\" to set frontmost of first application process whose unix id is $1 to true"
+}
+
 # ------------------------- layout / column assertions ----------------------
 
 col_count() { reel_msg get-layout | jq "$AG.currentColumns | length"; }
@@ -256,8 +261,9 @@ waitForSettle() {  # [timeout_seconds]
 # `report`, also CG — we launched the host with --primary-height from the same
 # get-layout so both sides share the coordinate origin) within ±2px. This is
 # the guard against Reel's internal model drifting from reality.
-assertFramesAgree() {  # <host_name> [tolerance_px]
-    local name=$1 tol=${2:-2}
+assertFramesAgree() {  # <host_name> [tolerance_px] [visible]
+    local name=$1 tol=${2:-2} visible=false
+    [ "${3:-}" = visible ] && visible=true
     local report layout
     report=$(host_report "$name")
     layout=$(reel_msg get-layout)
@@ -266,9 +272,10 @@ assertFramesAgree() {  # <host_name> [tolerance_px]
     local rows
     rows=$(jq -rn \
         --argjson r "$report" \
-        --argjson l "$layout" '
+        --argjson l "$layout" \
+        --argjson visible "$visible" '
         ($l | '"$AG"'.currentColumns
-              | map(select(.windowID != 0))
+              | map(select(.windowID != 0 and ($visible == false or .isOffScreen != true)))
               | map({ (.windowID|tostring): .frame }) | add // {}) as $byWid
         | $r.windows[]
         | ($byWid[(.cgWindowID|tostring)]) as $cf

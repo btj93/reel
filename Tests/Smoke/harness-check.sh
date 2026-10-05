@@ -87,3 +87,39 @@ for rule in "space-perf.sh 1000 1050 1051" "display-perf.sh 1000 1200 1201" "poi
     if perf_rule "$script" "$trunk" ""; then printf 'FAIL: %s passed with no head samples\n' "$script"; exit 1; fi
 done
 printf 'PASS: perf rules compare trunk and head samples although both binaries are named Reel\n'
+(
+    source "$SCRIPT_DIR/lib.sh"
+    NS="$TMP/frames" SOCK="$TMP/frames/sock" CFG="$TMP/frames/config" STATE="$TMP/frames/state" BIN_MSG=/usr/bin/false REEL_LOG="$TMP/no-log"
+    mkdir -p "$NS"
+    write_fixtures
+    DRY=0
+    reel_msg() { jq '.groups[0].currentColumns[1].isOffScreen = true' "$NS/fixture-layout.json"; }
+    host_report() { jq '.windows[1].frameCG.h = 100' "$NS/fixture-report.json"; }
+    (assertFramesAgree MAIN 2 visible) >/dev/null
+    if (assertFramesAgree MAIN 2) >/dev/null 2>&1; then
+        printf 'FAIL: all-column check skipped the off-screen mismatch\n'; exit 1
+    fi
+    host_report() { jq '.windows[0].frameCG.h = 100' "$NS/fixture-report.json"; }
+    if (assertFramesAgree MAIN 2 visible) >/dev/null 2>&1; then
+        printf 'FAIL: visible check skipped a visible mismatch\n'; exit 1
+    fi
+)
+printf 'PASS: physical settle checks visible columns; default still checks all columns\n'
+(
+    source "$SCRIPT_DIR/lib.sh"
+    DRY=0
+    osascript() { printf '%s\n' "$*"; }
+    activate_process 12345 | grep -F 'unix id is 12345'
+)
+printf 'PASS: activation targets the host process, not the previously focused display\n'
+(
+    source "$SCRIPT_DIR/cutover-perf.sh"
+    trap - EXIT INT TERM
+    col_count() { echo 3; }
+    reel_msg() { printf '%s\n' "$1" >> "$TMP/warm-walk"; }
+    waitForSettle() { :; }
+    warm_focus_walk
+    expected=$(printf 'focus-left\nfocus-left\nfocus-left\nfocus-right\nfocus-right\nfocus-left\nfocus-left')
+    [ "$(cat "$TMP/warm-walk")" = "$expected" ] || { echo 'FAIL: warm-up skipped a column'; exit 1; }
+)
+printf 'PASS: warm-up visits every column and returns to the left before sampling\n'

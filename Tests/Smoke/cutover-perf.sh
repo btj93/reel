@@ -48,12 +48,22 @@ fresh() {
         "$bin" > "$REEL_LOG" 2>&1 &
     TEST_REEL_PID=$!
     poll_until 10 "REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-status >/dev/null" || fail "runtime did not start"
+    activate_process "${HOST_PID[MAIN]}"
     waitForSettle 10
+    warm_focus_walk
+}
+
+warm_focus_walk() {
+    local count i
+    count=$(col_count)
+    for ((i=0; i<count; i++)); do reel_msg focus-left >/dev/null; waitForSettle 10; done
+    for ((i=1; i<count; i++)); do reel_msg focus-right >/dev/null; waitForSettle 10; done
+    for ((i=1; i<count; i++)); do reel_msg focus-left >/dev/null; waitForSettle 10; done
 }
 
 physical_settle() {
-    if [ "$DRY" = 1 ]; then assertFramesAgree MAIN 2; return; fi
-    poll_until 10 "(assertFramesAgree MAIN 2) > '$NS/physical-last.log' 2>&1" || fail "$(cat "$NS/physical-last.log")"
+    if [ "$DRY" = 1 ]; then assertFramesAgree MAIN 2 visible; return; fi
+    poll_until 10 "(assertFramesAgree MAIN 2 visible) > '$NS/physical-last.log' 2>&1" || fail "$(cat "$NS/physical-last.log")"
 }
 
 now_ms() { perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.3f\n", clock_gettime(CLOCK_MONOTONIC)*1000'; }
@@ -143,4 +153,4 @@ main() {
     if [ "$DRY" = 1 ]; then section "R7 perf dry parser check passed (fixture samples only)"
     else section "R7 perf passed; samples in $OUT"; fi
 }
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
