@@ -230,6 +230,9 @@ final class FocusProbeWindow: AXWindow, @unchecked Sendable {
     override func focus(timeout: Float?) { lock.withLock { focused += 1 } }
     override func raise() -> AXResult<Void> { lock.withLock { raised += 1 }; return .success(()) }
     override func getFrame() -> AXResult<CGRect> { .success(CGRect(x: 100, y: 30, width: 300, height: 600)) }
+    override func getPropertiesFast() -> WindowProperties {
+        WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: "window-\(windowID)", frame: try? getFrame().get())
+    }
 }
 
 final class FocusTestClock: @unchecked Sendable {
@@ -5335,14 +5338,29 @@ final class CensusFixture: CensusObserver {
 }
 
 final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reads = 0
+    var propertyReads: Int { lock.withLock { reads } }
     init() { super.init(element: AXUIElementCreateApplication(99001), windowID: 99001, pid: 99001) }
     override func getFrame() -> AXResult<CGRect> { .success(CGRect(x: 100, y: 30, width: 500, height: 600)) }
     override func getPropertiesFast() -> WindowProperties {
-        WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: "Document", frame: try? getFrame().get())
+        lock.withLock { reads += 1 }
+        return WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: "Document", frame: try? getFrame().get())
     }
 }
 
 @MainActor func auditBLateFocusTest() {
+    section("AuditB 14d health classification refresh is coalesced and stops for titled tiles") {
+        let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), clock = ScopeClock(), window = LateTitleProbeWindow()
+        let worker = AppWorker(app: app, windows: [99001: window], clock: clock, send: box.append)
+        worker.refreshClassifications([99001])
+        worker.refreshClassifications([99001])
+        app.drain()
+        check(window.propertyReads == 1 && box.drain().count == 1, "hung-app health refreshes cannot pile up")
+        worker.refreshClassifications([99001])
+        app.drain()
+        check(window.propertyReads == 1 && box.drain().isEmpty, "a classified titled tile is no longer re-read")
+    }
     section("AuditB 14b runtime focus retries untitled classification") {
         let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), clock = ScopeClock()
         clock.current = Stamp(revision: 1, epochs: [1: 0])
