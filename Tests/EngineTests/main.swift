@@ -232,6 +232,15 @@ final class FocusProbeWindow: AXWindow, @unchecked Sendable {
     override func getFrame() -> AXResult<CGRect> { .success(CGRect(x: 100, y: 30, width: 300, height: 600)) }
 }
 
+final class FocusTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 100.0
+    var time: Double {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
+    }
+}
+
 final class FocusObservationBox: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: [(Observation, Stamp?)] = []
@@ -240,6 +249,37 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    for (name, delay, twice, expected) in [("executed A echo after B", 0.10, false, UInt32(2)),
+                                          ("matching echo is consumed once", 0.10, true, UInt32(1)),
+                                          ("expired echo is a real activation", 0.20, false, UInt32(1))] {
+        section("Audit A echo: " + name) {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 102)])
+            let clock = ScopeClock(), time = FocusTestClock(), box = FocusObservationBox()
+            clock.current = h.world.stamp
+            let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
+            let workers = [Int32(101): AppWorker(app: a, windows: [1: FocusProbeWindow(1, pid: 101)], clock: clock, focusSpace: { _ in nil }, send: box.append),
+                           Int32(102): AppWorker(app: b, windows: [2: FocusProbeWindow(2, pid: 102)], clock: clock, focusSpace: { _ in nil }, send: box.append)]
+            let executor = Executor(worker: { workers[$0] }, log: { _ in }, now: { time.time })
+            let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                    emit: { kind, _ in h.send(kind) }, log: { _ in })
+            observer.workers = workers
+            observer.clock.current = h.world.stamp
+            h.send(.command(.focus(TileID(1)), .keyboard)); executor.focus(TileID(1), pid: 101); a.drain()
+            h.send(.command(.focus(TileID(2)), .keyboard)); executor.focus(TileID(2), pid: 102); b.drain()
+            time.time = 100 + delay
+            observer.activated(101); a.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            h.advance(0.3)
+            if twice {
+                observer.activated(101); a.drain()
+                box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+                h.advance(0.3)
+            }
+            check(h.world.groups[1]?.focus.decision?.tile == TileID(expected), "executed-focus echo policy: " + name)
+        }
+    }
+
     section("Audit A routing: activation starts on settled epoch and named tile uses its own display") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(10, [window(1, app: 101)])

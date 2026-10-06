@@ -2,6 +2,7 @@ import AppKit
 import Core
 import Engine
 import Foundation
+import Platform
 
 /// The frames the runtime wrote, per window. A move or resize that lands on a frame we wrote is our own echo; anything
 /// else is the user. No clock is involved, so a slow app's late echo is still recognized and a fast user is not missed.
@@ -68,10 +69,13 @@ public final class Executor {
     private var owners: [TileID: Int32] = [:]
     private let worker: (Int32) -> AppWorker?
     private let log: (String) -> Void
+    private let now: @Sendable () -> Double
 
-    package init(worker: @escaping (Int32) -> AppWorker?, log: @escaping (String) -> Void) {
+    package init(worker: @escaping (Int32) -> AppWorker?, log: @escaping (String) -> Void,
+                 now: @escaping @Sendable () -> Double = TimeUtil.now) {
         self.worker = worker
         self.log = log
+        self.now = now
     }
 
     func setFrame(_ request: FrameRequest) {
