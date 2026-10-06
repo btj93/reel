@@ -953,7 +953,21 @@ extension World {
     fileprivate mutating func release(group id: UInt32, _ pass: inout Pass) {
         let hidden = (groups[id]?.hidden ?? [:]).sorted { $0.key.rawValue < $1.key.rawValue }
             .compactMap { tile, hidden in hidden.frame.map { (tile: tile, pid: hidden.window.pid, frame: $0) } }
-        write(releaseFrames(group: id, at: pass.now) + hidden, group: id, &pass)
+        var writes = releaseFrames(group: id, at: pass.now) + hidden
+        var seen = Set(groups.values.flatMap { Array($0.windows.keys) + Array($0.hidden.keys) })
+        // Live stashes hold this session's AX identities. Disk entries deliberately never reach this path.
+        for (key, saved) in spaces.live.sorted(by: { SpaceOrder($0.key.group, $0.key.space) < SpaceOrder($1.key.group, $1.key.space) })
+            where key.group == id || (groups[key.group] == nil && id == topology.groups.first?.id) {
+            guard let display = topology.group(id: id) else { continue }
+            let restored = restoredGroup(display: display, config: config, key: key.space, epoch: 0,
+                                         windows: saved.windows, saved: saved, hidesMissing: false, time: pass.now)
+            let hidden = restored.hidden.values.compactMap { value in
+                value.frame.map { (tile: value.window.id, pid: value.window.pid, frame: $0) }
+            }
+            for request in releaseFrames(group: id, state: restored, force: true, at: pass.now) + hidden
+                where seen.insert(request.tile).inserted { writes.append(request) }
+        }
+        write(writes, group: id, &pass)
     }
 
     /// Release only walks the strip, so windows that leave it alive (their app hid, or one minimized) get their release
@@ -1004,15 +1018,15 @@ extension World {
 
     /// Release brings clipped tiles fully inside their display, cascaded so none hides another completely. Columns
     /// the raise style lowered, or whose last write failed, go to their full frame. Hidden windows advance the cascade.
-    private func releaseFrames(group id: UInt32, at time: Double) -> [(tile: TileID, pid: Int32, frame: AXRect)] {
-        guard let group = groups[id], let display = topology.group(id: id) else { return [] }
+    private func releaseFrames(group id: UInt32, state: GroupState? = nil, force: Bool = false, at time: Double) -> [(tile: TileID, pid: Int32, frame: AXRect)] {
+        guard let group = state ?? groups[id], let display = topology.group(id: id) else { return [] }
         var step = 30 * Double(group.hidden.count)
         return computeTargetFrames(strip: group.strip, time: time).compactMap { target in
             guard let pid = group.windows[target.tileID]?.pid else { return nil }
             let frame = axRect(ViewportRect(target.frame), on: display)
             let area = display.displays.min { abs($0.area.midX - frame.rect.midX) < abs($1.area.midX - frame.rect.midX) }!.area
             guard !area.contains(frame.rect) else {
-                return config.raiseHeight > 0 || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
+                return force || config.raiseHeight > 0 || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
             }
             let size = CGSize(width: min(target.frame.width, area.width), height: min(target.frame.height, area.height))
             defer { step += 30 }
