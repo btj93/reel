@@ -2319,8 +2319,10 @@ struct FuzzStream {
         var moved = h
         h.send(.topologyChanged(topology(2, [display()])))
         h.send(.command(.release, .ipc))
-        check(h.world.groups[1]!.hidden[TileID(7)] != nil && !h.requests.contains { $0.tile == TileID(7) },
-              "an unplugged display's hidden window is not written back there: \(h.requests.filter { $0.tile == TileID(7) })")
+        let release = h.requests.filter { $0.tile == TileID(7) }
+        check(h.world.groups[1]!.hidden[TileID(7)] != nil && hiddenFrame(h, 1) == nil &&
+              release.count == 1 && release.allSatisfy { $0.scope.group == 1 && display().area.contains($0.frame.rect) },
+              "the unplugged display affinity is dropped; quit releases once onto the surviving display: \(release)")
         moved.send(.topologyChanged(topology(2, [display(), display(2, y: 830)])))
         check(hiddenFrame(moved, 2) == parked.offsetBy(dx: -1000, dy: 830), "a moved display carries it: \(String(describing: hiddenFrame(moved, 2)))")
     }
