@@ -648,7 +648,7 @@ public final class Observer: CensusObserver {
             emit(.focus(intent), stamp)
         case .wrote(let tile, let revision, let frame, let landed, let result, let scope):
             executor.wrote(tile, revision: revision, frame: frame, landed: landed, result: result)
-            emit(.frameCompleted(tile: tile, revision: revision, result: result), Stamp(scope))
+            emit(.frameCompleted(tile: tile, revision: revision, result: result, landed: landed.map(AXRect.init)), Stamp(scope))
         }
     }
 }

@@ -38,6 +38,11 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
         return copy
     }
 
+    func reframed(_ frame: AXRect) -> ObservedWindow {
+        ObservedWindow(id: id, pid: pid, bundleID: bundleID, title: title, floating: floating, initialFrame: frame)
+            .adoptingTitle(ruleTitle ?? title)
+    }
+
     var isValid: Bool { id.rawValue != 0 && pid > 0 && (initialFrame?.rect.isFinite ?? true) }
 
     /// Bundle-less windows share no app identity, so they never match each other by app alone.
@@ -126,7 +131,7 @@ public struct Event: Sendable {
         case spaceChanged(key: SpaceKey, epoch: UInt64, windows: [ObservedWindow], frontmost: TileID? = nil)
         case topologyChanged(Topology)
         case configChanged(EngineConfig)
-        case frameCompleted(tile: TileID, revision: UInt64, result: FrameResult)
+        case frameCompleted(tile: TileID, revision: UInt64, result: FrameResult, landed: AXRect? = nil)
         case timer(TimerToken)
         case tick
         case loadSnapshots([Snapshot])

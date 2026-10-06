@@ -188,11 +188,11 @@ public struct GroupState: Sendable {
 
     /// A hidden window comes back to the place it left: its own column, or floating. One that floated only for its
     /// facts tiles once they say it tiles.
-    mutating func putBack(_ window: ObservedWindow, from returning: HiddenTile, config: EngineConfig, at time: Double) {
+    mutating func putBack(_ window: ObservedWindow, from returning: HiddenTile, config: EngineConfig, width: ColumnWidth, at time: Double) {
         hidden.removeValue(forKey: window.id)
         windows[window.id] = window
         if let column = returning.column { strip.restoreColumn(column, at: placeInStrip(returning.place), time: time) }
-        else if joinsStrip(was: returning.window, now: window, config: config) { strip.insertTile(window.id, at: time) }
+        else if joinsStrip(was: returning.window, now: window, config: config) { strip.insertTile(window.id, width: width, at: time) }
         else { floating.insert(window.id) }
     }
 
@@ -367,7 +367,7 @@ public struct World: Sendable {
         let tile: TileID?
         switch kind {
         case .windowAdded(let window, _): return owner(of: window.id) ?? home(window) ?? activeGroup
-        case .windowRemoved(let id), .windowMoved(let id, _), .frameCompleted(let id, _, _): tile = id
+        case .windowRemoved(let id), .windowMoved(let id, _), .frameCompleted(let id, _, _, _): tile = id
         case .focus(let intent) where intent.tile == nil:
             return groups.keys.sorted().first { id in groups[id]!.windows.values.contains { $0.pid == intent.pid } } ?? activeGroup
         case .focus(let intent): tile = intent.tile
@@ -471,4 +471,13 @@ public struct World: Sendable {
 
 extension CGRect {
     var isFinite: Bool { [minX, minY, width, height].allSatisfy(\.isFinite) && width > 0 && height > 0 }
+}
+
+extension DisplayGroup {
+    func adoptionWidth(_ window: ObservedWindow, defaultWidth: ColumnWidth) -> ColumnWidth {
+        guard let frame = window.initialFrame else { return defaultWidth }
+        let point = CGPoint(x: frame.rect.midX, y: frame.rect.midY)
+        let display = displays.min { $0.distance(to: point) < $1.distance(to: point) }!
+        return .fixed(min(frame.rect.width, display.area.width))
+    }
 }

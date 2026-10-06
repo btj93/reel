@@ -231,13 +231,13 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     }
     group.strip.activeColumnIndex = min(saved?.activeColumnIndex ?? 0, max(0, group.strip.columns.count - 1))
     group.strip.viewOffset = .static(saved?.offset ?? 0)
-    for (window, hidden) in returning { group.putBack(window, from: hidden, config: config, at: time) }
+    for (window, hidden) in returning { group.putBack(window, from: hidden, config: config, width: display.adoptionWidth(window, defaultWidth: group.strip.defaultWidth), at: time) }
     group.hidden = group.hidden.filter { group.windows[$0.key] == nil }
     let active = group.strip.activeColumnIndex, offset = group.strip.viewOffset
     let fresh = visualOrder(unused)
     for window in fresh where shouldFloat(window, config: config) { group.floating.insert(window.id) }
     for window in joined + fresh where !group.floating.contains(window.id) {
-        group.strip.insertColumn(Column(tiles: [window.id], width: group.strip.defaultWidth), at: time, atIndex: group.strip.columns.count)
+        group.strip.insertColumn(Column(tiles: [window.id], width: display.adoptionWidth(window, defaultWidth: group.strip.defaultWidth)), at: time, atIndex: group.strip.columns.count)
     }
     group.strip.activeColumnIndex = min(active, max(0, group.strip.columns.count - 1))
     group.strip.viewOffset = offset

@@ -63,7 +63,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .pointer(let input, let token): world.onPointer(input, token: token, group: id, &pass)
     case .spaceWillChange: world.onSpaceWillChange(group: id, &pass)
     case .spaceChanged(let key, let epoch, let windows, let frontmost): world.onSpaceChanged(key: key, epoch: epoch, windows: windows, frontmost: frontmost, group: id, &pass)
-    case .frameCompleted(let tile, let revision, let result): world.onFrameCompleted(tile, revision: revision, result: result, &pass)
+    case .frameCompleted(let tile, let revision, let result, let landed): world.onFrameCompleted(tile, revision: revision, result: result, landed: landed, &pass)
     case .timer(let token): world.onTimer(token, group: id, &pass)
     case .tick: world.onTick(&pass)
     }
@@ -239,8 +239,7 @@ extension World {
     fileprivate mutating func onWindowMoved(_ tile: TileID, frame: AXRect, group id: UInt32, _ pass: inout Pass) {
         guard frame.rect.isFinite, var group = groups[id], !group.phase.isChanging,
               let old = group.windows[tile] else { return }
-        let window = ObservedWindow(id: tile, pid: old.pid, bundleID: old.bundleID, title: old.title,
-                                    floating: old.floating, initialFrame: frame).adoptingTitle(old.ruleTitle ?? old.title)
+        let window = old.reframed(frame)
         if let destination = home(window), destination != id, let target = topology.group(id: destination),
            target.displays.contains(where: { $0.frame.contains(CGPoint(x: frame.rect.midX, y: frame.rect.midY)) }),
            let destinationState = groups[destination], case .settled = destinationState.phase {
@@ -322,9 +321,10 @@ extension World {
         group.windows[window.id] = window
         group.hidden.removeValue(forKey: window.id)
         for other in groups.keys where other != id { groups[other]!.hidden[window.id] = nil }
-        if let returning { group.putBack(window, from: returning, config: config, at: pass.now) }
+        let width = topology.group(id: id)!.adoptionWidth(window, defaultWidth: group.strip.defaultWidth)
+        if let returning { group.putBack(window, from: returning, config: config, width: width, at: pass.now) }
         else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
-        else { group.strip.insertTile(window.id, at: pass.now) }
+        else { group.strip.insertTile(window.id, width: width, at: pass.now) }
         groups[id] = group
         pass.layout.insert(id)
     }
@@ -442,7 +442,7 @@ extension World {
                 return outcome
             }
             if group.floating.remove(tile) != nil {
-                group.strip.insertTile(tile, at: now)
+                group.strip.insertTile(tile, width: topology.group(id: id)!.adoptionWidth(window, defaultWidth: group.strip.defaultWidth), at: now)
             } else {
                 group.strip.removeTile(tile, at: now)
                 group.floating.insert(tile)
@@ -897,12 +897,27 @@ extension World {
         return otherSpaces(than: id).values.reduce(into: []) { $0.formUnion($1.fingerprint.intersection(newcomers)) }
     }
 
-    fileprivate mutating func onFrameCompleted(_ tile: TileID, revision: UInt64, result: FrameResult, _ pass: inout Pass) {
+    fileprivate mutating func onFrameCompleted(_ tile: TileID, revision: UInt64, result: FrameResult, landed: AXRect?, _ pass: inout Pass) {
         guard let request = frames[tile], request.revision == revision, request.scope == pass.scope else { return }
         switch result {
         case .applied:
             appliedFrames[tile] = request
             frameFailures[tile] = nil
+            if case .layout = request.purpose, let landed, landed.rect.isFinite,
+               let window = groups[pass.scope.group]?.windows[tile] {
+                groups[pass.scope.group]!.windows[tile] = window.reframed(landed)
+            }
+            if !request.animating, case .layout = request.purpose, let landed, landed.rect.isFinite,
+               abs(landed.rect.width - request.frame.rect.width) > EngineConfig.userResizeSlop,
+               let index = groups[pass.scope.group]?.strip.columnIndex(of: tile) {
+                let area = groups[pass.scope.group]!.strip.regionForColumn(index, at: pass.now).rect
+                let width = min(landed.rect.width, area.width)
+                groups[pass.scope.group]!.strip.setWidth(.fixed(width), column: index, at: pass.now, params: nil)
+                frames[tile] = nil
+                appliedFrames[tile] = nil
+                pass.layout.insert(pass.scope.group)
+                pass.persist = true
+            }
         case .failed, .timedOut, .sizeUnconfirmed:
             // Keep the last target for the focus ring; failure is not evidence the window disappeared.
             appliedFrames.removeValue(forKey: tile)
@@ -1147,8 +1162,8 @@ enum CensusVerdict {
 extension Strip {
     func columnIndex(of tile: TileID) -> Int? { columns.firstIndex { $0.tiles.contains(tile) } }
 
-    mutating func insertTile(_ tile: TileID, at time: Double) {
-        insertColumn(Column(tiles: [tile], width: defaultWidth), at: time)
+    mutating func insertTile(_ tile: TileID, width: ColumnWidth, at time: Double) {
+        insertColumn(Column(tiles: [tile], width: width), at: time)
     }
 
     /// Puts a column back at `index` without moving the view: the active column stays active, where it was on screen.
