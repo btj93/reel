@@ -5312,8 +5312,8 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
         clock.current = Stamp(revision: 1, epochs: [1: 0])
         let worker = AppWorker(app: app, windows: [99001: LateTitleProbeWindow()], clock: clock, focusSpace: { _ in nil }, send: box.append)
         let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
-                                managed: { [99001] }, elsewhere: { [] }, paused: { false }, frontmostPID: { 99001 },
-                                emit: { _, _ in }, log: { _ in })
+                                managed: { [99001] }, elsewhere: { [] }, paused: { false },
+                                emit: { _, _ in }, log: { _ in }, frontmostPID: { 99001 })
         observer.workers[99001] = worker
         observer.activated(99001)
         app.drain()
