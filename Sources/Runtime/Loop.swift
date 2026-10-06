@@ -75,7 +75,7 @@ public final class Loop {
     private var replies: [UInt64: ReplyPayload] = [:]
     private var lastRequest: UInt64 = 0
     private var indicatorTile: TileID?
-    private var confirmedFocus: (tile: TileID, pid: Int32)?
+    private var confirmedFocus: [Int32: TileID] = [:]
     private var quitting = false
     private var observing = false
 
@@ -178,7 +178,7 @@ public final class Loop {
                 tile = frontmost.flatMap { world.owner(of: $0) == event.scope.group ? $0 : nil }
             default: tile = nil
             }
-            if let tile, let pid = pid(of: tile) { confirmedFocus = (tile, pid) }
+            if let tile, let pid = pid(of: tile) { confirmedFocus[pid] = tile }
         }
         executor?.synchronizeFocus(with: world, paused: paused)
         if let effectsSink {
@@ -465,9 +465,9 @@ public final class Loop {
     // MARK: Focus indicator
 
     package func indicatorFocus(frontmostPID: Int32?) -> TileID? {
-        guard let focus = confirmedFocus, focus.pid == frontmostPID,
-              pid(of: focus.tile) == focus.pid else { return nil }
-        return focus.tile
+        guard let frontmostPID, let tile = confirmedFocus[frontmostPID],
+              pid(of: tile) == frontmostPID else { return nil }
+        return tile
     }
 
     package func changePauseState(_ value: Bool, reconcile: () -> Void) {
