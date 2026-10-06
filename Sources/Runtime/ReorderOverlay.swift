@@ -202,7 +202,7 @@ public final class ReorderOverlay {
         let band = Self.band(in: panel.frame.size)
         let others = tiles.indices.filter { $0 != dragged }
         let row = Self.thumbnailFrames(widths: others.map { widths[$0] }, bandWidth: band.width, spacing: Self.spacing)
-        let height = row.first?.height ?? Self.thumbnailHeight
+        let height = row.first.map { Double($0.height) } ?? Self.thumbnailHeight
         let y = band.midY - height / 2
         midpoints = row.map { band.minX + $0.midX }
         for (index, frame) in zip(others, row) {
@@ -237,11 +237,13 @@ public final class ReorderOverlay {
     /// A cursor x inside each gap between thumbnails centred at `midpoints`, the ends included.
     public nonisolated static func slots(_ midpoints: [Double], bounds: CGRect? = nil) -> [Double] {
         guard let first = midpoints.first, let last = midpoints.last else { return [] }
-        return [bounds?.minX ?? first - 40] + zip(midpoints, midpoints.dropFirst()).map { ($0 + $1) / 2 } + [bounds?.maxX ?? last + 40]
+        let start = bounds.map { Double($0.minX) } ?? first - 40
+        let end = bounds.map { Double($0.maxX) } ?? last + 40
+        return [start] + zip(midpoints, midpoints.dropFirst()).map { ($0 + $1) / 2 } + [end]
     }
 
     public nonisolated static func origins(widths: [Double], bandWidth: Double, spacing: Double) -> [Double] {
-        thumbnailFrames(widths: widths, bandWidth: bandWidth, spacing: spacing).map(\.minX)
+        thumbnailFrames(widths: widths, bandWidth: bandWidth, spacing: spacing).map { Double($0.minX) }
     }
 
     /// One geometry drives the visible thumbnails, insertion thresholds and indicator. Edge gaps stay visible too.
