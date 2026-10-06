@@ -427,6 +427,18 @@ final class FocusObservationBox: @unchecked Sendable {
         check(intents.last?.observedSpace == .skylight(10), "named activation reads the tile's frame-local Space")
     }
 
+    section("Audit A routing: missing tile geometry cannot borrow the main-display Space") {
+        let app = QueuedFocusApp(pid: 101, focused: 1), box = FocusObservationBox()
+        var intents: [FocusIntent] = []
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [1] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in if case .focus(let intent) = kind { intents.append(intent) } }, log: { _ in })
+        observer.clock.current = Stamp(revision: 1, epochs: [1: 1])
+        observer.workers[101] = AppWorker(app: app, windows: [:], clock: observer.clock, focusSpace: { _ in .skylight(20) }, send: box.append)
+        observer.activated(101); app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(intents.count == 2 && intents.last?.observedSpace == nil, "missing frame uses the activation epoch, not a global Space key")
+    }
     section("Audit A activation: a newer explicit focus decision revokes a pending Dock read") {
         var h = Harness()
         h.census(1, [window(1, app: 101), window(2, app: 102)])
