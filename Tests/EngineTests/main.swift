@@ -5270,6 +5270,17 @@ final class CensusFixture: CensusObserver {
         disk.send(.command(.release, .ipc))
         check(disk.requests.allSatisfy { $0.tile == TileID(20) }, "disk-only identities never receive writes")
     }
+    section("AuditB 5b hidden stash release after display unplug") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(50, [window(1, x: 1200)], group: 2)
+        h.send(.windowsHidden([TileID(1)]), group: 2)
+        h.census(51, [window(2, x: 1200)], group: 2)
+        h.send(.topologyChanged(topology(2, [display()])))
+        h.send(.command(.release, .ipc))
+        let writes = h.requests.filter { $0.tile == TileID(1) }
+        check(writes.count == 1, "unplugged live hidden identity is released once")
+        check(writes.allSatisfy { if case .release(let area) = $0.purpose { return area.rect.contains($0.frame.rect) }; return false }, "hidden release frame is clamped to surviving physical display")
+    }
     section("AuditB 7 9 bounded retries retain focus-ring frame") {
         for result in [FrameResult.failed, .sizeUnconfirmed] {
             var h = Harness()
