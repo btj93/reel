@@ -5368,6 +5368,25 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
         let metadata = box.drain().filter { if case .reclassified = $0.0 { return true }; return false }
         check(window.propertyReads == 1 && metadata.isEmpty, "a classified titled tile is no longer re-read on frequent focus events")
     }
+    section("AuditB 14e stale provisional metadata is dropped and health retries it") {
+        let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox()
+        var changed = 0
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [99001] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in if case .windowChanged = kind { changed += 1 } }, log: { _ in }, frontmostPID: { 99001 })
+        observer.clock.current = Stamp(revision: 1, epochs: [1: 1])
+        let worker = AppWorker(app: app, windows: [99001: LateTitleProbeWindow()], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.workers[99001] = worker
+        observer.activated(99001)
+        observer.clock.current = Stamp(revision: 1, epochs: [1: 2])
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(changed == 0, "activation metadata from another Space epoch cannot reclassify or focus current windows")
+        worker.refreshClassifications([99001])
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(changed == 1, "health refresh can retry provisional facts rejected as stale")
+    }
     section("AuditB 14b runtime focus retries untitled classification") {
         let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), clock = ScopeClock()
         clock.current = Stamp(revision: 1, epochs: [1: 0])
