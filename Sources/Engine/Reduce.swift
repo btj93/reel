@@ -438,7 +438,7 @@ extension World {
                 groups[destination]!.strip.removeTile(tile, at: now)
                 groups[destination]!.floating.insert(tile)
                 let outcome = run(.toggleFloating(tile), source: source, group: destination, &pass)
-                focus(FocusIntent(tile: tile, source: source), group: destination, &pass)
+                focus(FocusIntent(tile: tile, source: source, requestsOSFocus: source != .adoption), group: destination, &pass)
                 return outcome
             }
             if group.floating.remove(tile) != nil {
