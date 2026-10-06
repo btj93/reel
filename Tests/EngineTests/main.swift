@@ -265,8 +265,9 @@ final class FocusObservationBox: @unchecked Sendable {
                                     emit: { kind, _ in h.send(kind) }, log: { _ in })
             observer.workers = workers
             observer.clock.current = h.world.stamp
-            h.send(.command(.focus(TileID(1)), .keyboard)); executor.focus(TileID(1), pid: 101); a.drain()
-            h.send(.command(.focus(TileID(2)), .keyboard)); executor.focus(TileID(2), pid: 102); b.drain()
+            executor.synchronizeFocus(with: h.world, paused: false)
+            h.send(.command(.focus(TileID(1)), .keyboard)); executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!); a.drain()
+            h.send(.command(.focus(TileID(2)), .keyboard)); executor.focus(TileID(2), pid: 102, scope: h.world.scope(for: 1)!); b.drain()
             time.time = 100 + delay
             observer.activated(101); a.drain()
             box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
@@ -321,6 +322,31 @@ final class FocusObservationBox: @unchecked Sendable {
         h.advance(0.3)
         check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "slow superseded activation cannot refocus A")
     }
+    for change in ["decision", "pause", "Space begin", "Space commit", "topology", "stale topology", "stale epoch"] {
+        section("Audit A queued scope: " + change) {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 102)])
+            let clock = ScopeClock(), app = QueuedFocusApp(pid: 101, focused: 1), window = FocusProbeWindow(1, pid: 101)
+            let worker = AppWorker(app: app, windows: [1: window], clock: clock, send: { _, _ in })
+            let executor = Executor(worker: { _ in worker }, log: { _ in })
+            executor.synchronizeFocus(with: h.world, paused: false)
+            let scope = h.world.scope(for: 1)!
+            executor.focus(TileID(1), pid: 101, scope: EventScope(topologyRevision: change == "stale topology" ? 0 : scope.topologyRevision, group: 1, spaceEpoch: change == "stale epoch" ? 0 : scope.spaceEpoch))
+            executor.raise(TileID(1), pid: 101)
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(), executor: executor, effects: { _ in })
+            switch change {
+            case "decision": loop.send(.command(.focus(TileID(2)), .keyboard))
+            case "pause": executor.invalidateFocus()
+            case "Space begin": loop.send(.spaceWillChange)
+            case "Space commit": loop.send(.spaceChanged(key: .skylight(2), epoch: 2, windows: [ObservedWindow(id: TileID(3), pid: 103, bundleID: nil)]))
+            case "topology": loop.send(.topologyChanged(topology(2, [display()])))
+            default: break
+            }
+            app.drain()
+            check(window.focusCount == 0 && window.raiseCount == 0, "queued work is rejected after " + change)
+        }
+    }
     section("Audit A queued focus: old app-thread focus and raise cannot outlive newer focus") {
         let clock = ScopeClock()
         let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
@@ -328,9 +354,12 @@ final class FocusObservationBox: @unchecked Sendable {
         let workers = [Int32(101): AppWorker(app: a, windows: [1: wa], clock: clock, send: { _, _ in }),
                        Int32(102): AppWorker(app: b, windows: [2: wb], clock: clock, send: { _, _ in })]
         let executor = Executor(worker: { workers[$0] }, log: { _ in })
-        executor.focus(TileID(1), pid: 101)
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 102)])
+        executor.synchronizeFocus(with: h.world, paused: false)
+        executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!)
         executor.raise(TileID(1), pid: 101)
-        executor.focus(TileID(2), pid: 102)
+        executor.focus(TileID(2), pid: 102, scope: h.world.scope(for: 1)!)
         executor.raise(TileID(2), pid: 102)
         b.drain(); a.drain()
         check(wa.focusCount == 0 && wa.raiseCount == 0, "stale queued focus and raise must be discarded")

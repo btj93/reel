@@ -66,6 +66,8 @@ public struct EchoLedger: Sendable {
 @MainActor
 public final class Executor {
     public private(set) var ledger = EchoLedger()
+    private let focusWork = FocusWork()
+    private var focusTicket: FocusTicket?
     private var owners: [TileID: Int32] = [:]
     private let worker: (Int32) -> AppWorker?
     private let log: (String) -> Void
@@ -122,12 +124,31 @@ public final class Executor {
         }
     }
 
-    package func focus(_ tile: TileID, pid: Int32) {
-        worker(pid)?.run(tile) { $0.focus(timeout: 0.1) }
+    package func synchronizeFocus(with world: World, paused: Bool) {
+        focusWork.synchronize(world, paused: paused)
+    }
+
+    package func invalidateFocus() { focusWork.invalidate() }
+
+    func consumeFocusEcho(pid: Int32) -> Bool { focusWork.consumeEcho(pid: pid, now: now()) }
+
+    package func focus(_ tile: TileID, pid: Int32, scope: EventScope) {
+        let ticket = focusWork.ticket(tile: tile, pid: pid, scope: scope)
+        focusTicket = ticket
+        let work = focusWork, now = now
+        worker(pid)?.run(tile) { window in
+            guard work.claim(ticket, focus: true, now: now()) else { return }
+            window.focus(timeout: 0.1)
+        }
     }
 
     package func raise(_ tile: TileID, pid: Int32) {
-        worker(pid)?.run(tile) { _ = $0.raise() }
+        guard let ticket = focusTicket, ticket.tile == tile, ticket.pid == pid else { return }
+        let work = focusWork, now = now
+        worker(pid)?.run(tile) { window in
+            guard work.claim(ticket, focus: false, now: now()) else { return }
+            _ = window.raise()
+        }
     }
 
     func close(_ tile: TileID, pid: Int32) {

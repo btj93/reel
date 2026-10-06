@@ -137,7 +137,7 @@ public enum SpacePhase: Equatable, Sendable {
         return false
     }
 
-    var acceptsFocus: Bool { !isChanging || isSameSpaceHold }
+    package var acceptsFocus: Bool { !isChanging || isSameSpaceHold }
 
     /// A real Space change starting from here still has to cancel the pointer, timers and frames.
     var awaitsTeardown: Bool {

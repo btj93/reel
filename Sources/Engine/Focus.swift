@@ -13,7 +13,7 @@ public enum FocusSource: String, Codable, Sendable {
     }
 }
 
-public struct FocusIntent: Sendable {
+public struct FocusIntent: Equatable, Sendable {
     public let tile: TileID?
     public let pid: Int32?
     public let source: FocusSource
@@ -33,13 +33,13 @@ public struct FocusIntent: Sendable {
     }
 }
 
-public struct FocusDecision: Sendable {
+public struct FocusDecision: Equatable, Sendable {
     public let tile: TileID
     public let source: FocusSource
     public let time: Double
 }
 
-public enum FocusState: Sendable {
+public enum FocusState: Equatable, Sendable {
     case none
     case resolved(FocusDecision)
     case crossing(intent: FocusIntent, time: Double, previous: FocusDecision?)

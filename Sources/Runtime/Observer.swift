@@ -467,6 +467,9 @@ public final class Observer: CensusObserver {
     /// follows cannot commit before `reduce` hears of it; the app thread then names the window.
     package func activated(_ pid: Int32) {
         activationGeneration &+= 1
+        if executor.consumeFocusEcho(pid: pid) {
+            return log(FocusIntent(tile: nil, pid: pid, source: .appActivation).droppedLog(reason: "executed-focus-echo"))
+        }
         guard let worker = workers[pid] else {
             return log(FocusIntent(tile: nil, pid: pid, source: .appActivation).droppedLog(reason: "untracked-app"))
         }

@@ -100,12 +100,13 @@ public final class Loop {
     }
 
     package init(world: World, paths: Paths, censusObserver: any CensusObserver, reads: LoopReads,
-                 effects: @escaping ([Effect]) -> Void) {
+                 executor: Executor? = nil, effects: @escaping ([Effect]) -> Void) {
         self.world = world
         self.paths = paths
         self.censusObserver = censusObserver
         self.reads = reads
         effectsSink = effects
+        self.executor = executor
         spaces = SpaceObserver(clock: TimeUtil.now, changed: { _ in }, log: { _ in }, readSpace: reads.space)
     }
 
@@ -158,6 +159,7 @@ public final class Loop {
     @discardableResult
     private func reduceAndRun(_ event: Event) -> [Effect] {
         let effects = reduce(&world, event, now: max(TimeUtil.now(), world.time))
+        executor?.synchronizeFocus(with: world, paused: paused)
         if let effectsSink {
             effectsSink(effects)
             return effects
@@ -183,7 +185,7 @@ public final class Loop {
             switch effect {
             case .setFrame(let request): if !paused { executor.setFrame(request) }
             case .invalidateFrame(let tile, _): executor.invalidate(tile)
-            case .focus(let tile, _): if !paused, let pid = pid(of: tile) { executor.focus(tile, pid: pid) }
+            case .focus(let tile, _): if !paused, let pid = pid(of: tile) { executor.focus(tile, pid: pid, scope: world.scope(for: world.owner(of: tile)!)!) }
             case .raise(let tile): if !paused, let pid = pid(of: tile) { executor.raise(tile, pid: pid) }
             case .close(let tile): if let pid = pid(of: tile) { executor.close(tile, pid: pid) }
             case .reply(let id, let payload): replies[id] = payload
@@ -323,7 +325,7 @@ public final class Loop {
     public func setPaused(_ value: Bool) {
         guard value != paused else { return }
         if value, let session = world.pointer { send(.pointer(.cancel, session: session.token)) }
-        if value { everyGroup(.release) }
+        if value { executor?.invalidateFocus(); everyGroup(.release) }
         // Reconcile deaths while effects are still held; additions are admitted after resume.
         if !value { observer.healthCheck() }
         paused = value
