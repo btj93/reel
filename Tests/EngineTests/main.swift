@@ -268,6 +268,71 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review A11 lifecycle removal retires identities before PID reuse") {
+        for path in ["visible", "hidden", "saved", "exit", "no display"] {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 202), window(3, app: 101)])
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 202, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "the old app has a confirmed identity before lifecycle changes")
+            loop.send(.windowRemoved(TileID(3)), stamp: Stamp(revision: loop.world.topology.revision, epochs: [1: loop.world.groups[1]!.epoch - 1]))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "stale scoped removal cannot retire a current confirmation")
+            switch path {
+            case "hidden":
+                loop.send(.windowsHidden([TileID(3)]))
+                loop.send(.windowAdded(window(3, app: 101), frontmost: false))
+                check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "hiding alone preserves the entry for an unhidden window")
+                loop.send(.windowsHidden([TileID(3)]))
+            case "saved":
+                loop.send(.spaceChanged(key: .skylight(2), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(4, app: 404)]))
+                loop.send(.spaceChanged(key: .skylight(1), epoch: loop.world.groups[1]!.epoch + 1,
+                                        windows: [window(1, app: 101), window(2, app: 202), window(3, app: 101)]))
+                check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "another Space alone preserves confirmation for return")
+                loop.send(.spaceChanged(key: .skylight(2), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(4, app: 404)]))
+            case "exit":
+                loop.send(.windowRemoved(TileID(1)))
+                check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "retiring an app's other window does not evict the still-live target")
+            case "no display":
+                loop.send(.topologyChanged(topology(loop.world.topology.revision + 1, [])))
+                check(loop.world.groups.isEmpty, "the lifecycle fact can arrive with no display group")
+            default: break
+            }
+            loop.send(.windowRemoved(TileID(3)))
+            if path == "no display" {
+                let stamp = loop.world.stamp
+                loop.send(.topologyChanged(topology(loop.world.topology.revision + 1, [display()])), group: 0, stamp: stamp)
+            }
+            if path == "saved" || path == "no display" {
+                loop.send(.spaceChanged(key: .skylight(1), epoch: loop.world.groups[1]!.epoch + 1,
+                                        windows: [window(1, app: 101), window(2, app: 202)]))
+            }
+            loop.send(.windowAdded(window(3, app: 101), frontmost: false))
+            check(loop.indicatorFocus(frontmostPID: 101) == nil, "a reused PID and tile require fresh confirmation after \(path) removal")
+            check(loop.indicatorFocus(frontmostPID: 202) == TileID(2), "retirement preserves the unrelated peer app's identity")
+            loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "the reused identity can acquire a ring after a fresh report")
+            check(loop.world.check().isEmpty, "lifecycle replay preserves World invariants")
+        }
+    }
+    section("Review A11 PID churn cannot revive retired confirmations") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        for id: UInt32 in 1000..<1032 {
+            loop.send(.windowAdded(window(id, app: Int32(id)), frontmost: false))
+            loop.send(.focus(FocusIntent(tile: TileID(id), pid: Int32(id), source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: Int32(id)) == TileID(id), "each historical PID starts with a real confirmation")
+            loop.send(.windowRemoved(TileID(id)))
+        }
+        for id: UInt32 in 1000..<1032 {
+            loop.send(.windowAdded(window(id, app: Int32(id)), frontmost: false))
+            check(loop.indicatorFocus(frontmostPID: Int32(id)) == nil, "every historical PID needs fresh confirmation when reused")
+            loop.send(.windowRemoved(TileID(id)))
+        }
+    }
     section("Review A10 fresh unmanaged focus invalidates only its own app's ring") {
         for source in [FocusSource.axFocus, .appActivation] {
             var h = Harness()
