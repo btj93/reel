@@ -469,6 +469,7 @@ public final class Observer: CensusObserver {
     /// A Dock click or Cmd+Tab. The app is named at once, with the Space it was activated on, so a Space change that
     /// follows cannot commit before `reduce` hears of it; the app thread then names the window.
     package func activated(_ pid: Int32) {
+        onActivation(pid)
         if executor.consumeFocusEcho(pid: pid) {
             return log(FocusIntent(tile: nil, pid: pid, source: .appActivation).droppedLog(reason: "executed-focus-echo"))
         }

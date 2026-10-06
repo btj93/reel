@@ -142,7 +142,7 @@ extension World {
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
         let recent = [group.focus.decision, activeGroup.flatMap { groups[$0]?.focus.decision }].compactMap { $0 }
         if recent.contains(where: { decision in
-            guard decision.source.protectsFocus, pass.now - decision.time < EngineConfig.focusDebounce else { return false }
+            guard decision.source.protectsFocus, decision.requestsOSFocus, pass.now - decision.time < EngineConfig.focusDebounce else { return false }
             if intent.source == .appActivation, let pid = intent.pid, let owner = owner(of: decision.tile),
                let decidedPID = groups[owner]?.windows[decision.tile]?.pid { return pid == decidedPID }
             return true
@@ -199,7 +199,7 @@ extension World {
             let fulfilled = held.tile.map { $0 == tile } ?? (held.pid == group.windows[tile]?.pid)
             if !fulfilled { pass.effects.append(.log(held.droppedLog(reason: "crossing-superseded"))) }
         }
-        group.focus = .resolved(FocusDecision(tile: tile, source: intent.source, time: quietSince ?? pass.now))
+        group.focus = .resolved(FocusDecision(tile: tile, source: intent.source, time: quietSince ?? pass.now, requestsOSFocus: intent.requestsOSFocus))
         group.focusedAt = max(group.focusedAt, quietSince ?? pass.now)
         groups[id] = group
         if intent.source != .axFocus, quietSince == nil, intent.requestsOSFocus {

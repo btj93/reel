@@ -84,7 +84,8 @@ public final class Loop {
                             managed: { [unowned self] in Set(world.groups.values.flatMap(\.windows.keys).map(\.rawValue)) },
                             elsewhere: { [unowned self] in world.trackedElsewhere },
                             paused: { [unowned self] in paused },
-                            emit: { [unowned self] in send($0, stamp: $1) }, log: logLine)
+                            emit: { [unowned self] in send($0, stamp: $1) }, log: logLine,
+                            onActivation: { [weak self] in self?.updateIndicator(frontmostPID: $0) })
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },
                               deliver: { [unowned self] in run($0) }, log: logLine)
         store = SnapshotStore(directory: paths.stateDir, log: logLine)
@@ -444,7 +445,9 @@ public final class Loop {
     // MARK: Focus indicator
 
     package func indicatorFocus(frontmostPID: Int32?) -> TileID? {
-        focusedTile
+        guard let tile = focusedTile, let id = world.owner(of: tile),
+              world.groups[id]?.windows[tile]?.pid == frontmostPID else { return nil }
+        return tile
     }
 
     package func changePauseState(_ value: Bool, reconcile: () -> Void) {
@@ -452,9 +455,15 @@ public final class Loop {
         paused = value
     }
 
-    private func updateIndicator() {
+    private func updateIndicator(frontmostPID: Int32? = nil) {
         guard config.indicator.style == .ring || config.indicator.style == .flash else { return }
-        guard !paused, let tile = focusedTile, let frame = world.frames[tile]?.frame,
+        let frontmostPID = frontmostPID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        guard let tile = indicatorFocus(frontmostPID: frontmostPID) else {
+            if indicatorTile != nil, indicator.fadeOut() { frameLoop.resume() }
+            indicatorTile = nil
+            return
+        }
+        guard !paused, let frame = world.frames[tile]?.frame,
               let area = world.owner(of: tile).flatMap(world.topology.group(id:))?.frame,
               frame.rect.intersection(area).width >= 10 else {
             indicator.hide()

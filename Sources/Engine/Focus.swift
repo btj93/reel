@@ -37,6 +37,14 @@ public struct FocusDecision: Equatable, Sendable {
     public let tile: TileID
     public let source: FocusSource
     public let time: Double
+    public let requestsOSFocus: Bool
+
+    init(tile: TileID, source: FocusSource, time: Double, requestsOSFocus: Bool = true) {
+        self.tile = tile
+        self.source = source
+        self.time = time
+        self.requestsOSFocus = requestsOSFocus
+    }
 }
 
 public enum FocusState: Equatable, Sendable {
