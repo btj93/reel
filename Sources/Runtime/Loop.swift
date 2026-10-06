@@ -341,7 +341,7 @@ public final class Loop {
     }
 
     private func reportFrontmostFocus() {
-        NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: false, space: nil)
+        NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: nil, space: nil)
     }
 
     /// Load the config file. On any error the previous config stays active and the error is kept for the menu bar.

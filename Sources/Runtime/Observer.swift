@@ -23,6 +23,11 @@ public struct WindowFacts: Equatable, Sendable {
 }
 
 /// What an app thread saw or did.
+package struct ActivationReport: Sendable {
+    let generation: UInt64
+    let stamp: Stamp?
+}
+
 package enum Observation: Sendable {
     case discovered(pid: Int32, [WindowFacts])
     case created(WindowFacts)
@@ -32,7 +37,7 @@ package enum Observation: Sendable {
     case retitled(WindowFacts)
     case moved(CGWindowID, CGRect)
     /// `space` is the Space the focus was observed on, read where it happened; nil without SkyLight.
-    case focused(pid: Int32, CGWindowID?, activation: Bool, space: SpaceKey?)
+    case focused(pid: Int32, CGWindowID?, activation: ActivationReport?, space: SpaceKey?)
     /// `landed` is the frame the app kept, when known: an app may clamp the size we asked for.
     /// `scope` is the one the write was made for, so a completion from before a topology change is dropped as stale.
     case wrote(TileID, revision: UInt64, frame: CGRect, landed: CGRect?, FrameResult, scope: EventScope)
@@ -245,12 +250,12 @@ package final class AppWorker: @unchecked Sendable {
         }
     }
 
-    func reportFocus(activation: Bool, space: SpaceKey?) {
+    func reportFocus(activation: ActivationReport?, space: SpaceKey?) {
         app.perform { [self] in
-            let stamp = clock.current
+            let stamp = activation?.stamp ?? clock.current
             let id = app.focusedWindowID()
-            let frame = activation ? nil : id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
-            send(.focused(pid: pid, id, activation: activation, space: activation ? space : focusSpace(frame)), stamp)
+            let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
+            send(.focused(pid: pid, id, activation: activation, space: focusSpace(frame)), stamp)
         }
     }
 
@@ -300,7 +305,7 @@ package final class AppWorker: @unchecked Sendable {
         case kAXFocusedWindowChangedNotification:
             let id = windowID(for: element)
             let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
-            post(.focused(pid: pid, id, activation: false, space: SpaceObserver.observedSpace(at: frame)))
+            post(.focused(pid: pid, id, activation: nil, space: SpaceObserver.observedSpace(at: frame)))
         default: break
         }
     }
@@ -355,7 +360,7 @@ public final class Observer: CensusObserver {
     private var ignored = Set<CGWindowID>()
     /// While paused, the engine hears only removals and retitles; the registry still tracks everything for the resume census.
     private let paused: () -> Bool
-    private let activationSpace: () -> SpaceKey?
+    private var activationGeneration: UInt64 = 0
 
     private lazy var censusDiscovery: CensusDiscovery = CensusDiscovery { [weak self] pid in
         guard let self else { return }
@@ -370,14 +375,12 @@ public final class Observer: CensusObserver {
 
     package init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
          elsewhere: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
-         emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void,
-         activationSpace: @escaping () -> SpaceKey? = { SpaceObserver.observedSpace() }) {
+         emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
         self.elsewhere = elsewhere
         self.paused = paused
-        self.activationSpace = activationSpace
         self.emit = emit
         self.log = log
     }
@@ -463,15 +466,17 @@ public final class Observer: CensusObserver {
     /// A Dock click or Cmd+Tab. The app is named at once, with the Space it was activated on, so a Space change that
     /// follows cannot commit before `reduce` hears of it; the app thread then names the window.
     package func activated(_ pid: Int32) {
+        activationGeneration &+= 1
         guard let worker = workers[pid] else {
             return log(FocusIntent(tile: nil, pid: pid, source: .appActivation).droppedLog(reason: "untracked-app"))
         }
-        let space = activationSpace()
+        // The OS may already expose the destination Space. The current epoch, not that key, scopes the click.
+        let space: SpaceKey? = nil
         let intent = FocusIntent(tile: nil, pid: pid, source: .appActivation, observedSpace: space)
         if paused() { log(intent.droppedLog(reason: "paused")) }
         else if let stamp = clock.current { emit(.focus(intent), stamp) }
         else { log(intent.droppedLog(reason: "missing-scope")) }
-        worker.reportFocus(activation: true, space: space)
+        worker.reportFocus(activation: ActivationReport(generation: activationGeneration, stamp: clock.current), space: space)
     }
 
     /// A hidden app's windows leave the strip, or the saved strip of the Space they are on, but stay known, so the
@@ -563,7 +568,10 @@ public final class Observer: CensusObserver {
             guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
         case .focused(let pid, let id, let activation, let space):
-            let intent = FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation ? .appActivation : .axFocus, observedSpace: space)
+            let intent = FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation != nil ? .appActivation : .axFocus, observedSpace: space)
+            if let activation, activation.generation != activationGeneration {
+                return log(intent.droppedLog(reason: "superseded-activation"))
+            }
             guard !paused() else { return log(intent.droppedLog(reason: "paused")) }
             guard let stamp else { return log(intent.droppedLog(reason: "missing-scope")) }
             emit(.focus(intent), stamp)

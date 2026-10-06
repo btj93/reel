@@ -249,7 +249,7 @@ final class FocusObservationBox: @unchecked Sendable {
         let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
                                 managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
                                 emit: { kind, _ in if case .focus(let intent) = kind { intents.append(intent) } },
-                                log: { _ in }, activationSpace: { .skylight(20) })
+                                log: { _ in })
         observer.clock.current = h.world.stamp
         observer.workers[101] = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock,
                                           focusSpace: { frame in frame == nil ? nil : .skylight(10) }, send: box.append)
@@ -269,8 +269,8 @@ final class FocusObservationBox: @unchecked Sendable {
         let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
                                 emit: { kind, _ in h.send(kind) }, log: { _ in })
         observer.clock.current = h.world.stamp
-        observer.workers[101] = AppWorker(app: a, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock, send: box.append)
-        observer.workers[102] = AppWorker(app: b, windows: [2: FocusProbeWindow(2, pid: 102)], clock: observer.clock, send: box.append)
+        observer.workers[101] = AppWorker(app: a, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.workers[102] = AppWorker(app: b, windows: [2: FocusProbeWindow(2, pid: 102)], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
         observer.activated(101)
         observer.activated(102)
         b.drain()
