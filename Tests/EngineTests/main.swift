@@ -5298,7 +5298,27 @@ final class CensusFixture: CensusObserver {
     }
 }
 
+final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
+    init() { super.init(element: AXUIElementCreateApplication(99001), windowID: 99001, pid: 99001) }
+    override func getFrame() -> AXResult<CGRect> { .success(CGRect(x: 100, y: 30, width: 500, height: 600)) }
+    override func getPropertiesFast() -> WindowProperties {
+        WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: "Document", frame: try? getFrame().get())
+    }
+}
+
+@MainActor func auditBLateFocusTest() {
+    section("AuditB 14b runtime focus retries untitled classification") {
+        let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), clock = ScopeClock()
+        clock.current = Stamp(revision: 1, epochs: [1: 0])
+        let worker = AppWorker(app: app, windows: [99001: LateTitleProbeWindow()], clock: clock, focusSpace: { _ in nil }, send: box.append)
+        worker.reportFocus(activation: nil)
+        app.drain()
+        check(box.drain().contains { if case .retitled(let facts) = $0.0 { return facts.title == "Document" && facts.classification == .tile }; return false }, "focus re-reads late title without title notification")
+    }
+}
+
 MainActor.assumeIsolated {
+    auditBLateFocusTest()
     auditBTests()
     do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests(); try pointerTests() }
     catch { check(false, "unexpected error: \(error)") }
