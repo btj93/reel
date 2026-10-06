@@ -5231,7 +5231,75 @@ final class CensusFixture: CensusObserver {
     #endif
 }
 
+@MainActor func auditBTests() {
+    section("AuditB 1 independent-display migration and floating re-tile") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(1, [window(1, x: 100)])
+        h.census(2, [window(2, x: 1200)], group: 2)
+        let moved = AXRect(CGRect(x: 1300, y: 30, width: 350, height: 600))
+        h.send(.windowMoved(TileID(1), moved))
+        check(h.world.owner(of: TileID(1)) == 2, "foreign settled move migrates to destination strip")
+        check(h.world.groups[2]!.focus.decision?.tile == TileID(1), "migration focuses moved tile")
+        h.send(.command(.toggleFloating(TileID(1)), .ipc), group: h.world.owner(of: TileID(1))!)
+        h.send(.windowMoved(TileID(1), AXRect(CGRect(x: 100, y: 30, width: 350, height: 600))), group: h.world.owner(of: TileID(1))!)
+        h.send(.command(.toggleFloating(TileID(1)), .ipc), group: h.world.owner(of: TileID(1))!)
+        check(h.world.owner(of: TileID(1)) == 1 && h.world.groups[1]!.strip.columns.contains { $0.tiles.contains(TileID(1)) }, "float drag re-tiles under current frame")
+        check(h.world.check().isEmpty, "migration invariants")
+        var merged = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        merged.census(1, [window(1, x: 100)])
+        merged.send(.windowMoved(TileID(1), moved))
+        check(merged.world.owner(of: TileID(1)) == 1, "merged-strip seam is not migration")
+    }
+    section("AuditB 5 release live stashes but never disk identities") {
+        var h = Harness()
+        h.census(1, (1...5).map { window(UInt32($0)) })
+        let saved = h.world.currentSnapshot(group: 1)!
+        h.census(2, [window(20)])
+        let effects = h.send(.command(.release, .ipc))
+        let writes = effects.compactMap { effect -> FrameRequest? in if case .setFrame(let r) = effect { return r }; return nil }
+        check(Set((1...5).map { TileID(UInt32($0)) }).isSubset(of: Set(writes.map(\.tile))), "release includes tiles held only on another live Space")
+        check(Set(writes.map(\.tile)).count == writes.count, "release dedupes current and stashed windows")
+        check(writes.allSatisfy { if case .release(let area) = $0.purpose { return area.rect.contains($0.frame.rect) }; return false }, "release uses per-display contained frames")
+        var disk = Harness()
+        disk.send(.loadSnapshots([saved]))
+        disk.census(2, [window(20, bundle: "other")])
+        disk.send(.command(.release, .ipc))
+        check(disk.requests.allSatisfy { $0.tile == TileID(20) }, "disk-only identities never receive writes")
+    }
+    section("AuditB 7 9 bounded retries retain focus-ring frame") {
+        for result in [FrameResult.failed, .sizeUnconfirmed] {
+            var h = Harness()
+            h.census(1, [window(1)])
+            var request = h.world.frames[TileID(1)]!
+            for delay in [0.1, 0.5, 2.0] {
+                h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: result))
+                check(h.world.frames[request.tile] != nil, "failed size keeps last known ring frame")
+                let earliest = h.world.timers.values.map(\.deadline).min()!
+                check(abs(earliest - h.time - delay) < 0.001, "per-tile retry uses bounded backoff \(delay)")
+                h.advance(delay + 0.001)
+                request = h.world.frames[request.tile]!
+            }
+            let gaveUp = h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: result))
+            check(h.world.timers.isEmpty, "fourth failure stops retrying")
+            check(gaveUp.contains { if case .log(let line) = $0 { return line.contains("frame give-up") }; return false }, "give-up is logged")
+            h.send(.tick, advance: 20)
+            check(h.requests.isEmpty, "idle cannot resurrect failed write")
+            h.send(.command(.recover, .ipc))
+            check(!h.requests.isEmpty, "recover resets retry budget")
+        }
+    }
+    section("AuditB 14 first nonempty rule title latches after untitled adoption") {
+        var h = Harness(rules: [Rule(titleRegex: "^Settings$", floating: true)])
+        h.census(1, [ObservedWindow(id: TileID(1), pid: 1, bundleID: nil, title: "")])
+        h.send(.windowChanged(ObservedWindow(id: TileID(1), pid: 1, bundleID: nil, title: "Settings"), frontmost: true))
+        check(h.world.groups[1]!.floating.contains(TileID(1)), "late first title applies title_regex")
+        h.send(.windowChanged(ObservedWindow(id: TileID(1), pid: 1, bundleID: nil, title: "Document"), frontmost: true))
+        check(h.world.groups[1]!.floating.contains(TileID(1)), "nonempty rule title remains stable thereafter")
+    }
+}
+
 MainActor.assumeIsolated {
+    auditBTests()
     do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests(); try pointerTests() }
     catch { check(false, "unexpected error: \(error)") }
     var seeds: [UInt64] = [0]
