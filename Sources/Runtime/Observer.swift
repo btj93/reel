@@ -36,6 +36,7 @@ package enum Observation: Sendable {
     case minimized(CGWindowID)
     case restored(WindowFacts)
     case retitled(WindowFacts)
+    case reclassified(WindowFacts, activation: ActivationReport?)
     case moved(CGWindowID, CGRect)
     /// `space` is the Space the focus was observed on, read where it happened; nil without SkyLight.
     case focused(pid: Int32, CGWindowID?, activation: ActivationReport?, space: SpaceKey?)
@@ -249,6 +250,7 @@ package final class AppWorker: @unchecked Sendable {
         app.perform { [self] in
             guard let window = windows[id], case .failure(.elementInvalid) = window.getPosition() else { return }
             windows.removeValue(forKey: id)
+            pendingClassification.remove(id)
             sizes.forget(id)
             post(.destroyed(id))
         }
@@ -262,7 +264,7 @@ package final class AppWorker: @unchecked Sendable {
         app.perform { [self] in
             let stamp = if let activation { activation.stamp } else { clock.current }
             let id = app.focusedWindowID()
-            if let id { refreshClassification(id, stamp: stamp) }
+            if let id { refreshClassification(id, stamp: stamp, activation: activation) }
             let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
             send(.focused(pid: pid, id, activation: activation, space: frame.flatMap { focusSpace($0) }), stamp)
         }
@@ -299,6 +301,7 @@ package final class AppWorker: @unchecked Sendable {
             guard let id = windows.first(where: { CFEqual($0.value.element, element) })?.key else { return }
             app.unobserveWindow(element)
             windows.removeValue(forKey: id)
+            pendingClassification.remove(id)
             sizes.forget(id)
             post(.destroyed(id))
         case kAXWindowMiniaturizedNotification:
@@ -331,9 +334,9 @@ package final class AppWorker: @unchecked Sendable {
     }
 
     /// Only provisional facts are re-read on frequent events; a titled tiled window costs no extra AX calls.
-    private func refreshClassification(_ id: CGWindowID, stamp: Stamp?) {
-        guard pendingClassification.contains(id), let window = windows[id] else { return }
-        send(.retitled(facts(window)), stamp)
+    private func refreshClassification(_ id: CGWindowID, stamp: Stamp?, activation: ActivationReport? = nil, force: Bool = false) {
+        guard let stamp, force || pendingClassification.contains(id), let window = windows[id] else { return }
+        send(.reclassified(facts(window), activation: activation), stamp)
     }
 
     package func refreshClassifications(_ ids: [CGWindowID]) {
@@ -346,7 +349,7 @@ package final class AppWorker: @unchecked Sendable {
         if !app.perform({ [self] in
             lock.withLock { classificationQueued = false }
             let stamp = clock.current
-            ids.forEach { refreshClassification($0, stamp: stamp) }
+            ids.forEach { refreshClassification($0, stamp: stamp, force: true) }
         }) { lock.withLock { classificationQueued = false } }
     }
 
@@ -626,6 +629,12 @@ public final class Observer: CensusObserver {
             learn(facts)
             // Even while paused, so a late title is not lost; the engine's writes are held back until resume.
             if facts.classification != .ignore { emit(.windowChanged(facts.observed, frontmost: facts.pid == frontmostPID()), nil) }
+        case .reclassified(let facts, let activation):
+            // Provisional facts may change membership/focus. Never apply an activation's metadata to a newer scope.
+            guard let stamp, stamp == clock.current else { return }
+            if let activation, activation.generation != activationGeneration || activation.focusGeneration != executor.focusGeneration { return }
+            learn(facts)
+            if facts.classification != .ignore { emit(.windowChanged(facts.observed, frontmost: facts.pid == frontmostPID()), stamp) }
         case .moved(let id, let frame):
             guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))

@@ -56,7 +56,7 @@ Horizontally touching displays merge only when separate Spaces are off. Other di
 
 Config is `~/.config/reel/config.toml`. A missing file is created from the new template. Existing files are never overwritten. An invalid startup file runs defaults and shows its first schema error in the menu. A failed reload leaves the last valid configuration active. Reload is manual.
 
-State is `~/.local/state/reel/next-spaces.json`. Bundle logs use `~/Library/Logs/Reel/reel.log`, rotating to one `.1` backup above 1 MB at launch. Bare binaries log to their terminal. Sandbox overrides are `REEL_CONFIG_DIR`, `REEL_STATE_DIR`, `REEL_SOCKET_PATH`, `REEL_MANAGE_ONLY_PIDS` and `REEL_LOG_PATH`. Unset/empty overrides use normal defaults. Manage-only PIDs are positive comma-separated integers; an empty/unparsable list is inert.
+State is `~/.local/state/reel/next-spaces.json`. Bundle logs use `~/Library/Logs/Reel/reel.log`, rotating to one `.1` backup above 1 MB at launch and during the session. Bare binaries log to their terminal. Sandbox overrides are `REEL_CONFIG_DIR`, `REEL_STATE_DIR`, `REEL_SOCKET_PATH`, `REEL_MANAGE_ONLY_PIDS` and `REEL_LOG_PATH`. Unset/empty overrides use normal defaults. Manage-only PIDs are positive comma-separated integers; an empty/unparsable list is inert.
 
 IPC uses the per-user Reel Unix socket. Commands include focus and move actions, width/full-width/floating/close, `list-windows`, `get-layout`, `get-layouts`, `list-positions`, `clear-positions`, `clear-positions-app <bundle-id>`, `recover`, `pause`, `resume`, `reload-config`, `get-status` and `quit`. JSON diagnostic shapes are documented by the smoke fixtures and Engine tests, not a compatibility promise.
 
