@@ -220,7 +220,7 @@ public final class Loop {
         censusSerial += 1
         let serial = censusSerial
         pendingCensuses[group] = serial
-        censusObserver.prepareCensus(reads.screen()) { [weak self] in
+        censusObserver.prepareCensus(reads.screen()) { [weak self] frontmost in
             guard let self, !quitting, pendingCensuses[group] == serial else { return }
             pendingCensuses[group] = nil
             guard world.scope(for: group) == owner,
@@ -236,7 +236,7 @@ public final class Loop {
             }
             let epoch = (world.groups[group]?.epoch ?? 0) + 1
             logLine("loop: census group=\(group) key=\(key.debugDescription) windows=\(windows.count)")
-            send(.spaceChanged(key: key, epoch: epoch, windows: windows), group: group)
+            send(.spaceChanged(key: key, epoch: epoch, windows: windows, frontmost: frontmost), group: group)
             if effectsSink == nil { reportFrontmostFocus() }
         }
     }
@@ -343,7 +343,7 @@ public final class Loop {
     }
 
     private func reportFrontmostFocus() {
-        NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: nil, space: nil)
+        NSWorkspace.shared.frontmostApplication.flatMap { observer.workers[$0.processIdentifier] }?.reportFocus(activation: nil)
     }
 
     /// Load the config file. On any error the previous config stays active and the error is kept for the menu bar.

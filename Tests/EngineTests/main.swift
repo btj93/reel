@@ -259,6 +259,16 @@ final class FocusObservationBox: @unchecked Sendable {
         check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "Space return prefers the OS's current managed window")
         check(!h.effects.contains { if case .focus(TileID(1), _) = $0 { true } else { false } }, "return cannot reassert stale saved focus")
     }
+    section("Audit A return: a held Dock click wins over the sampled OS focus") {
+        var h = Harness()
+        h.census(1, [window(1), window(2)])
+        h.census(2, [window(3)])
+        h.send(.focus(FocusIntent(tile: nil, pid: 2, source: .appActivation)))
+        h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [window(1), window(2)], frontmost: TileID(1)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "explicit held click precedes census focus")
+        check(h.effects.contains { if case .focus(TileID(2), .appActivation) = $0 { true } else { false } }, "held crossing still activates the clicked app")
+    }
     section("Audit A return: frontmost on another display cannot override the destination strip") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(1, [window(1), window(2)])
@@ -2548,10 +2558,11 @@ final class CensusFixture: CensusObserver {
     var known: [CGWindowID: WindowFacts] { [:] }
     var windows: [ObservedWindow] = []
     var pending: [() -> Void] = []
+    var frontmost: TileID?
     var reads = 0
 
-    func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping () -> Void) {
-        pending.append(completion)
+    func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping (TileID?) -> Void) {
+        pending.append { completion(self.frontmost) }
     }
 
     func census(_ onScreen: [CGWindowInfo], space: SpaceKey?) -> [ObservedWindow] {
@@ -2561,6 +2572,49 @@ final class CensusFixture: CensusObserver {
 }
 
 @MainActor func runtimeTests() {
+    section("Audit A return runtime: fresh frontmost reaches the scoped destination census") {
+        var h = Harness()
+        h.census(1, [window(1), window(2)])
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.census(2, [window(3)])
+        let fixture = CensusFixture()
+        fixture.windows = [window(1), window(2)]
+        fixture.frontmost = TileID(2)
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]), censusObserver: fixture,
+                        reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: 1, uuid: nil, isUserSpace: true) }, screen: { [] }, memberships: { _ in [1] }), effects: { _ in })
+        loop.census(group: 1)
+        fixture.pending.first?()
+        check(loop.world.groups[1]?.focus.decision?.tile == TileID(2), "Loop carries current focused tile into Engine restore")
+    }
+    section("Audit A return runtime: focus read is bounded, fresh, and activation-versioned") {
+        let app = QueuedFocusApp(pid: 101, focused: 1), clock = ScopeClock()
+        let worker = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: clock, send: { _, _ in })
+        var frontmost: Int32? = 101
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [1] }, elsewhere: { [] }, paused: { false }, emit: { _, _ in }, log: { _ in }, frontmostPID: { frontmost })
+        observer.workers[101] = worker
+        var results: [TileID?] = []
+        observer.readFrontmost { results.append($0) }
+        app.drain(); RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        check(results == [TileID(1)], "fresh app-thread AX focus is reported")
+        results = []
+        observer.readFrontmost { results.append($0) }
+        frontmost = 999
+        app.drain(); RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        check(results == [nil], "a changed frontmost pid rejects the stale read")
+        frontmost = 101; results = []
+        observer.readFrontmost { results.append($0) }
+        observer.activated(999)
+        app.drain(); RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        check(results == [nil], "a superseded activation rejects the read even if pid has returned")
+        results = []
+        observer.readFrontmost { results.append($0) }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.20))
+        check(results == [nil], "hung app's focus read completes with explicit missing focus")
+        app.drain(); RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        check(results == [nil], "late AX focus cannot replace the timed-out answer")
+    }
+
     section("R7 parking survives topology and genuine moves override parking") {
         let builtIn = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1800, height: 1169),
                               area: CGRect(x: 0, y: 39, width: 1800, height: 1032))
@@ -2694,7 +2748,7 @@ final class CensusFixture: CensusObserver {
         effects = []
         loop.send(.windowAdded(window(3)))
         check(loop.world.groups[1]!.windows.isEmpty && effects.isEmpty, "a departing-Space window cannot enter the settled destination")
-        loop.send(.windowAdded(window(2)))
+        loop.send(.windowAdded(window(2), frontmost: true))
         check(Set(loop.world.groups[1]!.windows.keys) == [TileID(2)], "matching injected observation reaches Engine adoption")
         check(effects.contains { if case .focus(let tile, .adoption) = $0 { tile == TileID(2) } else { false } },
               "matching adoption produces a focus effect through Loop")
@@ -3581,8 +3635,8 @@ final class CensusFixture: CensusObserver {
         h.advance(1)
         h.send(.windowChanged(window(4)))
         let focused = h.effects.contains { if case .focus(TileID(4), .adoption) = $0 { true } else { false } }
-        check(focused && h.active == TileID(4) && h.world.groups[1]!.focus.decision?.tile == TileID(4),
-              "the titled window is focused, and is the active column")
+        check(!focused && h.active == TileID(4) && h.world.groups[1]!.focus.decision?.tile == TileID(4),
+              "the background titled window becomes the active column without OS focus")
         let area = h.world.topology.groups[0].frame
         check(h.world.frames[TileID(4)].map { area.contains($0.frame.rect) } ?? false, "the titled window is on screen")
         var clicked = Harness()

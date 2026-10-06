@@ -250,7 +250,11 @@ package final class AppWorker: @unchecked Sendable {
         }
     }
 
-    func reportFocus(activation: ActivationReport?, space: SpaceKey?) {
+    package func readFocus(_ completion: @escaping @Sendable (CGWindowID?) -> Void) -> Bool {
+        app.perform { [self] in completion(app.focusedWindowID()) }
+    }
+
+    func reportFocus(activation: ActivationReport?) {
         app.perform { [self] in
             let stamp = activation?.stamp ?? clock.current
             let id = app.focusedWindowID()
@@ -353,6 +357,7 @@ public final class Observer: CensusObserver {
     private let elsewhere: () -> Set<CGWindowID>
     private let log: (String) -> Void
     private let onActivation: (Int32) -> Void
+    private let frontmostPID: () -> Int32?
     private var tokens: [NSObjectProtocol] = []
     private var healthTimer: Timer?
     private var awaitingDiscovery = Set<Int32>()
@@ -377,7 +382,8 @@ public final class Observer: CensusObserver {
     package init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
          elsewhere: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
          emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void,
-         onActivation: @escaping (Int32) -> Void = { _ in }) {
+         onActivation: @escaping (Int32) -> Void = { _ in },
+         frontmostPID: @escaping () -> Int32? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
@@ -385,6 +391,7 @@ public final class Observer: CensusObserver {
         self.paused = paused
         self.emit = emit
         self.onActivation = onActivation
+        self.frontmostPID = frontmostPID
         self.log = log
     }
 
@@ -425,12 +432,27 @@ public final class Observer: CensusObserver {
             .sorted { $0.id < $1.id }.map { $0.observed(at: frames[$0.id]) }
     }
 
-    package func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping () -> Void) {
+    package func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping (TileID?) -> Void) {
         let unknown = onScreen.filter {
             $0.layer == 0 && known[$0.windowID] == nil && !ignored.contains($0.windowID) &&
                 (allowedPids?.contains($0.ownerPID) ?? true)
         }
-        censusDiscovery.refresh(Set(unknown.map(\.ownerPID)), completion: completion)
+        censusDiscovery.refresh(Set(unknown.map(\.ownerPID))) { [weak self] in
+            guard let self else { return completion(nil) }
+            readFrontmost(completion: completion)
+        }
+    }
+
+    package func readFrontmost(completion: @escaping (TileID?) -> Void) {
+        guard let pid = frontmostPID(), let worker = workers[pid] else { return completion(nil) }
+        let generation = activationGeneration
+        let read = FrontmostRead(completion: completion)
+        if !worker.readFocus({ [weak self] id in
+            DispatchQueue.main.async { MainActor.assumeIsolated {
+                guard let self, self.frontmostPID() == pid, self.activationGeneration == generation else { return read.finish(nil) }
+                read.finish(id.map(TileID.init))
+            } }
+        }) { read.finish(nil) }
     }
 
     /// Removals for windows that died without a notification, additions for on-screen windows the engine lacks.
@@ -463,11 +485,10 @@ public final class Observer: CensusObserver {
             if let worker = workers[pid] { worker.rediscover(windows.map(\.windowID)) }
             else { NSRunningApplication(processIdentifier: pid).map(register) }
         }
-        for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window, frontmost: window.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier), nil) }
+        for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window, frontmost: window.pid == frontmostPID()), nil) }
     }
 
-    /// A Dock click or Cmd+Tab. The app is named at once, with the Space it was activated on, so a Space change that
-    /// follows cannot commit before `reduce` hears of it; the app thread then names the window.
+    /// Name the app before a destination census can commit, then read its focused window on the app thread.
     package func activated(_ pid: Int32) {
         onActivation(pid)
         if executor.consumeFocusEcho(pid: pid) {
@@ -484,7 +505,7 @@ public final class Observer: CensusObserver {
         if paused() { log(intent.droppedLog(reason: "paused")) }
         else if let stamp = clock.current { emit(.focus(intent), stamp) }
         else { log(intent.droppedLog(reason: "missing-scope")) }
-        worker.reportFocus(activation: ActivationReport(generation: activationGeneration, stamp: clock.current), space: space)
+        worker.reportFocus(activation: ActivationReport(generation: activationGeneration, stamp: clock.current))
     }
 
     /// A hidden app's windows leave the strip, or the saved strip of the Space they are on, but stay known, so the
@@ -557,7 +578,7 @@ public final class Observer: CensusObserver {
         case .created(let facts):
             learn(facts)
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
-            if !paused(), facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier)) }
+            if !paused(), facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == frontmostPID())) }
         case .destroyed(let id):
             let tracked = managed().contains(id) || elsewhere().contains(id)
             forget(id)
@@ -567,7 +588,7 @@ public final class Observer: CensusObserver {
             if managed().contains(id) { emit(.windowsHidden([TileID(id)]), nil) }
         case .restored(let facts):
             learn(facts)
-            if !paused(), facts.classification != .ignore { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier)) }
+            if !paused(), facts.classification != .ignore { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == frontmostPID())) }
         case .retitled(let facts):
             learn(facts)
             // Even while paused, so a late title is not lost; the engine's writes are held back until resume.

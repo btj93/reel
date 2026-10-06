@@ -6,7 +6,7 @@ import Platform
 @MainActor
 package protocol CensusObserver {
     var known: [CGWindowID: WindowFacts] { get }
-    func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping () -> Void)
+    func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping (TileID?) -> Void)
     func census(_ onScreen: [CGWindowInfo], space: SpaceKey?) -> [ObservedWindow]
 }
 

@@ -62,7 +62,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
         pass.effects.append(.reply(id: requestID, payload: .snapshots(snapshots)))
     case .pointer(let input, let token): world.onPointer(input, token: token, group: id, &pass)
     case .spaceWillChange: world.onSpaceWillChange(group: id, &pass)
-    case .spaceChanged(let key, let epoch, let windows, _): world.onSpaceChanged(key: key, epoch: epoch, windows: windows, group: id, &pass)
+    case .spaceChanged(let key, let epoch, let windows, let frontmost): world.onSpaceChanged(key: key, epoch: epoch, windows: windows, frontmost: frontmost, group: id, &pass)
     case .frameCompleted(let tile, let revision, let result): world.onFrameCompleted(tile, revision: revision, result: result, &pass)
     case .timer(let token): world.onTimer(token, group: id, &pass)
     case .tick: world.onTick(&pass)
@@ -707,7 +707,7 @@ extension World {
         groups[id]!.phase = SpacePhase(space: group.space, deferred: DeferredCensus(key: deferred.key, since: pass.now))
     }
 
-    fileprivate mutating func onSpaceChanged(key: SpaceKey, epoch: UInt64, windows observed: [ObservedWindow], group id: UInt32, _ pass: inout Pass) {
+    fileprivate mutating func onSpaceChanged(key: SpaceKey, epoch: UInt64, windows observed: [ObservedWindow], frontmost: TileID?, group id: UInt32, _ pass: inout Pass) {
         guard let group = groups[id], !key.isEmpty || (observed.isEmpty && !key.isAuthoritative) else {
             return pass.effects.append(.log("space census without identity ignored"))
         }
@@ -760,7 +760,7 @@ extension World {
                                         settledReads: reads, lastSettled: settled ? key : deferred?.lastSettled)
             return deferCensus(census, reason: "\(verdict) space census", group: id, &pass)
         }
-        commitSpace(key, onto: target.onto, epoch: epoch, windows: windows, group: id, &pass)
+        commitSpace(key, onto: target.onto, epoch: epoch, windows: windows, frontmost: frontmost, group: id, &pass)
         // A fingerprint is matched by overlap, so a window that moved here must leave the Space it came from, or that
         // Space's stash stops matching its own windows. A window on screen here is hidden nowhere else.
         if target.prunes { prune(ids, from: otherSpaces(than: id)) }
@@ -774,7 +774,7 @@ extension World {
     }
 
     /// `onto` names the saved strip to restore, by key or by overlap; nil restores none.
-    private mutating func commitSpace(_ key: SpaceKey, onto: SpaceKey?, epoch: UInt64, windows: [ObservedWindow],
+    private mutating func commitSpace(_ key: SpaceKey, onto: SpaceKey?, epoch: UInt64, windows: [ObservedWindow], frontmost: TileID?,
                                       group id: UInt32, _ pass: inout Pass) {
         let leads = activeGroup == id && groups[id]!.focusedAt > -.infinity
         beginSpaceChange(group: id, &pass)
@@ -793,7 +793,8 @@ extension World {
         for other in groups.keys where other != id {
             for window in windows { groups[other]!.hidden[window.id] = nil }
         }
-        var restore = group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
+        let currentFrontmost = frontmost.flatMap { group.windows[$0] == nil ? nil : $0 }
+        var restore = currentFrontmost ?? group.focus.decision?.tile ?? group.strip.activeColumn?.activeTile
         var source: FocusSource = .restore
         // Only an activation of an app with no window here is a Dock click across Spaces; a focus held for a hidden
         // window of an app that is still here is not.
@@ -809,8 +810,9 @@ extension World {
         }
         // One display takes OS focus: the one the Dock click crossed to, else the one that had it. The rest restore
         // at their old decision time, so they neither take the commands nor hold off a focus report.
-        let quiet = source == .appActivation || leads ? nil : departing.focus.decision?.time ?? -.infinity
-        focus(FocusIntent(tile: restore, source: source), group: id, &pass, quietSince: quiet, animated: false)
+        let restoringFrontmost = source == .restore && currentFrontmost == restore
+        let quiet = source == .appActivation || leads || restoringFrontmost ? nil : departing.focus.decision?.time ?? -.infinity
+        focus(FocusIntent(tile: restore, source: source, requestsOSFocus: !restoringFrontmost), group: id, &pass, quietSince: quiet, animated: false)
         pass.layout.insert(id)
         pass.persist = true
     }
