@@ -106,6 +106,7 @@ extension World {
     mutating func invalidate(_ tile: TileID, _ pass: inout Pass) {
         frames.removeValue(forKey: tile)
         appliedFrames.removeValue(forKey: tile)
+        frameFailures.removeValue(forKey: tile)
         pass.effects.append(.invalidateFrame(tile: tile, revision: nextRevision()))
     }
 
@@ -882,14 +883,19 @@ extension World {
     fileprivate mutating func onFrameCompleted(_ tile: TileID, revision: UInt64, result: FrameResult, _ pass: inout Pass) {
         guard let request = frames[tile], request.revision == revision, request.scope == pass.scope else { return }
         switch result {
-        case .applied: appliedFrames[tile] = request
+        case .applied:
+            appliedFrames[tile] = request
+            frameFailures[tile] = nil
         case .failed, .timedOut, .sizeUnconfirmed:
-            frames.removeValue(forKey: tile)
-            if case .sizeUnconfirmed = result { appliedFrames[tile] = request }
-            else { appliedFrames.removeValue(forKey: tile) }
-            if !timers.values.contains(where: { if case .retryFrames = $0.action { return $0.scope == pass.scope }; return false }) {
-                schedule(.retryFrames, delay: EngineConfig.frameRetryDelay, &pass)
-            }
+            // Keep the last target for the focus ring; failure is not evidence the window disappeared.
+            appliedFrames.removeValue(forKey: tile)
+            guard frameFailures[tile]?.retryAt != nil || frameFailures[tile] == nil else { return }
+            let count = (frameFailures[tile]?.count ?? 0) + 1
+            let delays = [EngineConfig.frameRetryDelay, 0.5, 2.0]
+            let delay = count <= delays.count ? delays[count - 1] : nil
+            frameFailures[tile] = FrameFailure(request: request, count: count, retryAt: delay.map { pass.now + $0 })
+            if let delay { schedule(.retryFrames, delay: delay, &pass) }
+            else { pass.effects.append(.log("frame give-up tile=\(tile.rawValue) failures=\(count)")) }
         }
     }
 
@@ -928,6 +934,7 @@ extension World {
         for tile in group.windows.keys.ordered() {
             frames.removeValue(forKey: tile)
             appliedFrames.removeValue(forKey: tile)
+            frameFailures.removeValue(forKey: tile)
         }
         pass.layout.insert(id)
         return .accepted
@@ -1077,7 +1084,16 @@ extension World {
                     parkedOwners[target.tileID] = nil
                 }
                 guard let pid = group.windows[target.tileID]?.pid else { continue }
-                if let existing = frames[target.tileID], existing.frame == frame, existing.scope == scope,
+                var retry = false
+                if let failure = frameFailures[target.tileID] {
+                    if failure.request.frame != frame || failure.request.scope != scope {
+                        frameFailures[target.tileID] = nil
+                    } else {
+                        guard let deadline = failure.retryAt, pass.now >= deadline else { continue }
+                        retry = true
+                    }
+                }
+                if !retry, let existing = frames[target.tileID], existing.frame == frame, existing.scope == scope,
                    existing.animating == group.isAnimating { continue }
                 if let request = write(target.tileID, pid: pid, frame: frame, scope: scope, animating: group.isAnimating, &pass) { frames[target.tileID] = request }
             }

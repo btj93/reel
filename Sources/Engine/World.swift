@@ -295,6 +295,12 @@ struct ParkedWindow: Sendable {
     }
 }
 
+struct FrameFailure: Sendable {
+    let request: FrameRequest
+    let count: Int
+    let retryAt: Double?
+}
+
 public struct World: Sendable {
     public internal(set) var topology: Topology
     public internal(set) var groups: [UInt32: GroupState]
@@ -304,6 +310,7 @@ public struct World: Sendable {
     /// and momentum are swallowed, whatever ended the swipe, until its momentum ends, a new gesture begins, a pause, or
     /// it goes quiet.
     public internal(set) var gestureTail: Double?
+    var frameFailures: [TileID: FrameFailure] = [:]
     var parkedOwners: [TileID: ParkedWindow] = [:]
     public internal(set) var frames: [TileID: FrameRequest] = [:]
     public internal(set) var appliedFrames: [TileID: FrameRequest] = [:]
