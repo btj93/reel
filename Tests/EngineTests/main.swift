@@ -294,6 +294,23 @@ final class FocusObservationBox: @unchecked Sendable {
             check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "a fresh same-app managed confirmation restores its ring during protection")
         }
     }
+    section("Review A10 named hidden and saved windows remain managed identities") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 202)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        loop.send(.windowsHidden([TileID(1)]))
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        loop.send(.windowAdded(window(1, app: 101), frontmost: false))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "a hidden managed report preserves confirmation for its return")
+        loop.send(.spaceChanged(key: .skylight(2), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(3, app: 303)]))
+        check(loop.world.trackedElsewhere.contains(1), "A is still managed in a saved Space")
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .appActivation)))
+        loop.send(.spaceChanged(key: .skylight(1), epoch: loop.world.groups[1]!.epoch + 1,
+                                windows: [window(1, app: 101), window(2, app: 202)]))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "a saved managed report preserves confirmation across Space return")
+    }
     section("Review A10 pending activation and nil AX reads preserve the latest confirmation") {
         var h = Harness()
         h.census(1, [window(1, app: 101), window(3, app: 101)])

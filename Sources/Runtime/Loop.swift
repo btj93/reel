@@ -170,8 +170,12 @@ public final class Loop {
             switch event.kind {
             case .focus(let intent) where intent.source == .axFocus || intent.source == .appActivation:
                 let group = world.groups[event.scope.group]
-                tile = (intent.observedSpace == nil || intent.observedSpace == group?.space)
-                    && (intent.pid == nil || intent.tile.flatMap(pid(of:)) == intent.pid) ? intent.tile : nil
+                let sameSpace = intent.observedSpace == nil || intent.observedSpace == group?.space
+                if sameSpace, let reported = intent.tile, let pid = intent.pid, self.pid(of: reported) == nil,
+                   !world.trackedElsewhere.contains(reported.rawValue) {
+                    confirmedFocus[pid] = nil
+                }
+                tile = sameSpace && (intent.pid == nil || intent.tile.flatMap(pid(of:)) == intent.pid) ? intent.tile : nil
             case .spaceChanged(let key, let epoch, _, let frontmost)
                 where world.groups[event.scope.group]?.space == key
                     && world.groups[event.scope.group]?.phase.acceptsFocus == true && epoch > previousEpoch ?? 0:
