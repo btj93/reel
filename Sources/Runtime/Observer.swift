@@ -154,6 +154,7 @@ package final class AppWorker: @unchecked Sendable {
     private let send: @Sendable (Observation, Stamp?) -> Void
     private let clock: ScopeClock
     private var windows: [CGWindowID: AXWindow] = [:]
+    private var focusSpace: @Sendable (CGRect?) -> SpaceKey? = { SpaceObserver.observedSpace(at: $0) }
     private var sizes = SizeCache()
     private let lock = NSLock()
     private var queuedFrames: [TileID: FrameRequest] = [:]
@@ -175,9 +176,11 @@ package final class AppWorker: @unchecked Sendable {
     }
 
     package init(app: AXApp, windows: [CGWindowID: AXWindow], clock: ScopeClock,
+                 focusSpace: @escaping @Sendable (CGRect?) -> SpaceKey? = { SpaceObserver.observedSpace(at: $0) },
                  send: @escaping @Sendable (Observation, Stamp?) -> Void) {
         self.app = app
         self.windows = windows
+        self.focusSpace = focusSpace
         self.clock = clock
         self.send = send
     }
@@ -247,7 +250,7 @@ package final class AppWorker: @unchecked Sendable {
             let stamp = clock.current
             let id = app.focusedWindowID()
             let frame = activation ? nil : id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
-            send(.focused(pid: pid, id, activation: activation, space: activation ? space : SpaceObserver.observedSpace(at: frame)), stamp)
+            send(.focused(pid: pid, id, activation: activation, space: activation ? space : focusSpace(frame)), stamp)
         }
     }
 
@@ -352,6 +355,7 @@ public final class Observer: CensusObserver {
     private var ignored = Set<CGWindowID>()
     /// While paused, the engine hears only removals and retitles; the registry still tracks everything for the resume census.
     private let paused: () -> Bool
+    private let activationSpace: () -> SpaceKey?
 
     private lazy var censusDiscovery: CensusDiscovery = CensusDiscovery { [weak self] pid in
         guard let self else { return }
@@ -366,12 +370,14 @@ public final class Observer: CensusObserver {
 
     package init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
          elsewhere: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
-         emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void) {
+         emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void,
+         activationSpace: @escaping () -> SpaceKey? = { SpaceObserver.observedSpace() }) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
         self.elsewhere = elsewhere
         self.paused = paused
+        self.activationSpace = activationSpace
         self.emit = emit
         self.log = log
     }
@@ -460,7 +466,7 @@ public final class Observer: CensusObserver {
         guard let worker = workers[pid] else {
             return log(FocusIntent(tile: nil, pid: pid, source: .appActivation).droppedLog(reason: "untracked-app"))
         }
-        let space = SpaceObserver.observedSpace()
+        let space = activationSpace()
         let intent = FocusIntent(tile: nil, pid: pid, source: .appActivation, observedSpace: space)
         if paused() { log(intent.droppedLog(reason: "paused")) }
         else if let stamp = clock.current { emit(.focus(intent), stamp) }

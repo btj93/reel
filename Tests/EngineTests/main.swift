@@ -240,6 +240,26 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Audit A routing: activation starts on settled epoch and named tile uses its own display") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1, app: 101)])
+        h.census(20, [window(2, app: 102, x: 1100)], group: 2)
+        let box = FocusObservationBox(), app = QueuedFocusApp(pid: 101, focused: 1)
+        var intents: [FocusIntent] = []
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in if case .focus(let intent) = kind { intents.append(intent) } },
+                                log: { _ in }, activationSpace: { .skylight(20) })
+        observer.clock.current = h.world.stamp
+        observer.workers[101] = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock,
+                                          focusSpace: { frame in frame == nil ? nil : .skylight(10) }, send: box.append)
+        observer.activated(101)
+        check(intents.first?.observedSpace == nil, "unnamed activation must not use destination/main-display Space")
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(intents.last?.observedSpace == .skylight(10), "named activation reads the tile's frame-local Space")
+    }
+
     section("Audit A activation: slow app read cannot supersede a newer activation") {
         var h = Harness()
         h.census(1, [window(1, app: 101), window(2, app: 102)])
