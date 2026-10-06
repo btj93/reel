@@ -110,6 +110,8 @@ public final class FocusIndicator {
     public func snapTo(frame: CGRect) -> Bool {
         guard style == .ring || style == .flash else { return false }
 
+        cancelFadeOut()
+
         // Kill any frame springs
         springX = nil; springY = nil; springW = nil; springH = nil
 
@@ -135,6 +137,7 @@ public final class FocusIndicator {
     /// Keeps the indicator exactly synchronized with the focused window's computed position.
     public func trackFrame(_ frame: CGRect) {
         guard style == .ring || style == .flash else { return }
+        cancelFadeOut()
         // A completed flash is one-shot. Reviving it here would order the overlay
         // front at full alpha (positionOverlay sets alphaValue = 1 whenever no
         // fadeOut is running) with no easing left to take it away — a permanent
@@ -150,6 +153,12 @@ public final class FocusIndicator {
         springX = nil; springY = nil; springW = nil; springH = nil
         currentFrame = frame
         positionOverlay(at: frame)
+    }
+
+    private func cancelFadeOut() {
+        guard fadeOutEasing != nil else { return }
+        fadeOutEasing = nil
+        opacity = style == .flash ? CGFloat(flashEasing?.evaluate(at: TimeUtil.now()) ?? 0) : 1
     }
 
     /// Fade out the overlay (unmanaged app became frontmost). Returns true if animation started.
