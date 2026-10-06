@@ -360,7 +360,7 @@ extension World {
         case .release:
             // Quitting must never strand a window off screen, even mid Space change.
             gestureTail = nil
-            release(group: id, &pass)
+            for group in groups.keys.sorted() { release(group: group, &pass) }
             return .accepted
         case .recover:
             return recover(group: id, &pass)
@@ -981,6 +981,10 @@ extension World {
             .compactMap { hiddenRelease($0.value, on: display) }
         var writes = releaseFrames(group: id, at: pass.now) + hidden
         var seen = Set(groups.values.flatMap { Array($0.windows.keys) + Array($0.hidden.keys) })
+        seen.formUnion(pass.effects.compactMap { effect -> TileID? in
+            if case .setFrame(let request) = effect { return request.tile }
+            return nil
+        })
         // Live stashes hold this session's AX identities. Disk entries deliberately never reach this path.
         for (key, saved) in spaces.live.sorted(by: { SpaceOrder($0.key.group, $0.key.space) < SpaceOrder($1.key.group, $1.key.space) })
             where key.group == id || (groups[key.group] == nil && id == topology.groups.first?.id) {

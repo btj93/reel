@@ -328,7 +328,7 @@ public final class Loop {
     public func setPaused(_ value: Bool) {
         guard value != paused else { return }
         if value, let session = world.pointer { send(.pointer(.cancel, session: session.token)) }
-        if value { executor?.invalidateFocus(); everyGroup(.release) }
+        if value { executor?.invalidateFocus(); send(.command(.release, .ipc)) }
         // Reconcile deaths while effects are still held; additions are admitted after resume.
         changePauseState(value) { observer.healthCheck() }
         logLine("loop: paused=\(value)")
