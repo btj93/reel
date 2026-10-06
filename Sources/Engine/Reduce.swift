@@ -33,7 +33,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     switch event.kind {
     case .topologyChanged(let topology): world.onTopology(topology, &pass)
     case .configChanged(let config): world.onConfig(config, &pass)
-    case .loadSnapshots(let snapshots): world.spaces.disk = snapshots.filter(\.isValid)
+    case .loadSnapshots(let snapshots): world.spaces.disk = Array(snapshots.filter(\.isValid).suffix(SpaceBook.diskLimit))
     case .windowAdded(let window, let frontmost):
         world.revokeParking(window.id, frame: window.initialFrame)
         world.onWindowAdded(window, frontmost: frontmost, group: id, &pass)
