@@ -25,6 +25,7 @@ public struct WindowFacts: Equatable, Sendable {
 /// What an app thread saw or did.
 package struct ActivationReport: Sendable {
     let generation: UInt64
+    let focusGeneration: UInt64
     let stamp: Stamp?
 }
 
@@ -446,10 +447,11 @@ public final class Observer: CensusObserver {
     package func readFrontmost(completion: @escaping (TileID?) -> Void) {
         guard let pid = frontmostPID(), let worker = workers[pid] else { return completion(nil) }
         let generation = activationGeneration
+        let focusGeneration = executor.focusGeneration
         let read = FrontmostRead(completion: completion)
         if !worker.readFocus({ [weak self] id in
             DispatchQueue.main.async { MainActor.assumeIsolated {
-                guard let self, self.frontmostPID() == pid, self.activationGeneration == generation else { return read.finish(nil) }
+                guard let self, self.frontmostPID() == pid, self.activationGeneration == generation, self.executor.focusGeneration == focusGeneration else { return read.finish(nil) }
                 read.finish(id.map(TileID.init))
             } }
         }) { read.finish(nil) }
@@ -505,7 +507,7 @@ public final class Observer: CensusObserver {
         if paused() { log(intent.droppedLog(reason: "paused")) }
         else if let stamp = clock.current { emit(.focus(intent), stamp) }
         else { log(intent.droppedLog(reason: "missing-scope")) }
-        worker.reportFocus(activation: ActivationReport(generation: activationGeneration, stamp: clock.current))
+        worker.reportFocus(activation: ActivationReport(generation: activationGeneration, focusGeneration: executor.focusGeneration, stamp: clock.current))
     }
 
     /// A hidden app's windows leave the strip, or the saved strip of the Space they are on, but stay known, so the
@@ -600,6 +602,9 @@ public final class Observer: CensusObserver {
             let intent = FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation != nil ? .appActivation : .axFocus, observedSpace: space)
             if let activation, activation.generation != activationGeneration {
                 return log(intent.droppedLog(reason: "superseded-activation"))
+            }
+            if let activation, activation.focusGeneration != executor.focusGeneration {
+                return log(intent.droppedLog(reason: "superseded-focus-decision"))
             }
             guard !paused() else { return log(intent.droppedLog(reason: "paused")) }
             guard let stamp else { return log(intent.droppedLog(reason: "missing-scope")) }

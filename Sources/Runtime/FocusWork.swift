@@ -37,6 +37,8 @@ final class FocusWork: @unchecked Sendable {
         }
     }
 
+    var currentGeneration: UInt64 { lock.withLock { generation } }
+
     func invalidate() { lock.withLock { generation &+= 1 } }
 
     func ticket(tile: TileID, pid: Int32, scope: EventScope) -> FocusTicket {
