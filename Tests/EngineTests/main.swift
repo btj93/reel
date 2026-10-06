@@ -235,6 +235,22 @@ final class FocusProbeWindow: AXWindow, @unchecked Sendable {
     }
 }
 
+final class TitleFlickerProbeWindow: AXWindow, @unchecked Sendable {
+    private let lock = NSLock()
+    private var properties = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: "Document",
+                                              frame: CGRect(x: 100, y: 30, width: 500, height: 600))
+    init() { super.init(element: AXUIElementCreateApplication(99001), windowID: 99001, pid: 99001) }
+    func retitle(_ title: String, subrole: String = "AXStandardWindow", width: Double = 500) {
+        lock.withLock {
+            properties.title = title
+            properties.subrole = subrole
+            properties.frame?.size.width = width
+        }
+    }
+    override func getPropertiesFast() -> WindowProperties { lock.withLock { properties } }
+    override func getFrame() -> AXResult<CGRect> { .success(lock.withLock { properties.frame! }) }
+}
+
 final class FocusTestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 100.0
@@ -252,6 +268,47 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review B7 repeated empty titles preserve established document columns") {
+        var h = Harness()
+        h.census(1, [ObservedWindow(id: TileID(99001), pid: 99001, bundleID: nil, title: "Document"), window(2)])
+        let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), probe = TitleFlickerProbeWindow(), clock = ScopeClock()
+        clock.current = h.world.stamp
+        let worker = AppWorker(app: app, windows: [99001: probe], clock: clock, send: box.append)
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [99001, 2] }, elsewhere: { [] }, paused: { false }, emit: { event, _ in h.send(event) }, log: { _ in })
+        observer.clock.current = clock.current
+        for title in ["", "Document", "", "Document"] {
+            probe.retitle(title)
+            worker.refreshClassifications([99001]); app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            check(h.world.groups[1]!.floating.isEmpty, "a title flicker cannot float an established document")
+            check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(99001)], [TileID(2)]], "title flicker retains the original column order")
+            check(h.world.groups[1]!.windows[TileID(99001)]?.ruleTitle == "Document", "first-title rule latch survives live title changes")
+            check(h.world.groups[1]!.windows[TileID(99001)]?.title == title, "live title metadata still updates")
+        }
+        check(h.world.check().isEmpty, "title flicker preserves invariants")
+    }
+    section("Review B7 structural dialogs and small frames still float after a title latch") {
+        for small in [false, true] {
+            var h = Harness()
+            h.census(1, [ObservedWindow(id: TileID(99001), pid: 99001, bundleID: nil, title: "Document"), window(2)])
+            let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), probe = TitleFlickerProbeWindow(), clock = ScopeClock()
+            clock.current = h.world.stamp
+            let worker = AppWorker(app: app, windows: [99001: probe], clock: clock, send: box.append)
+            let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                    managed: { [99001, 2] }, elsewhere: { [] }, paused: { false }, emit: { event, _ in h.send(event) }, log: { _ in })
+            observer.clock.current = clock.current
+            probe.retitle("", subrole: small ? "AXStandardWindow" : "AXSystemDialog", width: small ? 200 : 500)
+            worker.refreshClassifications([99001]); app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            check(h.world.groups[1]!.floating == [TileID(99001)] && h.tiles == [TileID(2)], "positive structural floating facts remain effective with an empty title")
+            probe.retitle("Document")
+            worker.refreshClassifications([99001]); app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            check(h.world.groups[1]!.floating.isEmpty && h.tiles == [TileID(2), TileID(99001)], "a genuine structural return to tileable facts can re-tile")
+            check(h.world.check().isEmpty, "structural transitions preserve invariants")
+        }
+    }
     section("Review B6 settled minimum width preserves preset cycling") {
         var h = Harness()
         h.census(1, [window(1)])
