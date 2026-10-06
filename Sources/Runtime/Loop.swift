@@ -75,6 +75,7 @@ public final class Loop {
     private var replies: [UInt64: ReplyPayload] = [:]
     private var lastRequest: UInt64 = 0
     private var indicatorTile: TileID?
+    private var confirmedFocus: (tile: TileID, pid: Int32)?
     private var quitting = false
     private var observing = false
 
@@ -161,7 +162,24 @@ public final class Loop {
 
     @discardableResult
     private func reduceAndRun(_ event: Event) -> [Effect] {
+        let currentScope = world.scope(for: event.scope.group) == event.scope
+        let previousEpoch = world.groups[event.scope.group]?.epoch
         let effects = reduce(&world, event, now: max(TimeUtil.now(), world.time))
+        if currentScope {
+            let tile: TileID?
+            switch event.kind {
+            case .focus(let intent) where intent.source == .axFocus || intent.source == .appActivation:
+                let group = world.groups[event.scope.group]
+                tile = (intent.observedSpace == nil || intent.observedSpace == group?.space)
+                    && (intent.pid == nil || intent.tile.flatMap(pid(of:)) == intent.pid) ? intent.tile : nil
+            case .spaceChanged(let key, let epoch, _, let frontmost)
+                where world.groups[event.scope.group]?.space == key
+                    && world.groups[event.scope.group]?.phase.acceptsFocus == true && epoch > previousEpoch ?? 0:
+                tile = frontmost.flatMap { world.owner(of: $0) == event.scope.group ? $0 : nil }
+            default: tile = nil
+            }
+            if let tile, let pid = pid(of: tile) { confirmedFocus = (tile, pid) }
+        }
         executor?.synchronizeFocus(with: world, paused: paused)
         if let effectsSink {
             effectsSink(effects)
@@ -447,9 +465,9 @@ public final class Loop {
     // MARK: Focus indicator
 
     package func indicatorFocus(frontmostPID: Int32?) -> TileID? {
-        guard let tile = focusedTile, let id = world.owner(of: tile),
-              world.groups[id]?.windows[tile]?.pid == frontmostPID else { return nil }
-        return tile
+        guard let focus = confirmedFocus, focus.pid == frontmostPID,
+              pid(of: focus.tile) == focus.pid else { return nil }
+        return focus.tile
     }
 
     package func changePauseState(_ value: Bool, reconcile: () -> Void) {

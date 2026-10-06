@@ -252,6 +252,18 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review A3 destination census confirms only a committed foreground tile") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 101)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        loop.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
+                                windows: [window(1, app: 101), window(2, app: 101)], frontmost: TileID(1)))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "committed census confirms the OS-focused managed tile")
+        loop.send(.spaceChanged(key: .skylight(1), epoch: loop.world.groups[1]!.epoch,
+                                windows: [window(1, app: 101), window(2, app: 101)], frontmost: TileID(2)))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "rejected duplicate census cannot replace confirmed focus")
+    }
     section("Review A3 background selection preserves the confirmed foreground ring") {
         for otherDisplay in [false, true] {
             var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
