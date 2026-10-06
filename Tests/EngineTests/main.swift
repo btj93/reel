@@ -5311,7 +5311,11 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
         let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), clock = ScopeClock()
         clock.current = Stamp(revision: 1, epochs: [1: 0])
         let worker = AppWorker(app: app, windows: [99001: LateTitleProbeWindow()], clock: clock, focusSpace: { _ in nil }, send: box.append)
-        worker.reportFocus(activation: nil)
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [99001] }, elsewhere: { [] }, paused: { false }, frontmostPID: { 99001 },
+                                emit: { _, _ in }, log: { _ in })
+        observer.workers[99001] = worker
+        observer.activated(99001)
         app.drain()
         check(box.drain().contains { if case .retitled(let facts) = $0.0 { return facts.title == "Document" && facts.classification == .tile }; return false }, "focus re-reads late title without title notification")
     }
