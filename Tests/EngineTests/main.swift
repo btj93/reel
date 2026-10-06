@@ -202,8 +202,8 @@ struct Harness {
 final class QueuedFocusApp: AXApp, @unchecked Sendable {
     private let lock = NSLock()
     private var queue: [@Sendable () -> Void] = []
-    let focused: CGWindowID
-    init(pid: Int32, focused: CGWindowID) {
+    let focused: CGWindowID?
+    init(pid: Int32, focused: CGWindowID?) {
         self.focused = focused
         super.init(pid: pid, bundleIdentifier: nil)
     }
@@ -268,6 +268,58 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review A10 fresh unmanaged focus invalidates only its own app's ring") {
+        for source in [FocusSource.axFocus, .appActivation] {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 202), window(3, app: 101)])
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 202, source: .axFocus)))
+            loop.send(.command(.focus(TileID(1)), .keyboard))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "A has a confirmed managed ring before the negative report")
+            let popup = FocusIntent(tile: TileID(900), pid: 101, source: source)
+            loop.send(.focus(popup), stamp: Stamp(revision: loop.world.topology.revision - 1, epochs: [1: loop.world.groups[1]!.epoch]))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "stale topology cannot invalidate A's ring")
+            loop.send(.focus(popup), stamp: Stamp(revision: loop.world.topology.revision, epochs: [1: loop.world.groups[1]!.epoch - 1]))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "stale Space epoch cannot invalidate A's ring")
+            loop.send(.focus(FocusIntent(tile: TileID(900), pid: 101, source: source, observedSpace: .skylight(2))))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "a different-Space report cannot invalidate A's ring")
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 101, source: source)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "conflicting managed ownership cannot invalidate A's ring")
+            loop.send(.focus(popup))
+            check(loop.indicatorFocus(frontmostPID: 101) == nil, "a current unmanaged focused window clears A's old managed identity")
+            check(loop.indicatorFocus(frontmostPID: 202) == TileID(2), "A's unmanaged report cannot clear B's independent identity")
+            loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "a fresh same-app managed confirmation restores its ring during protection")
+        }
+    }
+    section("Review A10 pending activation and nil AX reads preserve the latest confirmation") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(3, app: 101)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        loop.send(.command(.focus(TileID(1)), .keyboard))
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        let app = QueuedFocusApp(pid: 101, focused: nil), box = FocusObservationBox(), clock = ScopeClock()
+        clock.current = loop.world.stamp
+        let worker = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: clock, send: box.append)
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [1, 3] }, elsewhere: { [] }, paused: { false }, emit: { event, stamp in loop.send(event, stamp: stamp) }, log: { _ in })
+        observer.workers[101] = worker
+        observer.clock.current = clock.current
+        observer.activated(101)
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "an activation whose app queue has not read focus keeps the ring")
+        loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "same-app confirmation still works while the activation read is pending")
+        app.drain()
+        let completed = box.drain()
+        check(completed.contains { if case .focused(101, nil, _, _) = $0.0 { true } else { false } }, "the app queue completed a nil focused-window read")
+        completed.forEach { observer.receive($0.0, stamp: $0.1) }
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "ambiguous nil completion preserves the latest confirmed tile")
+        observer.receive(.focused(pid: 101, nil, activation: nil, space: nil), stamp: loop.world.stamp)
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "a nil AX notification read remains unknown rather than confirmed absence")
+    }
     section("Review A9 background AX focus cannot replace the foreground ring") {
         for otherDisplay in [false, true] {
             var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
