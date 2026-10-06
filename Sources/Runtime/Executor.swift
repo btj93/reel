@@ -106,7 +106,8 @@ public final class Executor {
             return log("executor: write skipped, window gone tile=\(tile.rawValue) rev=\(revision)")
         }
         ledger.record(tile, revision: revision, requested: frame, landed: landed, result: result)
-        if case .applied = result { log("executor: wrote tile=\(tile.rawValue) rev=\(revision)") }
+        if case .applied = result { runtimeTrace("executor: wrote tile=\(tile.rawValue) rev=\(revision)") }
+        else if case .sizeUnconfirmed = result { runtimeTrace("executor: size unconfirmed tile=\(tile.rawValue) rev=\(revision)") }
         else { log("executor: write failed tile=\(tile.rawValue) rev=\(revision) result=\(result)") }
     }
 
@@ -114,10 +115,10 @@ public final class Executor {
     func isForeign(_ tile: TileID, frame: CGRect) -> Bool {
         switch ledger.classify(tile, observed: frame) {
         case .echo(let revision):
-            log("executor: echo dropped rev=\(revision) tile=\(tile.rawValue)")
+            runtimeTrace("executor: echo dropped rev=\(revision) tile=\(tile.rawValue)")
             return false
         case .repeated:
-            log("executor: app kept its own frame tile=\(tile.rawValue) frame=\(frame)")
+            runtimeTrace("executor: app kept its own frame tile=\(tile.rawValue) frame=\(frame)")
             return false
         case .foreign:
             return true

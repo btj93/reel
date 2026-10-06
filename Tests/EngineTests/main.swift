@@ -5322,6 +5322,15 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
 }
 
 @MainActor func auditBRemainingTests() {
+    section("AuditB 8a focus-drop reasons are retained and rate limited") {
+        var limiter = LogLimiter()
+        let line = FocusIntent(tile: TileID(1), source: .axFocus).droppedLog(reason: "stale-epoch")
+        check(limiter.allows(line, at: 1), "first focus-drop reason is logged")
+        check(!limiter.allows(line, at: 1.1), "repeated focus drop is rate limited")
+        check(limiter.allows(line, at: 3), "focus-drop reason is available again after interval")
+        check(limiter.allows(FocusIntent(tile: TileID(2), source: .axFocus).droppedLog(reason: "different-space"), at: 1.1), "a distinct reason is never hidden by another reason")
+        check(limiter.allows("loop: adoption held tile=1", at: 1) && !limiter.allows("loop: adoption held tile=2", at: 1.1), "adoption hold limit is independent of tile IDs")
+    }
     section("AuditB 8 in-session log rotation") {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }

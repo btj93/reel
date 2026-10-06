@@ -5,14 +5,16 @@ import Foundation
 import Platform
 
 @MainActor private var flushQueued = false
+@MainActor private var logLimiter = LogLimiter()
 
 /// One flush per main run-loop turn, so a scroll that logs every write and echo costs one syscall per turn.
 @MainActor
 public func logLine(_ line: String) {
+    guard logLimiter.allows(line, at: TimeUtil.now()) else { return }
     if runtimeTimestamps {
-        print(String(format: "[%.6f] %@", TimeUtil.now(), line))
+        writeRuntimeLog(String(format: "[%.6f] %@", TimeUtil.now(), line))
     } else {
-        print(line)
+        writeRuntimeLog(line)
     }
     guard !flushQueued else { return }
     flushQueued = true

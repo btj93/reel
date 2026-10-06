@@ -5,7 +5,7 @@ let runtimeTimestamps = ProcessInfo.processInfo.environment["REEL_LOG_TIMESTAMPS
 
 func runtimeTrace(_ line: @autoclosure () -> String) {
     guard runtimeTimestamps else { return }
-    print(String(format: "[%.6f] %@", TimeUtil.now(), line()))
+    writeRuntimeLog(String(format: "[%.6f] %@", TimeUtil.now(), line()))
 }
 
 /// Coalesces app discovery while a census waits for windows the server lists but AX has not reported yet.
