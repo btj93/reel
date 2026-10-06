@@ -427,6 +427,24 @@ final class FocusObservationBox: @unchecked Sendable {
         check(intents.last?.observedSpace == .skylight(10), "named activation reads the tile's frame-local Space")
     }
 
+    section("Audit A activation: a newer explicit focus decision revokes a pending Dock read") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 102)])
+        let box = FocusObservationBox(), app = QueuedFocusApp(pid: 102, focused: 2)
+        let executor = Executor(worker: { _ in nil }, log: { _ in })
+        executor.synchronizeFocus(with: h.world, paused: false)
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in h.send(kind) }, log: { _ in })
+        observer.clock.current = h.world.stamp
+        observer.workers[102] = AppWorker(app: app, windows: [2: FocusProbeWindow(2, pid: 102)], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.activated(102)
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        executor.synchronizeFocus(with: h.world, paused: false)
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(0.3)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(1), "newer explicit decision supersedes the pending Dock read")
+    }
     section("Audit A activation: slow app read cannot supersede a newer activation") {
         var h = Harness()
         h.census(1, [window(1, app: 101), window(2, app: 102)])
