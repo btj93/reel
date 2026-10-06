@@ -912,11 +912,13 @@ extension World {
                let index = groups[pass.scope.group]?.strip.columnIndex(of: tile) {
                 let area = groups[pass.scope.group]!.strip.regionForColumn(index, at: pass.now).rect
                 let width = min(landed.rect.width, area.width)
-                groups[pass.scope.group]!.strip.setWidth(.fixed(width), column: index, at: pass.now, params: nil)
-                frames[tile] = nil
-                appliedFrames[tile] = nil
-                pass.layout.insert(pass.scope.group)
-                pass.persist = true
+                if abs(width - request.frame.rect.width) > EngineConfig.userResizeSlop {
+                    groups[pass.scope.group]!.strip.setWidth(.fixed(width), column: index, at: pass.now, params: nil)
+                    frames[tile] = nil
+                    appliedFrames[tile] = nil
+                    pass.layout.insert(pass.scope.group)
+                    pass.persist = true
+                }
             }
         case .failed, .timedOut, .sizeUnconfirmed:
             // Keep the last target for the focus ring; failure is not evidence the window disappeared.
