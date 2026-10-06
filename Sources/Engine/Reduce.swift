@@ -214,7 +214,7 @@ extension World {
     /// A new window is on this group's current Space, so it moves here from any stash that still lists it.
     fileprivate mutating func onWindowAdded(_ window: ObservedWindow, frontmost: Bool, group id: UInt32, _ pass: inout Pass) {
         guard window.isValid else { return pass.effects.append(.log("invalid window ignored tile=\(window.id.rawValue)")) }
-        if groups[id]?.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
+        if groups[id]?.windows[window.id] != nil { return refreshIfSameOwner(window, frontmost: frontmost, &pass) }
         let returning = groups[id]?.returning(window) != nil
         add(window, to: id, &pass)
         guard let group = groups[id], group.windows[window.id] != nil else { return }
@@ -228,9 +228,9 @@ extension World {
     }
 
     /// Metadata only: whichever group or stash holds the window takes the new title and frame.
-    fileprivate mutating func onWindowChanged(_ window: ObservedWindow, _ pass: inout Pass) {
+    fileprivate mutating func onWindowChanged(_ window: ObservedWindow, frontmost: Bool, _ pass: inout Pass) {
         guard window.isValid else { return pass.effects.append(.log("invalid window ignored tile=\(window.id.rawValue)")) }
-        refreshIfSameOwner(window, &pass)
+        refreshIfSameOwner(window, frontmost: frontmost, &pass)
     }
 
     /// A tiled window keeps its column's place: a new width becomes the column's logical width, and the frame is
@@ -263,7 +263,7 @@ extension World {
             guard known != window else { continue }
             if joinsStrip(was: known, now: window, config: config), groups[id]!.floating.contains(window.id) {
                 guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
-                focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: false), group: id, &pass)
+                focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: frontmost), group: id, &pass)
             }
             groups[id]!.windows[window.id] = window
             pass.persist = true

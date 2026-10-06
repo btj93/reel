@@ -256,7 +256,7 @@ package final class AppWorker: @unchecked Sendable {
 
     func reportFocus(activation: ActivationReport?) {
         app.perform { [self] in
-            let stamp = activation?.stamp ?? clock.current
+            let stamp = if let activation { activation.stamp } else { clock.current }
             let id = app.focusedWindowID()
             let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
             send(.focused(pid: pid, id, activation: activation, space: focusSpace(frame)), stamp)
@@ -592,7 +592,7 @@ public final class Observer: CensusObserver {
         case .retitled(let facts):
             learn(facts)
             // Even while paused, so a late title is not lost; the engine's writes are held back until resume.
-            if facts.classification != .ignore { emit(.windowChanged(facts.observed), nil) }
+            if facts.classification != .ignore { emit(.windowChanged(facts.observed, frontmost: facts.pid == frontmostPID()), nil) }
         case .moved(let id, let frame):
             guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
