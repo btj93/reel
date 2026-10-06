@@ -252,6 +252,42 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review A4 managed return cancels the unmanaged fade before idle") {
+        let frame = CGRect(x: 100, y: 200, width: 500, height: 600)
+        for snap in [false, true] {
+            for changed in [false, true] {
+                let indicator = FocusIndicator()
+                indicator.overlaySuppressed = true
+                indicator.snapTo(frame: frame)
+                check(indicator.fadeOut(), "unmanaged activation starts a headless fade")
+                indicator.tick(time: TimeUtil.now() + 0.05)
+                check(indicator.opacity < 1, "the unmanaged fade has reduced opacity")
+                let target = changed ? frame.offsetBy(dx: 20, dy: 0) : frame
+                if snap { indicator.snapTo(frame: target) } else { indicator.trackFrame(target) }
+                check(indicator.opacity == 1, "managed return restores ring opacity for snap and tracking")
+                check(!indicator.isAnimating, "managed return cancels the old fade without new animation")
+                indicator.tick(time: TimeUtil.now() + 1)
+                check(indicator.currentFrame == target && indicator.opacity == 1 && !indicator.isAnimating,
+                      "an idle Loop can pause with the managed ring visible after the old deadline")
+            }
+        }
+    }
+    section("Review A4 managed return does not restart a completed flash") {
+        let indicator = FocusIndicator()
+        indicator.overlaySuppressed = true
+        var config = FocusIndicatorConfig()
+        config.style = .flash
+        indicator.reloadConfig(config)
+        let frame = CGRect(x: 100, y: 200, width: 500, height: 600)
+        indicator.snapTo(frame: frame)
+        indicator.tick(time: TimeUtil.now() + 1)
+        check(indicator.opacity == 0 && !indicator.isAnimating, "flash finishes at zero opacity")
+        check(indicator.fadeOut(), "unmanaged transition can arrive after the flash finished")
+        indicator.trackFrame(frame)
+        indicator.tick(time: TimeUtil.now() + 1)
+        check(indicator.currentFrame == frame && indicator.opacity == 0 && !indicator.isAnimating,
+              "completed flash keeps its frame without a stale fade or a permanent tint")
+    }
     section("Review A3 destination census confirms only a committed foreground tile") {
         var h = Harness()
         h.census(1, [window(1, app: 101), window(2, app: 101)])

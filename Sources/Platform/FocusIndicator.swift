@@ -8,6 +8,9 @@ import Core
 @MainActor
 public final class FocusIndicator {
     private var overlayWindow: NSWindow?
+    package private(set) var opacity: CGFloat = 1 {
+        didSet { overlayWindow?.alphaValue = opacity }
+    }
 
     // MARK: - Config-driven properties
 
@@ -121,7 +124,7 @@ public final class FocusIndicator {
                 duration: 0.2,
                 curve: .easeOutCubic
             )
-            overlayWindow?.alphaValue = 0.2
+            opacity = 0.2
             return true
         }
 
@@ -153,7 +156,7 @@ public final class FocusIndicator {
     @discardableResult
     public func fadeOut() -> Bool {
         guard style == .ring || style == .flash else { return false }
-        guard overlayWindow != nil, currentFrame != nil else { return false }
+        guard currentFrame != nil, overlayWindow != nil || overlaySuppressed else { return false }
 
         fadeOutEasing = EasingAnimation(
             from: 1.0, to: 0.0,
@@ -184,7 +187,7 @@ public final class FocusIndicator {
         // Evaluate flash easing (flash mode opacity)
         if let easing = flashEasing {
             let alpha = easing.evaluate(at: time)
-            overlayWindow?.alphaValue = CGFloat(alpha)
+            opacity = CGFloat(alpha)
             if easing.isDone(at: time) {
                 flashEasing = nil
                 overlayWindow?.orderOut(nil)
@@ -194,7 +197,7 @@ public final class FocusIndicator {
         // Evaluate fadeOut easing (any mode with overlay)
         if let easing = fadeOutEasing {
             let alpha = easing.evaluate(at: time)
-            overlayWindow?.alphaValue = CGFloat(alpha)
+            opacity = CGFloat(alpha)
             if easing.isDone(at: time) {
                 fadeOutEasing = nil
                 overlayWindow?.orderOut(nil)
@@ -258,6 +261,7 @@ public final class FocusIndicator {
 
     private func positionOverlay(at frame: CGRect) {
         guard style == .ring || style == .flash else { return }
+        opacity = fadeOutEasing != nil ? opacity : 1.0
         // Seam E: keep tracking state, but never create/order the overlay when suppressed.
         guard !overlaySuppressed else { return }
 
@@ -297,7 +301,6 @@ public final class FocusIndicator {
         }
         appliedFrame = overlayFrame
 
-        window.alphaValue = fadeOutEasing != nil ? window.alphaValue : 1.0
         // Only issue a window-server ordering call when not already on screen.
         if !window.isVisible {
             window.orderFrontRegardless()
