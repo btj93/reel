@@ -263,7 +263,8 @@ package final class AppWorker: @unchecked Sendable {
     func reportFocus(activation: ActivationReport?) {
         app.perform { [self] in
             let stamp = if let activation { activation.stamp } else { clock.current }
-            let id = app.focusedWindowID()
+            // A busy app can miss the 100 ms AX timeout once; one more read costs at most that again on its own thread.
+            let id = app.focusedWindowID() ?? (activation != nil ? app.focusedWindowID() : nil)
             if let id { refreshClassification(id, stamp: stamp, activation: activation) }
             let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
             send(.focused(pid: pid, id, activation: activation, space: frame.flatMap { focusSpace($0) }), stamp)
@@ -389,6 +390,9 @@ public final class Observer: CensusObserver {
     private let elsewhere: () -> Set<CGWindowID>
     private let log: (String) -> Void
     private let onActivation: (Int32) -> Void
+    /// The app's window to take when its activation read names none: a slow app (AX timed out) or one whose focused
+    /// window is not set yet. The old runtime did the same; without it a Dock click on such an app was lost.
+    private let activationFallback: (Int32) -> TileID?
     private let frontmostPID: () -> Int32?
     private var tokens: [NSObjectProtocol] = []
     private var healthTimer: Timer?
@@ -415,6 +419,7 @@ public final class Observer: CensusObserver {
          elsewhere: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
          emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void,
          onActivation: @escaping (Int32) -> Void = { _ in },
+         activationFallback: @escaping (Int32) -> TileID? = { _ in nil },
          frontmostPID: @escaping () -> Int32? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }) {
         self.executor = executor
         self.allowedPids = allowedPids
@@ -423,6 +428,7 @@ public final class Observer: CensusObserver {
         self.paused = paused
         self.emit = emit
         self.onActivation = onActivation
+        self.activationFallback = activationFallback
         self.frontmostPID = frontmostPID
         self.log = log
     }
@@ -639,11 +645,15 @@ public final class Observer: CensusObserver {
             guard !paused(), stamp != nil, managed().contains(id), executor.isForeign(TileID(id), frame: frame) else { return }
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
         case .focused(let pid, let id, let activation, let space):
-            let intent = FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation != nil ? .appActivation : .axFocus, observedSpace: space)
+            var intent = FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation != nil ? .appActivation : .axFocus, observedSpace: space)
             if let activation, activation.generation != activationGeneration || activation.focusObservationGeneration != executor.focusObservationGeneration {
                 return log(intent.droppedLog(reason: "superseded-activation"))
             }
             guard !paused() else { return log(intent.droppedLog(reason: "paused")) }
+            if activation != nil, id == nil, let fallback = activationFallback(pid) {
+                log("focus activation-fallback pid=\(pid) tile=\(fallback.rawValue)")
+                intent = FocusIntent(tile: fallback, pid: pid, source: .appActivation, observedSpace: nil)
+            }
             guard let stamp else { return log(intent.droppedLog(reason: "missing-scope")) }
             emit(.focus(intent), stamp)
         case .wrote(let tile, let revision, let frame, let landed, let result, let scope):

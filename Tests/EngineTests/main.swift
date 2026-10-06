@@ -393,6 +393,38 @@ final class FocusObservationBox: @unchecked Sendable {
                                 windows: [window(1, app: 101), window(2, app: 202)]))
         check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "a saved managed report preserves confirmation across Space return")
     }
+    section("Daily Fork: a Dock click whose focused-window read comes back empty still focuses the app") {
+        // Fork's AX often misses the 100 ms timeout; the old runtime fell back to the app's tracked window.
+        for confirmedFirst in [false, true] {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 202), window(3, app: 101)])
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            if confirmedFirst {
+                loop.send(.command(.focus(TileID(3)), .keyboard))
+                loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            }
+            loop.send(.command(.focus(TileID(2)), .keyboard))
+            let app = QueuedFocusApp(pid: 101, focused: nil), box = FocusObservationBox(), clock = ScopeClock()
+            clock.current = loop.world.stamp
+            let worker = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101), 3: FocusProbeWindow(3, pid: 101)], clock: clock, send: box.append)
+            var lines: [String] = []
+            let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                    managed: { [1, 2, 3] }, elsewhere: { [] }, paused: { false },
+                                    emit: { event, stamp in loop.send(event, stamp: stamp) }, log: { lines.append($0) },
+                                    activationFallback: { loop.activationFallback(pid: $0) })
+            observer.workers[101] = worker
+            observer.clock.current = clock.current
+            observer.activated(101)
+            app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            let expected = TileID(confirmedFirst ? 3 : 1)
+            check(loop.world.timers.values.contains { if case .focus(let intent) = $0.action { intent.tile == expected && intent.source == .appActivation } else { false } },
+                  "an empty activation read falls back to the app's \(confirmedFirst ? "last confirmed" : "first") window")
+            check(lines.contains { $0.contains("activation-fallback pid=101") }, "the fallback is logged")
+            check(loop.activationFallback(pid: 404) == nil, "an app with no managed window has no fallback")
+        }
+    }
     section("Review A10 pending activation and nil AX reads preserve the latest confirmation") {
         var h = Harness()
         h.census(1, [window(1, app: 101), window(3, app: 101)])
@@ -5865,6 +5897,9 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
         check(!limiter.allows(line, at: 1.1), "repeated focus drop is rate limited")
         check(limiter.allows(line, at: 3), "focus-drop reason is available again after interval")
         check(limiter.allows(FocusIntent(tile: TileID(2), source: .axFocus).droppedLog(reason: "different-space"), at: 1.1), "a distinct reason is never hidden by another reason")
+        check(limiter.allows(FocusIntent(tile: nil, pid: 7, source: .appActivation).droppedLog(reason: "missing-tile"), at: 1)
+              && limiter.allows(FocusIntent(tile: nil, pid: 8, source: .appActivation).droppedLog(reason: "missing-tile"), at: 1.1),
+              "one app's drop never hides another app's")
         check(limiter.allows("loop: adoption held tile=1", at: 1) && !limiter.allows("loop: adoption held tile=2", at: 1.1), "adoption hold limit is independent of tile IDs")
     }
     section("AuditB 8 in-session log rotation") {

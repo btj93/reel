@@ -56,7 +56,7 @@ package struct LogLimiter {
     package mutating func allows(_ line: String, at now: Double) -> Bool {
         let key: String
         if line.contains("focus dropped ") {
-            key = line.split(separator: " ").filter { $0.hasPrefix("source=") || $0.hasPrefix("reason=") }.joined(separator: " ")
+            key = line.split(separator: " ").filter { $0.hasPrefix("source=") || $0.hasPrefix("pid=") || $0.hasPrefix("reason=") }.joined(separator: " ")
         } else if line.contains("adoption held") { key = "adoption-held" }
         else { return true }
         if let previous = last[key], now - previous < 2 { return false }

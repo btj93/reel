@@ -88,7 +88,8 @@ public final class Loop {
                             elsewhere: { [unowned self] in world.trackedElsewhere },
                             paused: { [unowned self] in paused },
                             emit: { [unowned self] in send($0, stamp: $1) }, log: logLine,
-                            onActivation: { [weak self] in self?.updateIndicator(frontmostPID: $0) })
+                            onActivation: { [weak self] in self?.updateIndicator(frontmostPID: $0) },
+                            activationFallback: { [unowned self] in activationFallback(pid: $0) })
         scheduler = Scheduler(clock: TimeUtil.now, isCurrent: { [unowned self] in world.scope(for: $0.group) == $0 },
                               deliver: { [unowned self] in run($0) }, log: logLine)
         store = SnapshotStore(directory: paths.stateDir, log: logLine)
@@ -476,6 +477,13 @@ public final class Loop {
 
     private func forgetConfirmedFocus(_ tile: TileID) {
         confirmedFocus = confirmedFocus.filter { $0.value != tile }
+    }
+
+    /// The app's last confirmed managed window, else its first on the active strip. Never a window on another Space.
+    package func activationFallback(pid: Int32) -> TileID? {
+        if let tile = confirmedFocus[pid], self.pid(of: tile) == pid { return tile }
+        guard let group = world.activeGroup.flatMap({ world.groups[$0] }) else { return nil }
+        return group.strip.columns.lazy.flatMap(\.tiles).first { group.windows[$0]?.pid == pid }
     }
 
     package func indicatorFocus(frontmostPID: Int32?) -> TileID? {
