@@ -143,10 +143,8 @@ extension World {
         guard intent.source == .axFocus || local else { return focus(intent, group: id, &pass) }
         let recent = [group.focus.decision, activeGroup.flatMap { groups[$0]?.focus.decision }].compactMap { $0 }
         if recent.contains(where: { decision in
-            guard decision.source.protectsFocus, decision.requestsOSFocus, pass.now - decision.time < EngineConfig.focusDebounce else { return false }
-            if intent.source == .appActivation, let pid = intent.pid, let owner = owner(of: decision.tile),
-               let decidedPID = groups[owner]?.windows[decision.tile]?.pid { return pid == decidedPID }
-            return true
+            intent.source == .axFocus && decision.source.protectsFocus && decision.requestsOSFocus
+                && pass.now - decision.time < EngineConfig.focusDebounce
         }) {
             return pass.effects.append(.log(intent.droppedLog(reason: "debounce")))
         }
