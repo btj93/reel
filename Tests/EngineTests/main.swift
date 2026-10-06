@@ -5350,7 +5350,9 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
         let widths = Array(repeating: 100.0, count: 19), others = Array(0..<20).filter { $0 != 10 }
         let origins = ReorderOverlay.origins(widths: widths, bandWidth: 960, spacing: 12)
         check(origins.allSatisfy { $0 >= 0 && $0 < 960 }, "row origins stay inside visible band")
-        let mids = origins.enumerated().map { $0.element + 20 + min(50, (960 - $0.element) / 2) }
+        let row = ReorderOverlay.thumbnailFrames(widths: widths, bandWidth: 960, spacing: 12)
+        check(row.allSatisfy { $0.minX >= 0 && $0.maxX <= 960 }, "scaled thumbnails are fully visible")
+        let mids = row.map { $0.midX + 20 }
         let reachable = Set((0...1000).map { computeReorderInsertionIndex(cursorX: Double($0), thumbnailMidpoints: mids,
                                             nonDraggedOriginalIndices: others, draggedIndex: 10, columnCount: 20) })
         check(reachable.contains(0) && reachable.contains(20), "first and last reorder destinations are reachable")
