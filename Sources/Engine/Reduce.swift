@@ -426,7 +426,17 @@ extension World {
             group.strip.toggleFullWidth(at: now, column: index)
             recenter = index == group.strip.activeColumnIndex
         case .toggleFloating(let tile):
-            guard group.windows[tile] != nil else { return .unknownWindow(tile) }
+            guard let window = group.windows[tile] else { return .unknownWindow(tile) }
+            if group.floating.contains(tile), let destination = home(window), destination != id {
+                guard let target = groups[destination], case .settled = target.phase else { return .refused("destination Space is changing") }
+                remove(tile, from: id, &pass)
+                add(window, to: destination, &pass)
+                groups[destination]!.strip.removeTile(tile, at: now)
+                groups[destination]!.floating.insert(tile)
+                let outcome = run(.toggleFloating(tile), source: source, group: destination, &pass)
+                focus(FocusIntent(tile: tile, source: source), group: destination, &pass)
+                return outcome
+            }
             if group.floating.remove(tile) != nil {
                 group.strip.insertTile(tile, at: now)
             } else {
