@@ -447,6 +447,13 @@ public final class Loop {
     /// Pause, which brings off-screen windows back unless a pause already did, let each app thread finish its writes
     /// (at most a second), then call `done` once. The fallback timer runs in the common modes, which include the modal
     /// mode AppKit waits for a terminate reply in.
+    /// Accessibility was revoked: no window can be moved, so skip the release and just drop the event taps and save.
+    public func emergencyStop() {
+        hotkeys.stop()
+        pointer.stop()
+        store.flush()
+    }
+
     public func quit(then done: @escaping @MainActor () -> Void) {
         guard !quitting else { return }
         setPaused(true)

@@ -79,13 +79,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.ipc = ipc
         // Accessibility switched off while running leaves this process's event taps in the input path, and macOS can
         // stall the whole system's input until it exits. Without AX no window can be moved back either, so just exit.
-        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+        // Common modes, so the check still runs while a menu is open.
+        let watchdog = Timer(timeInterval: 1, repeats: true) { [weak loop] _ in
             MainActor.assumeIsolated {
                 guard !AXIsProcessTrusted() else { return }
                 logLine("reel: Accessibility permission was revoked; exiting so keyboard and mouse input are not blocked")
+                loop?.emergencyStop()
                 exit(0)
             }
         }
+        RunLoop.main.add(watchdog, forMode: .common)
+        permissionTimer = watchdog
     }
 
     /// Later, not cancel: a cancel would also cancel a logout or restart that asked this app to quit.
