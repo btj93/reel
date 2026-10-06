@@ -140,6 +140,9 @@ public final class Loop {
     public func send(_ kind: Event.Kind, group: UInt32? = nil, stamp: Stamp? = nil) -> [Effect] {
         guard !quitting, let id = group ?? world.route(kind),
               let scope = stamp.map({ world.scope(for: id, stamp: $0) }) ?? world.scope(for: id) else {
+            if !quitting, stamp == nil || stamp == world.stamp, case .windowRemoved(let tile) = kind {
+                forgetConfirmedFocus(tile)
+            }
             if case .focus(let intent) = kind { logLine(intent.droppedLog(reason: quitting ? "quitting" : "missing-group")) }
             return []
         }
@@ -168,6 +171,9 @@ public final class Loop {
         if currentScope {
             let tile: TileID?
             switch event.kind {
+            case .windowRemoved(let removed):
+                forgetConfirmedFocus(removed)
+                tile = nil
             case .focus(let intent) where intent.source == .axFocus || intent.source == .appActivation:
                 let group = world.groups[event.scope.group]
                 let sameSpace = intent.observedSpace == nil || intent.observedSpace == group?.space
@@ -467,6 +473,10 @@ public final class Loop {
     }
 
     // MARK: Focus indicator
+
+    private func forgetConfirmedFocus(_ tile: TileID) {
+        confirmedFocus = confirmedFocus.filter { $0.value != tile }
+    }
 
     package func indicatorFocus(frontmostPID: Int32?) -> TileID? {
         guard let frontmostPID, let tile = confirmedFocus[frontmostPID],

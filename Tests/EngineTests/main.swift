@@ -316,6 +316,23 @@ final class FocusObservationBox: @unchecked Sendable {
             check(loop.world.check().isEmpty, "lifecycle replay preserves World invariants")
         }
     }
+    section("Review A11 one removal retires every historical owner of a tile") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 202)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        loop.send(.spaceChanged(key: .skylight(2), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(1, app: 303)]))
+        check(loop.pid(of: TileID(1)) == 303, "the reused tile is now held by a different app")
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 303, source: .axFocus)))
+        check(loop.indicatorFocus(frontmostPID: 303) == TileID(1), "the new owner has its own confirmation")
+        loop.send(.windowRemoved(TileID(1)))
+        for (space, pid): (UInt64, Int32) in [(3, 101), (4, 303)] {
+            loop.send(.spaceChanged(key: .skylight(space), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(1, app: pid)]))
+            check(loop.pid(of: TileID(1)) == pid && loop.indicatorFocus(frontmostPID: pid) == nil,
+                  "one tile removal invalidates every historical PID entry, not just its latest owner")
+        }
+    }
     section("Review A11 PID churn cannot revive retired confirmations") {
         var h = Harness()
         h.census(1, [window(1, app: 101)])
