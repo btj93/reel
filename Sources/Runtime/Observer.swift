@@ -260,7 +260,7 @@ package final class AppWorker: @unchecked Sendable {
             let stamp = if let activation { activation.stamp } else { clock.current }
             let id = app.focusedWindowID()
             let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
-            send(.focused(pid: pid, id, activation: activation, space: focusSpace(frame)), stamp)
+            send(.focused(pid: pid, id, activation: activation, space: frame.flatMap { focusSpace($0) }), stamp)
         }
     }
 
@@ -310,7 +310,7 @@ package final class AppWorker: @unchecked Sendable {
         case kAXFocusedWindowChangedNotification:
             let id = windowID(for: element)
             let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
-            post(.focused(pid: pid, id, activation: nil, space: SpaceObserver.observedSpace(at: frame)))
+            post(.focused(pid: pid, id, activation: nil, space: frame.flatMap { SpaceObserver.observedSpace(at: $0) }))
         default: break
         }
     }
