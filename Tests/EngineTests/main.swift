@@ -268,6 +268,33 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review A9 background AX focus cannot replace the foreground ring") {
+        for otherDisplay in [false, true] {
+            var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
+            h.census(1, otherDisplay ? [window(1, app: 101), window(3, app: 101)]
+                     : [window(1, app: 101), window(2, app: 202), window(3, app: 101)])
+            if otherDisplay { h.census(2, [window(2, app: 202, x: 1100)], group: 2) }
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            loop.send(.command(.focus(TileID(1)), .keyboard))
+            loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "foreground A's managed focus is confirmed")
+            let rejected = loop.send(.focus(FocusIntent(tile: TileID(2), pid: 202, source: .axFocus)))
+            check(rejected.contains { if case .log(let line) = $0 { line.contains("reason=debounce") } else { false } }, "background B's AX report is rejected during A's protection")
+            check(loop.focusedTile == TileID(1), "the rejected background report cannot change layout selection")
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "the rejected background report cannot remove A's foreground ring")
+            loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "same-app OS focus can confirm A3 while the layout decision remains protected")
+            check(loop.focusedTile == TileID(1), "same-app confirmation does not bypass reducer AX protection")
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 202, source: .appActivation)))
+            check(loop.world.timers.values.contains { if case .focus(let intent) = $0.action { intent.tile == TileID(2) } else { false } }, "a genuine B activation still schedules its focus")
+            check(loop.indicatorFocus(frontmostPID: 202) == TileID(2), "the ring follows B when B is actually foreground")
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "foreground A retains its own last confirmed tile after B reports")
+            check(loop.indicatorFocus(frontmostPID: 999) == nil, "an unmanaged foreground app has no managed ring")
+            loop.send(.windowRemoved(TileID(3)))
+            check(loop.indicatorFocus(frontmostPID: 101) == nil, "a removed confirmed tile cannot be reused for a ring")
+        }
+    }
     section("Review B8 hidden census return retains established classification for a later dialog") {
         func document(_ title: String, classification: WindowClassification) -> ObservedWindow {
             ObservedWindow(id: TileID(1), pid: 101, bundleID: "test.app", title: title,
