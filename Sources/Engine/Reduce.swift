@@ -911,7 +911,9 @@ extension World {
                 let area = groups[pass.scope.group]!.strip.regionForColumn(index, at: pass.now).rect
                 let width = min(landed.rect.width, area.width)
                 if abs(width - request.frame.rect.width) > EngineConfig.userResizeSlop {
+                    let preset = groups[pass.scope.group]!.strip.columns[index].presetIndex
                     groups[pass.scope.group]!.strip.setWidth(.fixed(width), column: index, at: pass.now, params: nil)
+                    groups[pass.scope.group]!.strip.columns[index].presetIndex = preset
                     frames[tile] = nil
                     appliedFrames[tile] = nil
                     pass.layout.insert(pass.scope.group)
