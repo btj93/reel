@@ -62,7 +62,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
         pass.effects.append(.reply(id: requestID, payload: .snapshots(snapshots)))
     case .pointer(let input, let token): world.onPointer(input, token: token, group: id, &pass)
     case .spaceWillChange: world.onSpaceWillChange(group: id, &pass)
-    case .spaceChanged(let key, let epoch, let windows): world.onSpaceChanged(key: key, epoch: epoch, windows: windows, group: id, &pass)
+    case .spaceChanged(let key, let epoch, let windows, _): world.onSpaceChanged(key: key, epoch: epoch, windows: windows, group: id, &pass)
     case .frameCompleted(let tile, let revision, let result): world.onFrameCompleted(tile, revision: revision, result: result, &pass)
     case .timer(let token): world.onTimer(token, group: id, &pass)
     case .tick: world.onTick(&pass)

@@ -123,7 +123,7 @@ public struct Event: Sendable {
         case query(id: UInt64)
         case pointer(PointerInput, session: PointerToken? = nil)
         case spaceWillChange
-        case spaceChanged(key: SpaceKey, epoch: UInt64, windows: [ObservedWindow])
+        case spaceChanged(key: SpaceKey, epoch: UInt64, windows: [ObservedWindow], frontmost: TileID? = nil)
         case topologyChanged(Topology)
         case configChanged(EngineConfig)
         case frameCompleted(tile: TileID, revision: UInt64, result: FrameResult)

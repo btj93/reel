@@ -249,6 +249,27 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Audit A return: current OS focus beats a stale saved window") {
+        var h = Harness()
+        h.census(1, [window(1), window(2)])
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.census(2, [window(3)])
+        h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [window(1), window(2)], frontmost: TileID(2)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "Space return prefers the OS's current managed window")
+        check(!h.effects.contains { if case .focus(TileID(1), _) = $0 { true } else { false } }, "return cannot reassert stale saved focus")
+    }
+    section("Audit A return: frontmost on another display cannot override the destination strip") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(1, [window(1), window(2)])
+        h.census(10, [window(10, x: 1100)], group: 2)
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.census(2, [window(3)])
+        h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [window(1), window(2)], frontmost: TileID(10)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(1), "foreign display focus is not adopted into this strip")
+    }
+
     section("Audit A indicator: unmanaged frontmost clears the managed ring target") {
         var h = Harness()
         h.census(1, [window(1, app: 101)])
