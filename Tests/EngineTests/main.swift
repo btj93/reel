@@ -5297,7 +5297,8 @@ final class CensusFixture: CensusObserver {
         h.census(1, [window(1, floating: true, x: 100)])
         h.census(2, [window(2, x: 1200)], group: 2)
         h.send(.windowChanged(window(1, floating: true, x: 1300), frontmost: true))
-        h.send(.windowChanged(window(1, floating: false, x: 1300), frontmost: true))
+        h.send(.windowChanged(window(1, floating: false, x: 1300), frontmost: false))
+        check(!h.effects.contains { if case .focus = $0 { return true }; return false }, "background reclassification migration never requests OS focus")
         check(h.world.check().isEmpty, "reclassification into another group never resurrects old ownership")
         check(h.world.owner(of: TileID(1)) == 2, "reclassification uses latest frame for re-tile")
     }
