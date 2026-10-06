@@ -129,7 +129,7 @@ public final class Executor {
         focusWork.synchronize(world, paused: paused)
     }
 
-    package var focusGeneration: UInt64 { focusWork.currentGeneration }
+    package var focusObservationGeneration: UInt64 { focusWork.currentObservationGeneration }
 
     package func invalidateFocus() { focusWork.invalidate() }
 

@@ -25,6 +25,7 @@ final class FocusWork: @unchecked Sendable {
     }
     private let lock = NSLock()
     private var generation: UInt64 = 0
+    private var observationGeneration: UInt64 = 0
     private var context: FocusContext?
     private var executed: [Executed] = []
 
@@ -33,17 +34,25 @@ final class FocusWork: @unchecked Sendable {
                                 changing: Set(world.groups.filter { !$0.value.phase.acceptsFocus }.keys), paused: paused)
         lock.withLock {
             if context != next { generation &+= 1 }
+            if context?.stamp != next.stamp || context?.paused != next.paused || context?.changing != next.changing
+                || next.focus.contains(where: { id, focus in
+                    guard let decision = focus.decision, decision.requestsOSFocus else { return false }
+                    return context?.focus[id]?.decision != decision
+                }) {
+                observationGeneration &+= 1
+            }
             context = next
         }
     }
 
-    var currentGeneration: UInt64 { lock.withLock { generation } }
+    var currentObservationGeneration: UInt64 { lock.withLock { observationGeneration } }
 
-    func invalidate() { lock.withLock { generation &+= 1 } }
+    func invalidate() { lock.withLock { generation &+= 1; observationGeneration &+= 1 } }
 
     func ticket(tile: TileID, pid: Int32, scope: EventScope) -> FocusTicket {
         lock.withLock {
             generation &+= 1
+            observationGeneration &+= 1
             return FocusTicket(generation: generation, scope: scope, tile: tile, pid: pid)
         }
     }
