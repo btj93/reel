@@ -446,12 +446,11 @@ public final class Observer: CensusObserver {
 
     package func readFrontmost(completion: @escaping (TileID?) -> Void) {
         guard let pid = frontmostPID(), let worker = workers[pid] else { return completion(nil) }
-        let generation = activationGeneration
         let focusGeneration = executor.focusGeneration
         let read = FrontmostRead(completion: completion)
         if !worker.readFocus({ [weak self] id in
             DispatchQueue.main.async { MainActor.assumeIsolated {
-                guard let self, self.frontmostPID() == pid, self.activationGeneration == generation, self.executor.focusGeneration == focusGeneration else { return read.finish(nil) }
+                guard let self, self.frontmostPID() == pid, self.executor.focusGeneration == focusGeneration else { return read.finish(nil) }
                 read.finish(id.map(TileID.init))
             } }
         }) { read.finish(nil) }
@@ -600,11 +599,8 @@ public final class Observer: CensusObserver {
             emitObserved(.windowMoved(TileID(id), AXRect(frame)))
         case .focused(let pid, let id, let activation, let space):
             let intent = FocusIntent(tile: id.map(TileID.init), pid: pid, source: activation != nil ? .appActivation : .axFocus, observedSpace: space)
-            if let activation, activation.generation != activationGeneration {
+            if let activation, activation.generation != activationGeneration || activation.focusGeneration != executor.focusGeneration {
                 return log(intent.droppedLog(reason: "superseded-activation"))
-            }
-            if let activation, activation.focusGeneration != executor.focusGeneration {
-                return log(intent.droppedLog(reason: "superseded-focus-decision"))
             }
             guard !paused() else { return log(intent.droppedLog(reason: "paused")) }
             guard let stamp else { return log(intent.droppedLog(reason: "missing-scope")) }
