@@ -5464,6 +5464,13 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
         var merged = Harness(displays: [display(width: 600), display(2, x: 600, width: 1000)], separateSpaces: false)
         merged.census(1, [sized(1, width: 1200, x: -400)])
         check(merged.widths == [.fixed(600)], "observed width clamps to its physical display, not merged span")
+        let current = h.world.frames[TileID(1)]!
+        observer.receive(.wrote(current.tile, revision: current.revision, frame: current.frame.rect,
+                         landed: CGRect(x: current.frame.rect.minX, y: current.frame.rect.minY, width: 2000, height: 600), .applied, scope: current.scope), stamp: nil)
+        let clamped = h.world.frames[TileID(1)]!
+        observer.receive(.wrote(clamped.tile, revision: clamped.revision, frame: clamped.frame.rect,
+                         landed: CGRect(x: clamped.frame.rect.minX, y: clamped.frame.rect.minY, width: 2000, height: 600), .applied, scope: clamped.scope), stamp: nil)
+        check(h.requests.isEmpty, "an impossible min width larger than the display cannot create an immediate write loop")
     }
     section("AuditB 12 menu recover reaches all groups") {
         var h = Harness(displays: [display(), display(2, x: 1100)])
