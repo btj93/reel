@@ -198,6 +198,23 @@ struct Harness {
 }
 
 @MainActor func replayTests() throws {
+    section("Audit A adoption: background addition centres without stealing OS focus") {
+        var h = Harness()
+        h.census(1, [window(1)])
+        h.send(.windowAdded(window(2)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "adoption still selects the new column")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "background adoption must not activate its app")
+        check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "background adoption must not raise")
+    }
+    section("Audit A unhide: nil-tile Dock crossing is fulfilled by its pid") {
+        var h = Harness()
+        h.census(1, [window(1), window(2, app: 200)])
+        h.send(.windowsHidden([TileID(2)]))
+        h.send(.focus(FocusIntent(tile: nil, pid: 200, source: .appActivation)))
+        h.send(.windowAdded(window(2, app: 200)), advance: 0.2)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "unhidden clicked app fulfills nil-tile crossing")
+        check(h.effects.contains { if case .focus(TileID(2), _) = $0 { true } else { false } }, "unhide must execute the held Dock click")
+    }
     section("R7 focus: a different app activation within 100 ms brings Fork into the middle snap") {
         var h = Harness()
         h.send(.configChanged(EngineConfig(animate: false, snapPoints: [.middle])))
