@@ -385,7 +385,7 @@ public struct World: Sendable {
         if let parked = parkedOwners[tile], !parked.matches(frame) { parkedOwners[tile] = nil }
     }
 
-    private func home(_ window: ObservedWindow) -> UInt32? {
+    func home(_ window: ObservedWindow) -> UInt32? {
         if let hidden = groups.keys.sorted().first(where: { groups[$0]?.hidden[window.id] != nil }) { return hidden }
         if let parked = parkedOwners[window.id], groups[parked.group] != nil, parked.matches(window.initialFrame) { return parked.group }
         return window.initialFrame.flatMap { topology.nearestGroup(to: CGPoint(x: $0.rect.midX, y: $0.rect.midY))?.id }

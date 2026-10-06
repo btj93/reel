@@ -237,7 +237,26 @@ extension World {
     /// rewritten. A floating window belongs to the user, so its frame is left alone.
     fileprivate mutating func onWindowMoved(_ tile: TileID, frame: AXRect, group id: UInt32, _ pass: inout Pass) {
         guard frame.rect.isFinite, var group = groups[id], !group.phase.isChanging,
-              let index = group.strip.columnIndex(of: tile) else { return }
+              let old = group.windows[tile] else { return }
+        let window = ObservedWindow(id: tile, pid: old.pid, bundleID: old.bundleID, title: old.title,
+                                    floating: old.floating, initialFrame: frame).adoptingTitle(old.ruleTitle ?? old.title)
+        if let destination = home(window), destination != id, let target = topology.group(id: destination),
+           target.displays.contains(where: { $0.frame.contains(CGPoint(x: frame.rect.midX, y: frame.rect.midY)) }),
+           groups[destination]?.phase.isChanging == false {
+            let floating = group.floating.contains(tile)
+            remove(tile, from: id, &pass)
+            add(window, to: destination, &pass)
+            if floating {
+                groups[destination]!.strip.removeTile(tile, at: pass.now)
+                groups[destination]!.floating.insert(tile)
+            }
+            focus(FocusIntent(tile: tile, source: .adoption), group: destination, &pass)
+            pass.persist = true
+            return
+        }
+        group.windows[tile] = window
+        groups[id] = group
+        guard let index = group.strip.columnIndex(of: tile) else { return }
         let width = min(frame.rect.width, group.strip.workingArea.width)
         if abs(width - group.strip.columnData[index].cachedWidth) > EngineConfig.userResizeSlop {
             group.strip.setWidth(.fixed(width), column: index, at: pass.now, params: nil)
