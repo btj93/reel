@@ -183,7 +183,9 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     group.windows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0.adoptingTitle($0.ruleTitle ?? $0.title)) })
     group.hidden = Dictionary(uniqueKeysWithValues: (saved?.hidden ?? []).map { ($0.window.id, $0) })
     // A window that hid on this Space and is back on screen returns to its own place, after the rest of the strip.
-    let returning = windows.compactMap { window in group.returning(window).map { (window, $0) } }.sorted { $0.1.place < $1.1.place }
+    let returning = windows.compactMap { window in
+        group.returning(window).map { (window.adopting($0.window), $0) }
+    }.sorted { $0.1.place < $1.1.place }
     let returned = Set(returning.map(\.0.id))
     var unused = windows.filter { !returned.contains($0.id) }.sorted { $0.id.rawValue < $1.id.rawValue }
     var mappedIDs: [TileID: TileID] = [:]
