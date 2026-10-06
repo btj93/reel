@@ -314,6 +314,29 @@ final class FocusObservationBox: @unchecked Sendable {
         }
     }
 
+    section("Audit A echo: stale echo cannot supersede a pending real activation") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 102)])
+        let box = FocusObservationBox(), time = FocusTestClock(), clock = ScopeClock()
+        clock.current = h.world.stamp
+        let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
+        let workers = [Int32(101): AppWorker(app: a, windows: [1: FocusProbeWindow(1, pid: 101)], clock: clock, focusSpace: { _ in nil }, send: box.append),
+                       Int32(102): AppWorker(app: b, windows: [2: FocusProbeWindow(2, pid: 102)], clock: clock, focusSpace: { _ in nil }, send: box.append)]
+        let executor = Executor(worker: { workers[$0] }, log: { _ in }, now: { time.time })
+        executor.synchronizeFocus(with: h.world, paused: false)
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!); a.drain()
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in h.send(kind) }, log: { _ in })
+        observer.clock.current = h.world.stamp
+        observer.workers = workers
+        observer.activated(102)
+        observer.activated(101) // a real OS echo of the executed A work, not a newer user decision
+        b.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(0.3)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "echo cannot revoke B's still-pending activation read")
+    }
     section("Audit A routing: activation starts on settled epoch and named tile uses its own display") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(10, [window(1, app: 101)])
