@@ -889,10 +889,11 @@ extension World {
         case .failed, .timedOut, .sizeUnconfirmed:
             // Keep the last target for the focus ring; failure is not evidence the window disappeared.
             appliedFrames.removeValue(forKey: tile)
-            guard frameFailures[tile]?.retryAt != nil || frameFailures[tile] == nil else { return }
+            guard frameFailures[tile]?.request.revision != revision,
+                  frameFailures[tile]?.retryAt != nil || frameFailures[tile] == nil else { return }
             let count = (frameFailures[tile]?.count ?? 0) + 1
             let delays = [EngineConfig.frameRetryDelay, 0.5, 2.0]
-            let delay = count <= delays.count ? delays[count - 1] : nil
+            let delay: Double? = count <= delays.count ? delays[count - 1] : nil
             frameFailures[tile] = FrameFailure(request: request, count: count, retryAt: delay.map { pass.now + $0 })
             if let delay { schedule(.retryFrames, delay: delay, &pass) }
             else { pass.effects.append(.log("frame give-up tile=\(tile.rawValue) failures=\(count)")) }
