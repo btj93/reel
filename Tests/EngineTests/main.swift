@@ -5292,6 +5292,15 @@ final class CensusFixture: CensusObserver {
             check(!h.requests.isEmpty, "recover resets retry budget")
         }
     }
+    section("AuditB 14c reclassification migration preserves unique membership") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(1, [window(1, floating: true, x: 100)])
+        h.census(2, [window(2, x: 1200)], group: 2)
+        h.send(.windowChanged(window(1, floating: true, x: 1300), frontmost: true))
+        h.send(.windowChanged(window(1, floating: false, x: 1300), frontmost: true))
+        check(h.world.check().isEmpty, "reclassification into another group never resurrects old ownership")
+        check(h.world.owner(of: TileID(1)) == 2, "reclassification uses latest frame for re-tile")
+    }
     section("AuditB 14 first nonempty rule title latches after untitled adoption") {
         var h = Harness(rules: [Rule(titleRegex: "^Settings$", floating: true)])
         h.census(1, [ObservedWindow(id: TileID(1), pid: 1, bundleID: nil, title: "")])
