@@ -276,7 +276,7 @@ extension World {
         for id in groups.keys.sorted() {
             guard let known = groups[id]!.windows[window.id] else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
-            let window = window.adoptingTitle(known.ruleTitle ?? window.title)
+            let window = window.adopting(known)
             guard known != window else { continue }
             if joinsStrip(was: known, now: window, config: config), groups[id]!.floating.contains(window.id) {
                 groups[id]!.windows[window.id] = window
@@ -295,7 +295,7 @@ extension World {
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
-            let window = window.adoptingTitle(known.ruleTitle ?? window.title)
+            let window = window.adopting(known)
             let floated = saved.floating.contains { $0.id == window.id }
             guard known != window, !(floated && joinsStrip(was: known, now: window, config: config)) else { continue }
             spaces.live[key] = refreshing(window, in: saved)
@@ -311,7 +311,7 @@ extension World {
         if group.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
         guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
         let returning = group.returning(window)
-        let window = window.adoptingTitle(returning?.window.ruleTitle ?? window.ruleTitle ?? window.title)
+        let window = returning.map { window.adopting($0.window) } ?? window.adoptingTitle(window.ruleTitle ?? window.title)
         if returning == nil { cancelTimers(group: id, &pass, focusOnly: true) }
         cancelPointer(in: id, &pass)
         group = groups[id]!

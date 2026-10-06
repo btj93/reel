@@ -163,7 +163,7 @@ extension Snapshot {
 }
 
 func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
-    func fresh(_ old: ObservedWindow) -> ObservedWindow { old.id == window.id ? window.adoptingTitle(old.ruleTitle ?? window.title) : old }
+    func fresh(_ old: ObservedWindow) -> ObservedWindow { old.id == window.id ? window.adopting(old) : old }
     let columns = saved.columns.map {
         SnapshotColumn(windows: $0.windows.map(fresh), width: $0.width, activeTileIndex: $0.activeTileIndex,
                        snapIndex: $0.snapIndex, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
@@ -198,7 +198,7 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
             let live = unused.remove(at: index)
             mappedIDs[old.id] = live.id
             if hidesMissing, old.id == live.id, old.hasSameOwner(as: live) {
-                group.windows[live.id] = live.adoptingTitle(old.ruleTitle ?? live.title)
+                group.windows[live.id] = live.adopting(old)
             }
         }
     }

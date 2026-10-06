@@ -17,8 +17,8 @@ public struct WindowFacts: Equatable, Sendable {
     var observed: ObservedWindow { observed(at: frame) }
 
     func observed(at frame: CGRect?) -> ObservedWindow {
-        ObservedWindow(id: TileID(id), pid: pid, bundleID: bundleID, title: title, floating: classification == .float,
-                       initialFrame: frame.map(AXRect.init))
+        ObservedWindow(id: TileID(id), pid: pid, bundleID: bundleID, title: title, floating: classification == .float || classification == .provisionalTitle,
+                       classification: classification, initialFrame: frame.map(AXRect.init))
     }
 }
 

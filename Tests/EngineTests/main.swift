@@ -268,9 +268,34 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review B7 the first late title may tile once and stays stable across Space restore") {
+        func document(_ title: String) -> ObservedWindow {
+            let frame = CGRect(x: 100, y: 30, width: 500, height: 600)
+            let classification = classifyWindow(WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: title, frame: frame))
+            return ObservedWindow(id: TileID(1), pid: 101, bundleID: "test.app", title: title,
+                                  floating: classification == .float || classification == .provisionalTitle,
+                                  classification: classification, initialFrame: AXRect(frame))
+        }
+        var h = Harness()
+        h.census(1, [document(""), window(2, x: 600)])
+        check(h.world.groups[1]!.floating == [TileID(1)] && h.tiles == [TileID(2)], "an initially untitled standard window floats provisionally")
+        h.send(.windowChanged(document("Document")))
+        check(h.world.groups[1]!.floating.isEmpty && h.tiles == [TileID(2), TileID(1)], "its first usable title may insert a column once")
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.send(.command(.moveLeft, .keyboard))
+        h.census(2, [window(3)])
+        h.send(.windowChanged(document("")))
+        h.census(1, [document(""), window(2, x: 600)])
+        check(h.world.groups[1]!.floating.isEmpty && h.tiles == [TileID(1), TileID(2)], "saved established classification and column survive an empty-title return")
+        check(h.world.groups[1]!.windows[TileID(1)]?.ruleTitle == "Document", "the restored window keeps its first title latch")
+        h.send(.windowsHidden([TileID(1)]))
+        h.send(.windowAdded(document(""), frontmost: false))
+        check(h.world.groups[1]!.floating.isEmpty && h.tiles == [TileID(1), TileID(2)], "hidden established windows return to their column despite provisional facts")
+        check(h.world.check().isEmpty, "provisional title lifecycle preserves invariants")
+    }
     section("Review B7 repeated empty titles preserve established document columns") {
         var h = Harness()
-        h.census(1, [ObservedWindow(id: TileID(99001), pid: 99001, bundleID: nil, title: "Document"), window(2)])
+        h.census(1, [ObservedWindow(id: TileID(99001), pid: 99001, bundleID: nil, title: "Document"), window(2, x: 600)])
         let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), probe = TitleFlickerProbeWindow(), clock = ScopeClock()
         clock.current = h.world.stamp
         let worker = AppWorker(app: app, windows: [99001: probe], clock: clock, send: box.append)
@@ -291,7 +316,7 @@ final class FocusObservationBox: @unchecked Sendable {
     section("Review B7 structural dialogs and small frames still float after a title latch") {
         for small in [false, true] {
             var h = Harness()
-            h.census(1, [ObservedWindow(id: TileID(99001), pid: 99001, bundleID: nil, title: "Document"), window(2)])
+            h.census(1, [ObservedWindow(id: TileID(99001), pid: 99001, bundleID: nil, title: "Document"), window(2, x: 600)])
             let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), probe = TitleFlickerProbeWindow(), clock = ScopeClock()
             clock.current = h.world.stamp
             let worker = AppWorker(app: app, windows: [99001: probe], clock: clock, send: box.append)

@@ -20,15 +20,17 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
     /// The adoption title keeps rule matching stable while live metadata changes.
     public internal(set) var ruleTitle: String?
     public let floating: Bool
+    public let classification: WindowClassification?
     public let initialFrame: AXRect?
 
     public init(id: TileID, pid: Int32, bundleID: String?, title: String = "", floating: Bool = false,
-                initialFrame: AXRect? = nil) {
+                classification: WindowClassification? = nil, initialFrame: AXRect? = nil) {
         self.id = id
         self.pid = pid
         self.bundleID = bundleID
         self.title = title
         self.floating = floating
+        self.classification = classification
         self.initialFrame = initialFrame
     }
 
@@ -38,8 +40,17 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
         return copy
     }
 
+    func adopting(_ previous: ObservedWindow) -> ObservedWindow {
+        let window: ObservedWindow
+        if classification == .provisionalTitle, previous.ruleTitle != nil {
+            window = ObservedWindow(id: id, pid: pid, bundleID: bundleID, title: title, floating: previous.floating,
+                                    classification: previous.classification, initialFrame: initialFrame)
+        } else { window = self }
+        return window.adoptingTitle(previous.ruleTitle ?? title)
+    }
+
     func reframed(_ frame: AXRect) -> ObservedWindow {
-        ObservedWindow(id: id, pid: pid, bundleID: bundleID, title: title, floating: floating, initialFrame: frame)
+        ObservedWindow(id: id, pid: pid, bundleID: bundleID, title: title, floating: floating, classification: classification, initialFrame: frame)
             .adoptingTitle(ruleTitle ?? title)
     }
 

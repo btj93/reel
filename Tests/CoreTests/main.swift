@@ -371,16 +371,16 @@ do {
     assertEq(classifyWindow(props), .tile)
 }
 
-section("Standard window with nil title → float (popup/autocomplete)")
+section("Standard window with nil title → provisional float (popup/autocomplete)")
 do {
     let props = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", isResizable: true, hasCloseButton: true, title: nil)
-    assertEq(classifyWindow(props), .float)
+    assertEq(classifyWindow(props), .provisionalTitle)
 }
 
-section("Standard window with empty title → float (popup/autocomplete)")
+section("Standard window with empty title → provisional float (popup/autocomplete)")
 do {
     let props = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", isResizable: true, hasCloseButton: true, title: "")
-    assertEq(classifyWindow(props), .float)
+    assertEq(classifyWindow(props), .provisionalTitle)
 }
 
 section("Standard window with title but tiny frame → float (Fork autocomplete)")
