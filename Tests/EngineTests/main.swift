@@ -252,6 +252,52 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review A1 cancelled focus cannot debounce a genuine Dock click") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 101), window(3, app: 202)])
+        h.send(.command(.focus(TileID(3)), .keyboard))
+        let app = QueuedFocusApp(pid: 101, focused: 2), box = FocusObservationBox()
+        let a1 = FocusProbeWindow(1, pid: 101), a2 = FocusProbeWindow(2, pid: 101)
+        let worker = AppWorker(app: app, windows: [1: a1, 2: a2], clock: ScopeClock(), focusSpace: { _ in nil }, send: box.append)
+        let executor = Executor(worker: { _ in worker }, log: { _ in }, now: { 1 })
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2, 3] }, elsewhere: { [] }, paused: { false },
+                                emit: { event, _ in h.send(event); executor.synchronizeFocus(with: h.world, paused: false) }, log: { _ in })
+        observer.workers[101] = worker
+        observer.clock.current = h.world.stamp
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        executor.synchronizeFocus(with: h.world, paused: false)
+        executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!)
+        executor.raise(TileID(1), pid: 101)
+        observer.activated(101)
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(a1.focusCount == 0 && a1.raiseCount == 0, "Dock cancels A1 before its queued focus or raise executes")
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(2), "genuine Dock-selected A2 wins over the never-executed A1 decision")
+    }
+    section("Review A1 a second activation survives a consumed executed ticket") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 101)])
+        let app = QueuedFocusApp(pid: 101, focused: 2), box = FocusObservationBox()
+        let a1 = FocusProbeWindow(1, pid: 101)
+        let worker = AppWorker(app: app, windows: [1: a1, 2: FocusProbeWindow(2, pid: 101)], clock: ScopeClock(), focusSpace: { _ in nil }, send: box.append)
+        let executor = Executor(worker: { _ in worker }, log: { _ in }, now: { 1 })
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { event, _ in h.send(event); executor.synchronizeFocus(with: h.world, paused: false) }, log: { _ in })
+        observer.workers[101] = worker
+        observer.clock.current = h.world.stamp
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        executor.synchronizeFocus(with: h.world, paused: false)
+        executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!)
+        app.drain()
+        observer.activated(101)
+        check(box.drain().isEmpty && a1.focusCount == 1, "first activation consumes the executed ticket without a read")
+        observer.activated(101)
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(2), "second same-pid activation is genuine after the ticket was consumed")
+    }
     section("Audit A Dock: cross-Space Fork click beats saved destination focus") {
         var h = Harness()
         h.send(.configChanged(EngineConfig(animate: false, snapPoints: [.middle])))
