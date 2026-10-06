@@ -976,8 +976,9 @@ extension World {
 
     /// Hidden windows get their release frames again: the write at hide time may have failed.
     fileprivate mutating func release(group id: UInt32, _ pass: inout Pass) {
+        guard let display = topology.group(id: id) else { return }
         let hidden = (groups[id]?.hidden ?? [:]).sorted { $0.key.rawValue < $1.key.rawValue }
-            .compactMap { tile, hidden in hidden.frame.map { (tile: tile, pid: hidden.window.pid, frame: $0) } }
+            .compactMap { hiddenRelease($0.value, on: display) }
         var writes = releaseFrames(group: id, at: pass.now) + hidden
         var seen = Set(groups.values.flatMap { Array($0.windows.keys) + Array($0.hidden.keys) })
         // Live stashes hold this session's AX identities. Disk entries deliberately never reach this path.
@@ -986,13 +987,23 @@ extension World {
             guard let display = topology.group(id: id) else { continue }
             let restored = restoredGroup(display: display, config: config, key: key.space, epoch: 0,
                                          windows: saved.windows, saved: saved, hidesMissing: false, time: pass.now)
-            let hidden = restored.hidden.values.compactMap { value in
-                value.frame.map { (tile: value.window.id, pid: value.window.pid, frame: $0) }
-            }
+            let hidden = restored.hidden.values.compactMap { hiddenRelease($0, on: display) }
             for request in releaseFrames(group: id, state: restored, force: true, at: pass.now) + hidden
                 where seen.insert(request.tile).inserted { writes.append(request) }
         }
         write(writes, group: id, &pass)
+    }
+
+    private func hiddenRelease(_ hidden: HiddenTile, on display: DisplayGroup) -> (tile: TileID, pid: Int32, frame: AXRect)? {
+        // A hidden tile whose previous target was already on screen had no release write. After unplug it still needs one.
+        let frame: AXRect
+        if let saved = hidden.frame { frame = saved }
+        else if let column = hidden.column {
+            let area = display.displays[0].area
+            frame = hidden.window.initialFrame ?? AXRect(CGRect(x: area.minX, y: area.minY,
+                         width: column.width.resolve(workingAreaWidth: area.width, gap: config.gap), height: area.height))
+        } else { return nil }
+        return (hidden.window.id, hidden.window.pid, frame)
     }
 
     /// Release only walks the strip, so windows that leave it alive (their app hid, or one minimized) get their release
@@ -1037,7 +1048,10 @@ extension World {
         for (tile, pid, frame) in writes {
             let point = CGPoint(x: frame.rect.midX, y: frame.rect.midY)
             let area = display.displays.min { $0.distance(to: point) < $1.distance(to: point) }!.area
-            write(tile, pid: pid, frame: frame, scope: scope, purpose: .release(AXRect(area)), &pass)
+            let size = CGSize(width: min(frame.rect.width, area.width), height: min(frame.rect.height, area.height))
+            let origin = CGPoint(x: max(area.minX, min(frame.rect.minX, area.maxX - size.width)),
+                                 y: max(area.minY, min(frame.rect.minY, area.maxY - size.height)))
+            write(tile, pid: pid, frame: AXRect(CGRect(origin: origin, size: size)), scope: scope, purpose: .release(AXRect(area)), &pass)
         }
     }
 
