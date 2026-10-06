@@ -5557,7 +5557,7 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        process.executableURL = Bundle.main.executableURL
         check(process.executableURL.map { FileManager.default.isExecutableFile(atPath: $0.path) } == true,
               "log probe resolves this runner to an existing executable under any scratch path")
         process.environment = ProcessInfo.processInfo.environment.merging(["AUDIT_LOG_PROBE": dir.appendingPathComponent("reel.log").path]) { _, new in new }
