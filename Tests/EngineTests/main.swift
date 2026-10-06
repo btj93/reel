@@ -252,6 +252,25 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review B6 settled minimum width preserves preset cycling") {
+        var h = Harness()
+        h.census(1, [window(1)])
+        let expectedWidths = [330.0, 500.0, 670.0, 330.0]
+        for (cycle, expected) in expectedWidths.enumerated() {
+            h.send(.command(.cycleWidthPreset, .keyboard))
+            let request = h.world.frames[TileID(1)]!
+            check(request.frame.rect.width == expected, "cycle reaches each configured preset despite prior minimum-width refusal")
+            check(h.world.groups[1]!.strip.columns[0].presetIndex == cycle % 3, "cycle records the next preset index")
+            var landed = request.frame.rect
+            landed.size.width = max(expected, 650)
+            h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: .applied, landed: AXRect(landed)))
+            check(h.world.groups[1]!.strip.columns[0].presetIndex == cycle % 3, "settled app feedback retains the selected preset")
+            check(h.world.groups[1]!.strip.columnData[0].cachedWidth == max(expected, 650), "logical width respects the settled minimum")
+        }
+        h.send(.windowMoved(TileID(1), AXRect(CGRect(x: 100, y: 30, width: 720, height: 800))))
+        check(h.world.groups[1]!.strip.columns[0].presetIndex == nil, "a genuine manual resize still clears preset selection")
+        check(h.world.check().isEmpty, "constraint feedback and manual resize preserve invariants")
+    }
     section("Review A4 managed return cancels the unmanaged fade before idle") {
         let frame = CGRect(x: 100, y: 200, width: 500, height: 600)
         for snap in [false, true] {
