@@ -359,7 +359,7 @@ public struct World: Sendable {
     public func route(_ kind: Event.Kind) -> UInt32? {
         let tile: TileID?
         switch kind {
-        case .windowAdded(let window): return owner(of: window.id) ?? home(window) ?? activeGroup
+        case .windowAdded(let window, _): return owner(of: window.id) ?? home(window) ?? activeGroup
         case .windowRemoved(let id), .windowMoved(let id, _), .frameCompleted(let id, _, _): tile = id
         case .focus(let intent) where intent.tile == nil:
             return groups.keys.sorted().first { id in groups[id]!.windows.values.contains { $0.pid == intent.pid } } ?? activeGroup

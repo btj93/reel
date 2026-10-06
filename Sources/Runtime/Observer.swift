@@ -442,7 +442,7 @@ public final class Observer: CensusObserver {
             if let worker = workers[pid] { worker.rediscover(windows.map(\.windowID)) }
             else { NSRunningApplication(processIdentifier: pid).map(register) }
         }
-        for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window), nil) }
+        for window in census(onScreen) where !managed.contains(window.id.rawValue) { emit(.windowAdded(window, frontmost: window.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier), nil) }
     }
 
     /// A Dock click or Cmd+Tab. The app is named at once, with the Space it was activated on, so a Space change that
@@ -529,7 +529,7 @@ public final class Observer: CensusObserver {
         case .created(let facts):
             learn(facts)
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
-            if !paused(), facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed)) }
+            if !paused(), facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier)) }
         case .destroyed(let id):
             let tracked = managed().contains(id) || elsewhere().contains(id)
             forget(id)
@@ -539,7 +539,7 @@ public final class Observer: CensusObserver {
             if managed().contains(id) { emit(.windowsHidden([TileID(id)]), nil) }
         case .restored(let facts):
             learn(facts)
-            if !paused(), facts.classification != .ignore { emitObserved(.windowAdded(facts.observed)) }
+            if !paused(), facts.classification != .ignore { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier)) }
         case .retitled(let facts):
             learn(facts)
             // Even while paused, so a late title is not lost; the engine's writes are held back until resume.

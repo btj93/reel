@@ -34,9 +34,9 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .topologyChanged(let topology): world.onTopology(topology, &pass)
     case .configChanged(let config): world.onConfig(config, &pass)
     case .loadSnapshots(let snapshots): world.spaces.disk = snapshots.filter(\.isValid)
-    case .windowAdded(let window):
+    case .windowAdded(let window, let frontmost):
         world.revokeParking(window.id, frame: window.initialFrame)
-        world.onWindowAdded(window, group: id, &pass)
+        world.onWindowAdded(window, frontmost: frontmost, group: id, &pass)
     case .windowChanged(let window):
         world.revokeParking(window.id, frame: window.initialFrame)
         world.onWindowChanged(window, &pass)
@@ -202,7 +202,7 @@ extension World {
         group.focus = .resolved(FocusDecision(tile: tile, source: intent.source, time: quietSince ?? pass.now))
         group.focusedAt = max(group.focusedAt, quietSince ?? pass.now)
         groups[id] = group
-        if intent.source != .axFocus, quietSince == nil {
+        if intent.source != .axFocus, quietSince == nil, intent.requestsOSFocus {
             pass.effects.append(.focus(tile: tile, source: intent.source))
             pass.effects.append(.raise(tile))
         }
@@ -212,7 +212,7 @@ extension World {
     }
 
     /// A new window is on this group's current Space, so it moves here from any stash that still lists it.
-    fileprivate mutating func onWindowAdded(_ window: ObservedWindow, group id: UInt32, _ pass: inout Pass) {
+    fileprivate mutating func onWindowAdded(_ window: ObservedWindow, frontmost: Bool, group id: UInt32, _ pass: inout Pass) {
         guard window.isValid else { return pass.effects.append(.log("invalid window ignored tile=\(window.id.rawValue)")) }
         if groups[id]?.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
         let returning = groups[id]?.returning(window) != nil
@@ -220,8 +220,10 @@ extension World {
         guard let group = groups[id], group.windows[window.id] != nil else { return }
         prune([window.id.rawValue], from: otherSpaces(than: id))
         // A window back from a hide is not new: its app's focus report or activation decides focus, even one that came first.
-        if !returning { focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass) }
-        else if case .crossing(let intent, _, _) = group.focus, intent.tile == window.id { focus(intent, group: id, &pass) }
+        if !returning { focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: frontmost), group: id, &pass) }
+        else if case .crossing(let intent, _, _) = group.focus, (intent.tile.map { $0 == window.id } ?? (intent.pid == window.pid)) {
+            let fulfilled = FocusIntent(tile: window.id, pid: intent.pid, source: intent.source, observedSpace: intent.observedSpace)
+            focus(fulfilled, group: id, &pass) }
         pass.persist = true
     }
 
@@ -261,7 +263,7 @@ extension World {
             guard known != window else { continue }
             if joinsStrip(was: known, now: window, config: config), groups[id]!.floating.contains(window.id) {
                 guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
-                focus(FocusIntent(tile: window.id, source: .adoption), group: id, &pass)
+                focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: false), group: id, &pass)
             }
             groups[id]!.windows[window.id] = window
             pass.persist = true

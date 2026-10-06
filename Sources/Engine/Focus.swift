@@ -18,12 +18,14 @@ public struct FocusIntent: Sendable {
     public let pid: Int32?
     public let source: FocusSource
     public let observedSpace: SpaceKey?
+    public let requestsOSFocus: Bool
 
-    public init(tile: TileID?, pid: Int32? = nil, source: FocusSource, observedSpace: SpaceKey? = nil) {
+    public init(tile: TileID?, pid: Int32? = nil, source: FocusSource, observedSpace: SpaceKey? = nil, requestsOSFocus: Bool = true) {
         self.tile = tile
         self.pid = pid
         self.source = source
         self.observedSpace = observedSpace
+        self.requestsOSFocus = requestsOSFocus
     }
 
     public func droppedLog(reason: String) -> String {

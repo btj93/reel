@@ -110,7 +110,7 @@ public enum FrameResult: Sendable {
 
 public struct Event: Sendable {
     public enum Kind: Sendable {
-        case windowAdded(ObservedWindow)
+        case windowAdded(ObservedWindow, frontmost: Bool = false)
         case windowChanged(ObservedWindow)
         case windowRemoved(TileID)
         /// The windows left the strip but live on: their app hid, or one minimized.

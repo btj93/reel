@@ -138,7 +138,7 @@ public final class Loop {
             if case .focus(let intent) = kind { logLine(intent.droppedLog(reason: quitting ? "quitting" : "missing-group")) }
             return []
         }
-        if case .windowAdded(let window) = kind {
+        if case .windowAdded(let window, _) = kind {
             let observed = reads.space(id, !world.topology.separateSpaces)?.key
             guard censusAdoption(reads.memberships(window.id.rawValue), observed: observed, settled: world.groups[id]?.space) else {
                 logLine("loop: adoption held for Space census tile=\(window.id.rawValue) group=\(id)")
@@ -324,6 +324,8 @@ public final class Loop {
         guard value != paused else { return }
         if value, let session = world.pointer { send(.pointer(.cancel, session: session.token)) }
         if value { everyGroup(.release) }
+        // Reconcile deaths while effects are still held; additions are admitted after resume.
+        if !value { observer.healthCheck() }
         paused = value
         logLine("loop: paused=\(value)")
         if value {
@@ -331,7 +333,6 @@ public final class Loop {
             indicatorTile = nil
         } else {
             // Windows opened during the pause join, and every frame is written again over whatever moved meanwhile.
-            observer.healthCheck()
             recover()
             // Focus reports were dropped while paused; read the real focus again so commands act on it.
             reportFrontmostFocus()

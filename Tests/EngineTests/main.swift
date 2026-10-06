@@ -206,6 +206,13 @@ struct Harness {
         check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "background adoption must not activate its app")
         check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "background adoption must not raise")
     }
+    section("Audit A adoption: frontmost addition is allowed to activate") {
+        var h = Harness()
+        h.census(1, [window(1)])
+        h.send(.windowAdded(window(2), frontmost: true))
+        check(h.effects.contains { if case .focus(TileID(2), _) = $0 { true } else { false } }, "frontmost adoption still focuses")
+        check(h.effects.contains { if case .raise(TileID(2)) = $0 { true } else { false } }, "frontmost adoption still raises")
+    }
     section("Audit A unhide: nil-tile Dock crossing is fulfilled by its pid") {
         var h = Harness()
         h.census(1, [window(1), window(2, app: 200)])
