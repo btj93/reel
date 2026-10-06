@@ -724,7 +724,7 @@ final class FocusObservationBox: @unchecked Sendable {
         check(h.active == TileID(104) && h.world.groups[1]!.focus.decision?.source == .appActivation,
               "the crossing census commits Fork, not the earlier kitty activation")
     }
-    section("R7 focus: protected same-app activation and AX echoes still drop with diagnostics") {
+    section("R7 focus: genuine same-app activation wins while AX echoes drop with diagnostics") {
         for source in [FocusSource.appActivation, .axFocus] {
             var h = Harness()
             h.census(4, [window(321, app: 9001), window(322, app: 9001), window(104, app: 1245)])
@@ -733,8 +733,13 @@ final class FocusObservationBox: @unchecked Sendable {
             let pid: Int32 = source == .appActivation ? 9001 : 1245
             h.send(.focus(FocusIntent(tile: tile, pid: pid, source: source)), advance: 0.1)
             h.advance(EngineConfig.focusDebounce)
-            check(h.active == TileID(321), "\(source) echo cannot replace keyboard focus")
-            check(h.logged("focus dropped source=\(source.rawValue) tile=\(tile.rawValue) pid=\(pid) reason=debounce"), "\(source) rejection identifies its source, tile, pid and reason")
+            if source == .appActivation {
+                check(h.active == TileID(322), "activation without an executed echo ticket replaces the keyboard decision")
+                check(h.world.groups[1]?.focus.decision?.source == .appActivation, "same-app activation commits as observed focus")
+            } else {
+                check(h.active == TileID(321), "AX echo cannot replace keyboard focus")
+                check(h.logged("focus dropped source=axFocus tile=104 pid=1245 reason=debounce"), "AX rejection identifies its source, tile, pid and reason")
+            }
         }
     }
     section("R7 focus: rejected echoes and missing tiles cannot cancel a pending later app activation") {
@@ -746,8 +751,7 @@ final class FocusObservationBox: @unchecked Sendable {
         h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation)), advance: 0.1)
         let pending = h.world.timers.keys
         check(!pending.isEmpty, "Fork's activation is pending")
-        for intent in [FocusIntent(tile: TileID(321), pid: 9001, source: .appActivation),
-                       FocusIntent(tile: TileID(321), pid: 9001, source: .axFocus),
+        for intent in [FocusIntent(tile: TileID(321), pid: 9001, source: .axFocus),
                        FocusIntent(tile: nil, pid: 1245, source: .appActivation),
                        FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation, observedSpace: .skylight(5)),
                        FocusIntent(tile: TileID(999), pid: 1245, source: .appActivation)] {
