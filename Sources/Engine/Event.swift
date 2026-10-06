@@ -34,7 +34,7 @@ public struct ObservedWindow: Equatable, Codable, Sendable {
 
     func adoptingTitle(_ title: String) -> ObservedWindow {
         var copy = self
-        copy.ruleTitle = title
+        copy.ruleTitle = title.isEmpty ? nil : title
         return copy
     }
 

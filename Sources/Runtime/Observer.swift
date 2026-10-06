@@ -167,6 +167,8 @@ package final class AppWorker: @unchecked Sendable {
     private var drainQueued = false
     private var forgetSizesQueued = false
     private var rediscoveryQueued = false
+    private var classificationQueued = false
+    private var pendingClassification = Set<CGWindowID>()
 
     var pid: Int32 { app.pid }
 
@@ -186,6 +188,7 @@ package final class AppWorker: @unchecked Sendable {
                  send: @escaping @Sendable (Observation, Stamp?) -> Void) {
         self.app = app
         self.windows = windows
+        pendingClassification = Set(windows.keys)
         self.focusSpace = focusSpace
         self.clock = clock
         self.send = send
@@ -259,6 +262,7 @@ package final class AppWorker: @unchecked Sendable {
         app.perform { [self] in
             let stamp = if let activation { activation.stamp } else { clock.current }
             let id = app.focusedWindowID()
+            if let id { refreshClassification(id, stamp: stamp) }
             let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
             send(.focused(pid: pid, id, activation: activation, space: frame.flatMap { focusSpace($0) }), stamp)
         }
@@ -304,11 +308,13 @@ package final class AppWorker: @unchecked Sendable {
         case kAXMovedNotification, kAXResizedNotification:
             guard let id = windowID(for: element), let window = windows[id], case .success(let frame) = window.getFrame() else { return }
             sizes.observed(id, frame: frame)
+            refreshClassification(id, stamp: stamp)
             post(.moved(id, frame))
         case kAXTitleChangedNotification:
             if let window = windowID(for: element).flatMap({ windows[$0] }) { post(.retitled(facts(window))) }
         case kAXFocusedWindowChangedNotification:
             let id = windowID(for: element)
+            if let id { refreshClassification(id, stamp: stamp) }
             let frame = id.flatMap { windows[$0] }.flatMap { try? $0.getFrame().get() }
             post(.focused(pid: pid, id, activation: nil, space: frame.flatMap { SpaceObserver.observedSpace(at: $0) }))
         default: break
@@ -324,11 +330,33 @@ package final class AppWorker: @unchecked Sendable {
         return facts(window)
     }
 
+    /// Only provisional facts are re-read on frequent events; a titled tiled window costs no extra AX calls.
+    private func refreshClassification(_ id: CGWindowID, stamp: Stamp?) {
+        guard pendingClassification.contains(id), let window = windows[id] else { return }
+        send(.retitled(facts(window)), stamp)
+    }
+
+    package func refreshClassifications(_ ids: [CGWindowID]) {
+        let first = lock.withLock { () -> Bool in
+            guard !classificationQueued else { return false }
+            classificationQueued = true
+            return true
+        }
+        guard first else { return }
+        if !app.perform({ [self] in
+            lock.withLock { classificationQueued = false }
+            let stamp = clock.current
+            ids.forEach { refreshClassification($0, stamp: stamp) }
+        }) { lock.withLock { classificationQueued = false } }
+    }
+
     private func facts(_ window: AXWindow) -> WindowFacts {
         var properties = window.getPropertiesFast()
         properties.windowLayer = windowLayer(for: window.windowID)
         properties.bundleIdentifier = app.bundleIdentifier
         let classification = classifyWindow(properties)
+        if classification == .float || properties.title?.isEmpty != false { pendingClassification.insert(window.windowID) }
+        else { pendingClassification.remove(window.windowID) }
         return WindowFacts(id: window.windowID, pid: pid, bundleID: app.bundleIdentifier, title: properties.title ?? "",
                            frame: properties.frame, classification: properties.isMinimized ? .ignore : classification)
     }
@@ -478,6 +506,10 @@ public final class Observer: CensusObserver {
         }
         ignored.formIntersection(visible)
         guard !paused() else { return }
+        let provisional = known.values.filter { visible.contains($0.id) && ($0.classification == .float || $0.title.isEmpty) }
+        for (pid, facts) in Dictionary(grouping: provisional, by: \.pid) {
+            workers[pid]?.refreshClassifications(facts.map(\.id))
+        }
         let unknown = onScreen.filter { $0.layer == 0 && known[$0.windowID] == nil && !ignored.contains($0.windowID) }
         for (pid, windows) in Dictionary(grouping: unknown, by: \.ownerPID).sorted(by: { $0.key < $1.key }) {
             // An app can turn regular after its launch notification; its first on-screen window registers it. One that

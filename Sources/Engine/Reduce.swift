@@ -279,11 +279,14 @@ extension World {
         for id in groups.keys.sorted() {
             guard let known = groups[id]!.windows[window.id] else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
-            let window = window.adoptingTitle(known.ruleTitle ?? known.title)
+            let window = window.adoptingTitle(known.ruleTitle ?? window.title)
             guard known != window else { continue }
             if joinsStrip(was: known, now: window, config: config), groups[id]!.floating.contains(window.id) {
                 guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
                 focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: frontmost), group: id, &pass)
+            } else if !shouldFloat(known, config: config), shouldFloat(window, config: config),
+                      groups[id]!.strip.columnIndex(of: window.id) != nil {
+                guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
             }
             groups[id]!.windows[window.id] = window
             pass.persist = true
@@ -291,7 +294,7 @@ extension World {
         for (key, saved) in spaces.live {
             guard let known = saved.windows.first(where: { $0.id == window.id }) else { continue }
             guard known.hasSameOwner(as: window) else { mismatched = true; continue }
-            let window = window.adoptingTitle(known.ruleTitle ?? known.title)
+            let window = window.adoptingTitle(known.ruleTitle ?? window.title)
             let floated = saved.floating.contains { $0.id == window.id }
             guard known != window, !(floated && joinsStrip(was: known, now: window, config: config)) else { continue }
             spaces.live[key] = refreshing(window, in: saved)
