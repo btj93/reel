@@ -37,7 +37,7 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .windowAdded(let window, let frontmost):
         world.revokeParking(window.id, frame: window.initialFrame)
         world.onWindowAdded(window, frontmost: frontmost, group: id, &pass)
-    case .windowChanged(let window):
+    case .windowChanged(let window, _):
         world.revokeParking(window.id, frame: window.initialFrame)
         world.onWindowChanged(window, &pass)
     case .windowRemoved(let tile):

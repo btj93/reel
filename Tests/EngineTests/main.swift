@@ -249,6 +249,45 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Audit A Dock: cross-Space Fork click beats saved destination focus") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(animate: false, snapPoints: [.middle])))
+        let kitty = window(321, app: 9001, bundle: "net.kovidgoyal.kitty")
+        let fork = window(104, app: 1245, bundle: "com.DanPristupov.Fork")
+        h.census(5, [fork, window(105)])
+        h.send(.command(.focus(TileID(105)), .keyboard))
+        h.census(4, [kitty])
+        h.send(.command(.focus(TileID(321)), .keyboard))
+        h.send(.focus(FocusIntent(tile: nil, pid: 1245, source: .appActivation)), advance: 0.1)
+        h.send(.spaceWillChange)
+        h.send(.spaceChanged(key: .skylight(5), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [fork, window(105)], frontmost: TileID(105)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(104), "cross-Space Dock click selects Fork instead of the saved tile")
+        check(h.effects.contains { if case .focus(TileID(104), .appActivation) = $0 { true } else { false } }, "cross-Space Dock click activates Fork")
+        check(h.world.frames[TileID(104)].map { abs($0.frame.rect.midX - 500) < 1 } ?? false, "Fork lands in the middle snap")
+    }
+    section("Audit A adoption: foreground late title may focus, background late title may not") {
+        for frontmost in [false, true] {
+            var h = Harness()
+            h.census(1, [window(1), window(2, floating: true)])
+            h.send(.windowChanged(window(2), frontmost: frontmost))
+            let focused = h.effects.contains { if case .focus(TileID(2), .adoption) = $0 { true } else { false } }
+            check(focused == frontmost, "late-title adoption only asks for OS focus in the frontmost app")
+        }
+    }
+    section("Audit A activation: a report with no original scope cannot borrow a later scope") {
+        let app = QueuedFocusApp(pid: 101, focused: 1), box = FocusObservationBox()
+        var emitted = 0
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [1] }, elsewhere: { [] }, paused: { false }, emit: { _, _ in emitted += 1 }, log: { _ in })
+        observer.workers[101] = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.activated(101)
+        observer.clock.current = Stamp(revision: 1, epochs: [1: 1])
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(emitted == 0, "scope-less activation cannot emit after the clock becomes valid")
+    }
+
     section("Audit A return: current OS focus beats a stale saved window") {
         var h = Harness()
         h.census(1, [window(1), window(2)])
@@ -345,7 +384,7 @@ final class FocusObservationBox: @unchecked Sendable {
         }
     }
 
-    section("Audit A echo: stale echo cannot supersede a pending real activation") {
+    section("Audit A echo: stale echo cannot supersede a pending real Dock click") {
         var h = Harness()
         h.census(1, [window(1, app: 101), window(2, app: 102)])
         let box = FocusObservationBox(), time = FocusTestClock(), clock = ScopeClock()
@@ -477,7 +516,7 @@ final class FocusObservationBox: @unchecked Sendable {
         check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "unhidden clicked app fulfills nil-tile crossing")
         check(h.effects.contains { if case .focus(TileID(2), _) = $0 { true } else { false } }, "unhide must execute the held Dock click")
     }
-    section("R7 focus: a different app activation within 100 ms brings Fork into the middle snap") {
+    section("R7 focus: a Dock click within 100 ms brings Fork into the middle snap") {
         var h = Harness()
         h.send(.configChanged(EngineConfig(animate: false, snapPoints: [.middle])))
         h.census(4, [window(321, app: 9001, bundle: "net.kovidgoyal.kitty"), window(104, app: 1245, bundle: "com.DanPristupov.Fork")])
