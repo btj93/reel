@@ -352,6 +352,7 @@ public final class Observer: CensusObserver {
     /// Windows the engine keeps off the current strip: hidden ones and every saved strip's, so a close there is heard.
     private let elsewhere: () -> Set<CGWindowID>
     private let log: (String) -> Void
+    private let onActivation: (Int32) -> Void
     private var tokens: [NSObjectProtocol] = []
     private var healthTimer: Timer?
     private var awaitingDiscovery = Set<Int32>()
@@ -375,13 +376,15 @@ public final class Observer: CensusObserver {
 
     package init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
          elsewhere: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
-         emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void) {
+         emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void,
+         onActivation: @escaping (Int32) -> Void = { _ in }) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
         self.elsewhere = elsewhere
         self.paused = paused
         self.emit = emit
+        self.onActivation = onActivation
         self.log = log
     }
 

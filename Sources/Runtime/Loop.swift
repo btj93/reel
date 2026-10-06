@@ -327,8 +327,7 @@ public final class Loop {
         if value, let session = world.pointer { send(.pointer(.cancel, session: session.token)) }
         if value { executor?.invalidateFocus(); everyGroup(.release) }
         // Reconcile deaths while effects are still held; additions are admitted after resume.
-        if !value { observer.healthCheck() }
-        paused = value
+        changePauseState(value) { observer.healthCheck() }
         logLine("loop: paused=\(value)")
         if value {
             indicator.hide()
@@ -443,6 +442,15 @@ public final class Loop {
     }
 
     // MARK: Focus indicator
+
+    package func indicatorFocus(frontmostPID: Int32?) -> TileID? {
+        focusedTile
+    }
+
+    package func changePauseState(_ value: Bool, reconcile: () -> Void) {
+        if !value { reconcile() }
+        paused = value
+    }
 
     private func updateIndicator() {
         guard config.indicator.style == .ring || config.indicator.style == .flash else { return }

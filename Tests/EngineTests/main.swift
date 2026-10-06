@@ -249,6 +249,39 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Audit A indicator: unmanaged frontmost clears the managed ring target") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(), effects: { _ in })
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "managed frontmost retains indicator")
+        check(loop.indicatorFocus(frontmostPID: 999) == nil, "unmanaged frontmost has no ring target")
+        check(loop.indicatorFocus(frontmostPID: nil) == nil, "unknown frontmost has no ring target")
+        var notified: [Int32] = []
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [] }, elsewhere: { [] }, paused: { false }, emit: { _, _ in }, log: { _ in },
+                                onActivation: { notified.append($0) })
+        observer.activated(999)
+        check(notified == [999], "untracked activation still refreshes the indicator")
+    }
+    section("Audit A resume: health reconciliation runs while writes are still paused") {
+        let h = Harness()
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(), effects: { _ in })
+        loop.changePauseState(true) {}
+        var held = false
+        loop.changePauseState(false) { held = loop.paused }
+        check(held && !loop.paused, "resume reconciles under pause, then releases writes")
+    }
+    section("Audit A adoption: background decision does not suppress the real frontmost AX read") {
+        var h = Harness()
+        h.census(1, [window(1)])
+        h.send(.windowAdded(window(2)))
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)), advance: 0.05)
+        h.advance(0.2)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(1), "unwritten adoption has no OS echo to protect")
+    }
+
     for (name, delay, twice, expected) in [("executed A echo after B", 0.10, false, UInt32(2)),
                                           ("matching echo is consumed once", 0.10, true, UInt32(1)),
                                           ("expired echo is a real activation", 0.20, false, UInt32(1))] {
