@@ -5272,6 +5272,15 @@ final class CensusFixture: CensusObserver {
         disk.send(.command(.release, .ipc))
         check(disk.requests.allSatisfy { $0.tile == TileID(20) }, "disk-only identities never receive writes")
     }
+    section("AuditB 5c one release covers live Spaces on every group") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(1, [window(1, x: 100)])
+        h.census(20, [window(2, x: 1200)], group: 2)
+        h.census(21, [window(3, x: 1200)], group: 2)
+        h.send(.command(.release, .ipc))
+        check(h.requests.contains { $0.tile == TileID(2) && $0.scope.group == 2 }, "one shutdown release includes other group's live stash")
+        check(Set(h.requests.map(\.tile)).count == h.requests.count, "all-display shutdown release dedupes identities")
+    }
     section("AuditB 5b hidden stash release after display unplug") {
         var h = Harness(displays: [display(), display(2, x: 1100)])
         h.census(50, [window(1, x: 1200)], group: 2)
