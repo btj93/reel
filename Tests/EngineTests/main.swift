@@ -268,6 +268,30 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review B8 hidden census return retains established classification for a later dialog") {
+        func document(_ title: String, classification: WindowClassification) -> ObservedWindow {
+            ObservedWindow(id: TileID(1), pid: 101, bundleID: "test.app", title: title,
+                           floating: classification != .tile, classification: classification,
+                           initialFrame: AXRect(CGRect(x: 100, y: 30, width: 500, height: 600)))
+        }
+        var h = Harness()
+        h.census(1, [document("Document", classification: .tile), window(2, x: 600)])
+        h.send(.windowsHidden([TileID(1)]))
+        check(h.tiles == [TileID(2)], "hiding the document retains only its neighbor in the visible strip")
+        h.census(2, [window(3)])
+        h.census(1, [document("", classification: .provisionalTitle), window(2, x: 600)])
+        check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(1)], [TileID(2)]], "the hidden census return restores the document's original column")
+        check(h.world.groups[1]!.windows[TileID(1)]?.ruleTitle == "Document", "the hidden census return retains the established first title")
+        check(h.world.groups[1]!.windows[TileID(1)]?.floating == false
+              && h.world.groups[1]!.windows[TileID(1)]?.classification == .tile, "provisional census facts cannot replace established tiled classification")
+        check(h.world.groups[1]!.windows[TileID(1)]?.title == "", "the returned document still exposes its current empty title")
+        for _ in 0..<2 {
+            h.send(.windowChanged(document("Dialog", classification: .float)))
+            check(h.world.groups[1]!.floating == [TileID(1)] && h.tiles == [TileID(2)], "a genuine dialog classification floats after the hidden census return")
+            check(h.requests.allSatisfy { $0.tile != TileID(1) }, "the floating dialog receives no managed layout write")
+        }
+        check(h.world.check().isEmpty, "hidden census return and structural dialog preserve invariants")
+    }
     section("Review B7 the first late title may tile once and stays stable across Space restore") {
         func document(_ title: String) -> ObservedWindow {
             let frame = CGRect(x: 100, y: 30, width: 500, height: 600)
