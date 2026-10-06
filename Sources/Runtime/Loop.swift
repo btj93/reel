@@ -288,7 +288,7 @@ public final class Loop {
     /// Every frame written again in full, over whatever moved while nothing was listening.
     @discardableResult
     public func recover() -> CommandOutcome {
-        observer.workers.values.forEach { $0.forgetSizes() }
+        observer?.workers.values.forEach { $0.forgetSizes() }
         return everyGroup(.recover)
     }
 

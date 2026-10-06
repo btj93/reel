@@ -82,7 +82,7 @@ final class MenuBar: NSObject {
         if let action = sender.representedObject as? HotkeyAction { loop.hotkey(action) }
     }
     @objc private func openConfig() { NSWorkspace.shared.open(URL(fileURLWithPath: loop.paths.configFile)) }
-    @objc private func recover() { loop.send(.command(.recover, .ipc)) }
+    @objc private func recover() { loop.recover() }
     @objc private func clearPositions() {
         let outcome = loop.request(.clearPositions)
         if outcome == .accepted { loop.store.clear() }
