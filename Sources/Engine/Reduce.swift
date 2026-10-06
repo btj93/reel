@@ -243,7 +243,7 @@ extension World {
                                     floating: old.floating, initialFrame: frame).adoptingTitle(old.ruleTitle ?? old.title)
         if let destination = home(window), destination != id, let target = topology.group(id: destination),
            target.displays.contains(where: { $0.frame.contains(CGPoint(x: frame.rect.midX, y: frame.rect.midY)) }),
-           groups[destination]?.phase.isChanging == false {
+           let destinationState = groups[destination], case .settled = destinationState.phase {
             let floating = group.floating.contains(tile)
             remove(tile, from: id, &pass)
             add(window, to: destination, &pass)
@@ -1034,7 +1034,7 @@ extension World {
             let frame = axRect(ViewportRect(target.frame), on: display)
             let area = display.displays.min { abs($0.area.midX - frame.rect.midX) < abs($1.area.midX - frame.rect.midX) }!.area
             guard !area.contains(frame.rect) else {
-                return force || config.raiseHeight > 0 || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
+                return force || config.raiseHeight > 0 || frameFailures[target.tileID] != nil || frames[target.tileID]?.frame != frame ? (target.tileID, pid, frame) : nil
             }
             let size = CGSize(width: min(target.frame.width, area.width), height: min(target.frame.height, area.height))
             defer { step += 30 }
