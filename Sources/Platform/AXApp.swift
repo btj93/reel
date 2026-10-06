@@ -261,7 +261,7 @@ open class AXApp: @unchecked Sendable {
     /// Run `work` on this app's thread, after any work queued before it. Never blocks the caller. False when the
     /// thread is stopped or never started, so `work` will never run.
     @discardableResult
-    public func perform(_ work: @escaping @Sendable () -> Void) -> Bool {
+    open func perform(_ work: @escaping @Sendable () -> Void) -> Bool {
         lock.lock()
         guard !stopRequested else {
             lock.unlock()

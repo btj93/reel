@@ -69,7 +69,7 @@ public final class Executor {
     private let worker: (Int32) -> AppWorker?
     private let log: (String) -> Void
 
-    init(worker: @escaping (Int32) -> AppWorker?, log: @escaping (String) -> Void) {
+    package init(worker: @escaping (Int32) -> AppWorker?, log: @escaping (String) -> Void) {
         self.worker = worker
         self.log = log
     }
@@ -118,11 +118,11 @@ public final class Executor {
         }
     }
 
-    func focus(_ tile: TileID, pid: Int32) {
+    package func focus(_ tile: TileID, pid: Int32) {
         worker(pid)?.run(tile) { $0.focus(timeout: 0.1) }
     }
 
-    func raise(_ tile: TileID, pid: Int32) {
+    package func raise(_ tile: TileID, pid: Int32) {
         worker(pid)?.run(tile) { _ = $0.raise() }
     }
 

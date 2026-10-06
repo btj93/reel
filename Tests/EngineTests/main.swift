@@ -1,3 +1,5 @@
+import AppKit
+import ApplicationServices
 import Core
 import CoreGraphics
 import Engine
@@ -197,7 +199,84 @@ struct Harness {
     }
 }
 
+final class QueuedFocusApp: AXApp, @unchecked Sendable {
+    private let lock = NSLock()
+    private var queue: [@Sendable () -> Void] = []
+    let focused: CGWindowID
+    init(pid: Int32, focused: CGWindowID) {
+        self.focused = focused
+        super.init(pid: pid, bundleIdentifier: nil)
+    }
+    override func perform(_ work: @escaping @Sendable () -> Void) -> Bool {
+        lock.withLock { queue.append(work) }
+        return true
+    }
+    override func focusedWindowID() -> CGWindowID? { focused }
+    func drain() {
+        let batch = lock.withLock { let copy = queue; queue = []; return copy }
+        batch.forEach { $0() }
+    }
+}
+
+final class FocusProbeWindow: AXWindow, @unchecked Sendable {
+    private let lock = NSLock()
+    private var focused = 0
+    private var raised = 0
+    var focusCount: Int { lock.withLock { focused } }
+    var raiseCount: Int { lock.withLock { raised } }
+    init(_ id: UInt32, pid: Int32) {
+        super.init(element: AXUIElementCreateApplication(pid), windowID: id, pid: pid)
+    }
+    override func focus(timeout: Float?) { lock.withLock { focused += 1 } }
+    override func raise() -> AXResult<Void> { lock.withLock { raised += 1 }; return .success(()) }
+    override func getFrame() -> AXResult<CGRect> { .success(CGRect(x: 100, y: 30, width: 300, height: 600)) }
+}
+
+final class FocusObservationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: [(Observation, Stamp?)] = []
+    func append(_ event: Observation, _ stamp: Stamp?) { lock.withLock { pending.append((event, stamp)) } }
+    func drain() -> [(Observation, Stamp?)] { lock.withLock { let copy = pending; pending = []; return copy } }
+}
+
 @MainActor func replayTests() throws {
+    section("Audit A activation: slow app read cannot supersede a newer activation") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 102)])
+        let box = FocusObservationBox()
+        let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
+        let executor = Executor(worker: { _ in nil }, log: { _ in })
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in h.send(kind) }, log: { _ in })
+        observer.clock.current = h.world.stamp
+        observer.workers[101] = AppWorker(app: a, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock, send: box.append)
+        observer.workers[102] = AppWorker(app: b, windows: [2: FocusProbeWindow(2, pid: 102)], clock: observer.clock, send: box.append)
+        observer.activated(101)
+        observer.activated(102)
+        b.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(0.3)
+        a.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(0.3)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "slow superseded activation cannot refocus A")
+    }
+    section("Audit A queued focus: old app-thread focus and raise cannot outlive newer focus") {
+        let clock = ScopeClock()
+        let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
+        let wa = FocusProbeWindow(1, pid: 101), wb = FocusProbeWindow(2, pid: 102)
+        let workers = [Int32(101): AppWorker(app: a, windows: [1: wa], clock: clock, send: { _, _ in }),
+                       Int32(102): AppWorker(app: b, windows: [2: wb], clock: clock, send: { _, _ in })]
+        let executor = Executor(worker: { workers[$0] }, log: { _ in })
+        executor.focus(TileID(1), pid: 101)
+        executor.raise(TileID(1), pid: 101)
+        executor.focus(TileID(2), pid: 102)
+        executor.raise(TileID(2), pid: 102)
+        b.drain(); a.drain()
+        check(wa.focusCount == 0 && wa.raiseCount == 0, "stale queued focus and raise must be discarded")
+        check(wb.focusCount == 1 && wb.raiseCount == 1, "new queued focus and raise must execute")
+    }
+
     section("Audit A adoption: background addition centres without stealing OS focus") {
         var h = Harness()
         h.census(1, [window(1)])

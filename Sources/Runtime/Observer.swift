@@ -23,7 +23,7 @@ public struct WindowFacts: Equatable, Sendable {
 }
 
 /// What an app thread saw or did.
-enum Observation: Sendable {
+package enum Observation: Sendable {
     case discovered(pid: Int32, [WindowFacts])
     case created(WindowFacts)
     case destroyed(CGWindowID)
@@ -40,11 +40,12 @@ enum Observation: Sendable {
 
 /// The loop's scope, readable from app threads: an observation is stamped when it happens, so one made before a
 /// Space or topology change is dropped by `reduce` however late the main loop reads it.
-final class ScopeClock: @unchecked Sendable {
+package final class ScopeClock: @unchecked Sendable {
+    package init() {}
     private let lock = NSLock()
     private var scope: Stamp?
 
-    var current: Stamp? {
+    package var current: Stamp? {
         get { lock.withLock { scope } }
         set { lock.withLock { scope = newValue } }
     }
@@ -148,7 +149,7 @@ public struct SizeCache {
 }
 
 /// One app's AX state. `windows` and every AX call live on the app's `AXApp` thread; the main loop only queues work.
-final class AppWorker: @unchecked Sendable {
+package final class AppWorker: @unchecked Sendable {
     let app: AXApp
     private let send: @Sendable (Observation, Stamp?) -> Void
     private let clock: ScopeClock
@@ -171,6 +172,14 @@ final class AppWorker: @unchecked Sendable {
         if !app.perform({ [self] in post(.discovered(pid: pid, getAppWindows(pid: pid).compactMap(register))) }) {
             post(.discovered(pid: pid, []))
         }
+    }
+
+    package init(app: AXApp, windows: [CGWindowID: AXWindow], clock: ScopeClock,
+                 send: @escaping @Sendable (Observation, Stamp?) -> Void) {
+        self.app = app
+        self.windows = windows
+        self.clock = clock
+        self.send = send
     }
 
     func stop() { app.stopObserving() }
@@ -326,11 +335,11 @@ extension AXCallError {
 public final class Observer: CensusObserver {
     /// Windows to manage; the ones their app classified `.ignore` are in `ignored` instead.
     public private(set) var known: [CGWindowID: WindowFacts] = [:]
-    private(set) var workers: [Int32: AppWorker] = [:]
+    package var workers: [Int32: AppWorker] = [:]
     let allowedPids: Set<Int32>?
     private let executor: Executor
     private let emit: (Event.Kind, Stamp?) -> Void
-    let clock = ScopeClock()
+    package let clock = ScopeClock()
     private let managed: () -> Set<CGWindowID>
     /// Windows the engine keeps off the current strip: hidden ones and every saved strip's, so a close there is heard.
     private let elsewhere: () -> Set<CGWindowID>
@@ -355,7 +364,7 @@ public final class Observer: CensusObserver {
 
     public static let healthInterval = 0.5
 
-    init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
+    package init(executor: Executor, allowedPids: Set<Int32>?, managed: @escaping () -> Set<CGWindowID>,
          elsewhere: @escaping () -> Set<CGWindowID>, paused: @escaping () -> Bool,
          emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void) {
         self.executor = executor
@@ -447,7 +456,7 @@ public final class Observer: CensusObserver {
 
     /// A Dock click or Cmd+Tab. The app is named at once, with the Space it was activated on, so a Space change that
     /// follows cannot commit before `reduce` hears of it; the app thread then names the window.
-    private func activated(_ pid: Int32) {
+    package func activated(_ pid: Int32) {
         guard let worker = workers[pid] else {
             return log(FocusIntent(tile: nil, pid: pid, source: .appActivation).droppedLog(reason: "untracked-app"))
         }
@@ -517,7 +526,7 @@ public final class Observer: CensusObserver {
     /// Facts that hold whatever the epoch (a window died) go out under the current scope, a finished write under the
     /// scope it was written for; what an app saw (a new window, a move, focus) keeps the scope it was observed under,
     /// and is dropped when it was seen with no scope at all (the health check and the next census pick the window up).
-    func receive(_ observation: Observation, stamp: Stamp?) {
+    package func receive(_ observation: Observation, stamp: Stamp?) {
         func emitObserved(_ kind: Event.Kind) { if let stamp { emit(kind, stamp) } }
         switch observation {
         case .discovered(let pid, let windows):
