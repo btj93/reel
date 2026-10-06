@@ -282,13 +282,17 @@ extension World {
             let window = window.adoptingTitle(known.ruleTitle ?? window.title)
             guard known != window else { continue }
             if joinsStrip(was: known, now: window, config: config), groups[id]!.floating.contains(window.id) {
-                guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
-                focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: frontmost), group: id, &pass)
+                groups[id]!.windows[window.id] = window
+                guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else {
+                    groups[id]!.windows[window.id] = known
+                    continue
+                }
+                focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: frontmost), group: owner(of: window.id) ?? id, &pass)
             } else if !shouldFloat(known, config: config), shouldFloat(window, config: config),
                       groups[id]!.strip.columnIndex(of: window.id) != nil {
                 guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
             }
-            groups[id]!.windows[window.id] = window
+            if let owner = owner(of: window.id) { groups[owner]!.windows[window.id] = window }
             pass.persist = true
         }
         for (key, saved) in spaces.live {
