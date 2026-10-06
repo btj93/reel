@@ -252,6 +252,31 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review A2 background adoption preserves a pending genuine activation") {
+        for otherDisplay in [false, true] {
+            var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
+            h.census(1, [window(1, app: 101), window(2, app: 202)])
+            if otherDisplay { h.census(2, [window(3, app: 303, x: 1100)], group: 2) }
+            h.send(.command(.focus(TileID(2)), .keyboard))
+            let app = QueuedFocusApp(pid: 101, focused: 1), box = FocusObservationBox()
+            let worker = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: ScopeClock(), focusSpace: { _ in nil }, send: box.append)
+            let executor = Executor(worker: { _ in worker }, log: { _ in })
+            executor.synchronizeFocus(with: h.world, paused: false)
+            var reasons: [String] = []
+            let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2, 3, 4] }, elsewhere: { [] }, paused: { false },
+                                    emit: { event, _ in h.send(event); executor.synchronizeFocus(with: h.world, paused: false) }, log: { reasons.append($0) })
+            observer.workers[101] = worker
+            observer.clock.current = h.world.stamp
+            observer.activated(101)
+            h.send(.windowAdded(window(4, app: 404, x: otherDisplay ? 1200 : 100), frontmost: false), group: otherDisplay ? 2 : 1)
+            executor.synchronizeFocus(with: h.world, paused: false)
+            app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            h.advance(EngineConfig.focusDebounce + margin)
+            check(!reasons.contains { $0.contains("superseded-activation") }, "background adoption cannot revoke the pending foreground read")
+            check(h.world.activeGroup == 1 && h.active == TileID(1), "Dock focus returns to A after unrelated background adoption")
+        }
+    }
     section("Review A1 cancelled focus cannot debounce a genuine Dock click") {
         var h = Harness()
         h.census(1, [window(1, app: 101), window(2, app: 101), window(3, app: 202)])
