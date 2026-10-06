@@ -37,9 +37,9 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .windowAdded(let window, let frontmost):
         world.revokeParking(window.id, frame: window.initialFrame)
         world.onWindowAdded(window, frontmost: frontmost, group: id, &pass)
-    case .windowChanged(let window, _):
+    case .windowChanged(let window, let frontmost):
         world.revokeParking(window.id, frame: window.initialFrame)
-        world.onWindowChanged(window, &pass)
+        world.onWindowChanged(window, frontmost: frontmost, &pass)
     case .windowRemoved(let tile):
         world.parkedOwners[tile] = nil
         world.remove(tile, from: id, &pass)
@@ -254,7 +254,7 @@ extension World {
     /// that floated only because it registered untitled joins the strip, focused as a new window is, once its app says
     /// it tiles; one the user floated never had floating facts, so it stays. A refused join keeps the old facts, so
     /// the next report of the new ones tries again.
-    private mutating func refreshIfSameOwner(_ window: ObservedWindow, _ pass: inout Pass) {
+    private mutating func refreshIfSameOwner(_ window: ObservedWindow, frontmost: Bool = false, _ pass: inout Pass) {
         var mismatched = false
         for id in groups.keys.sorted() {
             guard let known = groups[id]!.windows[window.id] else { continue }
