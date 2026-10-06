@@ -252,6 +252,27 @@ final class FocusObservationBox: @unchecked Sendable {
 }
 
 @MainActor func replayTests() throws {
+    section("Review A3 background selection preserves the confirmed foreground ring") {
+        for otherDisplay in [false, true] {
+            var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
+            h.census(1, [window(1, app: 101), window(2, app: 101)])
+            if otherDisplay { h.census(2, [window(3, app: 303, x: 1100)], group: 2) }
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "confirmed A1, not the other same-pid tile, owns the ring")
+            loop.send(.windowAdded(window(4, app: 404, x: otherDisplay ? 1200 : 100), frontmost: false), group: otherDisplay ? 2 : 1)
+            check(loop.focusedTile == TileID(4), "background adoption still selects its own layout tile")
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "background selection cannot replace A1's foreground ring")
+            check(loop.indicatorFocus(frontmostPID: 404) == nil, "unconfirmed background tile cannot acquire the ring")
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 101, source: .axFocus)), stamp: Stamp(revision: 0, epochs: [1: 0]))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "stale observation cannot replace confirmed focus")
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(2), "fresh OS focus changes the ring within the same app")
+            loop.send(.windowRemoved(TileID(2)))
+            check(loop.indicatorFocus(frontmostPID: 101) == nil, "removed confirmed tile no longer owns a ring")
+        }
+    }
     section("Review A2 background adoption preserves a pending genuine activation") {
         for otherDisplay in [false, true] {
             var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
@@ -398,6 +419,7 @@ final class FocusObservationBox: @unchecked Sendable {
         h.census(1, [window(1, app: 101)])
         let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]),
                         censusObserver: CensusFixture(), reads: LoopReads(), effects: { _ in })
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
         check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "managed frontmost retains indicator")
         check(loop.indicatorFocus(frontmostPID: 999) == nil, "unmanaged frontmost has no ring target")
         check(loop.indicatorFocus(frontmostPID: nil) == nil, "unknown frontmost has no ring target")
