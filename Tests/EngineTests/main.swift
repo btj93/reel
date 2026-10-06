@@ -5438,6 +5438,33 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
                                             nonDraggedOriginalIndices: others, draggedIndex: 10, columnCount: 20) })
         check(reachable.contains(0) && reachable.contains(20), "first and last reorder destinations are reachable")
     }
+    section("AuditB 11 new columns adopt observed width and settled app constraints") {
+        func sized(_ id: UInt32, width: Double, x: Double = 100) -> ObservedWindow {
+            ObservedWindow(id: TileID(id), pid: Int32(id), bundleID: "test", initialFrame: AXRect(CGRect(x: x, y: 30, width: width, height: 600)))
+        }
+        var h = Harness()
+        h.census(1, [sized(1, width: 700)])
+        check(h.widths == [.fixed(700)], "initial census adopts the window's own width")
+        h.send(.windowAdded(sized(2, width: 650)))
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles.contains(TileID(2)) }?.width == .fixed(650), "notification adoption uses observed width")
+        h.send(.command(.setWidth(TileID(1), 300), .ipc))
+        let request = h.world.frames[TileID(1)]!
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [1, 2] }, elsewhere: { [] }, paused: { false }, emit: { kind, _ in h.send(kind) }, log: { _ in })
+        observer.receive(.wrote(request.tile, revision: request.revision, frame: request.frame.rect,
+                         landed: CGRect(x: request.frame.rect.minX, y: request.frame.rect.minY, width: 650, height: 600), .applied, scope: request.scope), stamp: nil)
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles.contains(TileID(1)) }?.width == .fixed(650), "settled min-width refusal updates logical column width")
+        h.send(.command(.setWidth(TileID(1), 350), .ipc))
+        observer.receive(.wrote(request.tile, revision: request.revision, frame: request.frame.rect,
+                         landed: CGRect(x: request.frame.rect.minX, y: request.frame.rect.minY, width: 900, height: 600), .applied, scope: request.scope), stamp: nil)
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles.contains(TileID(1)) }?.width == .fixed(350), "stale landed size cannot replace newer width")
+        h.census(2, [sized(3, width: 750)])
+        h.census(1, [sized(1, width: 900), sized(2, width: 900)])
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles.contains(TileID(1)) }?.width == .fixed(350), "saved logical width wins over fresh observed width on restore")
+        var merged = Harness(displays: [display(width: 600), display(2, x: 600, width: 1000)], separateSpaces: false)
+        merged.census(1, [sized(1, width: 1200, x: -400)])
+        check(merged.widths == [.fixed(600)], "observed width clamps to its physical display, not merged span")
+    }
     section("AuditB 12 menu recover reaches all groups") {
         var h = Harness(displays: [display(), display(2, x: 1100)])
         h.census(1, [window(1, x: 100)]); h.census(2, [window(2, x: 1200)], group: 2)
