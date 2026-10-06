@@ -4,7 +4,7 @@ Inventoried trunk before deletion at 76af894. Every item is kept, changed or dro
 
 | Trunk surface | Status | New behavior or reason |
 | --- | --- | --- |
-| Horizontal strip, animated focus, widths, bounce | Kept | Pure Core behind Engine; gap default changes from 16 to 8 |
+| Horizontal strip, animated focus, widths, bounce | Kept | Pure Core behind Engine; gap default changes from 16 to 8. Fresh columns use observed width, clamped to the physical display; the configured default is the fallback when no frame is available |
 | Visibility-zone AX write deferral, keyboard snap-milestone stepping | Changed | R3 sends changed targets each tick and computes only moving strips. Keyboard focus steps one column and recenters |
 | Floating-window focus indicator and left-edge resize anchoring | Dropped | R3 retains indicators for engine-owned tiled frames; native resize only updates width, not a left-edge scroll anchor |
 | Dock-autohide visibleFrame polling | Dropped | R3/R5 use screen-parameter notifications rather than the old 1.5-second poll |
@@ -27,7 +27,7 @@ Inventoried trunk before deletion at 76af894. Every item is kept, changed or dro
 | `gesture.modifier` | Changed | `fn`, `ctrl`/`control`, `alt`/`opt`/`option`, `cmd`/`command` accepted. `none` and empty no longer accepted: R6 passes unmodified scrolls to apps |
 | `gesture.snap` | Kept | Deterministic session ownership and configured snap behavior |
 | `focus_indicator.style/color/width/corner_radius/raise_height` | Kept | `[indicator]` new section; styles none/ring/raise/flash remain; style payload moved to Platform before Config deletion |
-| `rules.app_id/app_id_regex/title_regex/floating` | Kept | `bundle_id`, `bundle_id_regex`, `title_regex`, `floating`; multiple fields AND, first match wins, as on trunk. Title is captured at adoption, survives metadata updates and Space restore; no continuous title-rule reevaluation |
+| `rules.app_id/app_id_regex/title_regex/floating` | Kept | `bundle_id`, `bundle_id_regex`, `title_regex`, `floating`; multiple fields AND, first match wins, as on trunk. The first nonempty title is captured; a late first title completes provisional classification. It survives metadata updates and Space restore; no continuous title-rule reevaluation |
 | `layout.position_memory` | Dropped | Persistence always on; matching belongs to the snapshot book, not user tuning. Root-approved R7 decision |
 | Old state/config migration | Changed | Existing config is read unchanged at the same path; first unknown key shown and startup defaults used. Old snapshot format is not imported or deleted |
 | `start_at_login` config key | Dropped | Menu/system state only, root-approved R7 decision |
@@ -42,7 +42,7 @@ Inventoried trunk before deletion at 76af894. Every item is kept, changed or dro
 | Display merge/split/hot-plug and independent vertical strips | Kept | Topology revisions; focus across independent strips uses geometry |
 | Stage Manager support | Dropped | Unsupported per R4; status now says unsupported unconditionally instead of reading a private preference-domain flag |
 | Bundle ID, executable name, signing, Info.plist, icon resource | Kept | `dev.reel.Reel`, `Reel`, existing ad-hoc signing flow, screen-capture usage description; no installer or launch in bundler |
-| Logs and 1 MB rotation | Kept | Bundle log path and one `.1` backup; bare stdout. Added `REEL_LOG_PATH` for sandbox bundle lanes, with rotation checks |
+| Logs and 1 MB rotation | Kept | Bundle log path and one `.1` backup; bare stdout. Added `REEL_LOG_PATH` for sandbox bundle lanes, with launch and in-session rotation checks |
 | Release title-log hashing | Changed | The new runtime does not log titles in normal events, so no hash shim is needed. Read-only IPC intentionally returns titles |
 
 The config inventory was re-audited against `git show 76af894:Sources/Config/Config.swift`, including nested width/strut keys, all ten `[keybindings]` actions and every rule field. `cursor.title_bar_height`, `reorder_overlay.ghost_settle_ms`, `layout.saved_position_limit` and position-memory `match_by` were not parsed trunk keys and are not counted as removed settings.
@@ -79,3 +79,13 @@ Build distinct trunk and head artifacts first. On clean isolated lane accounts o
 - Copy first-run, Space-roundtrip and old-config screenshots to the R7 review media paths; record the plan's 30-60 second first-launch/tiling/Space/reorder video and post it for operator review.
 
 Nothing live or performance-measured ran on the daily machine. Dry-run results validate scripts and fixture parsers only. The program cannot be called fully verified until root supplies live/perf/media evidence and reviews the exact head.
+
+## Audit fix round B
+
+Foreign settled moves across independent display groups migrate the window; merged-strip seams and frame echoes do not. Re-tiling a float uses its current frame. Pause and quit release current windows and other Spaces' live snapshots in one deduplicated pass; disk-only identities never receive writes. Hidden releases clamp to surviving displays.
+
+Failed frame writes retry after 0.1, 0.5 and 2 seconds, then log one `frame give-up` and stop until the target changes or Recover Windows resets them. Unconfirmed sizes retain the focus-ring target. Settled app width refusals update the logical column width, bounded by its display; a minimum width larger than the display cannot cause an immediate write loop.
+
+The reorder row scales to keep end destinations visible. Menu recovery uses the same all-group size-cache reset as IPC. Provisional classification retries on focus, move/resize and health checks, with scope/activation guards. Unmatched disk snapshots retain at most 64 entries in loaded order (not an LRU).
+
+Engine/Runtime probes and dry lanes cover these changes; real AX behavior on other Spaces, the ring and ScreenCaptureKit rendering still require approved lane-host checks.
