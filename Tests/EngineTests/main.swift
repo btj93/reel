@@ -5321,7 +5321,65 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
     }
 }
 
+@MainActor func auditBRemainingTests() {
+    section("AuditB 8 in-session log rotation") {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        process.environment = ProcessInfo.processInfo.environment.merging(["AUDIT_LOG_PROBE": dir.appendingPathComponent("reel.log").path]) { _, new in new }
+        do {
+            try process.run(); process.waitUntilExit()
+            check(process.terminationStatus == 0, "sandbox logger probe exits normally")
+            let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            check(Set(files) == ["reel.log", "reel.log.1"], "continuous session keeps one backup")
+            let size = (try FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent("reel.log").path)[.size] as? UInt64) ?? 0
+            check(size <= 1_002_100, "continuous log remains bounded at one MB plus one line")
+        } catch { check(false, "sandbox logger probe: \(error)") }
+    }
+    section("AuditB 10 crowded reorder row reaches both edges") {
+        let widths = Array(repeating: 100.0, count: 19), others = Array(0..<20).filter { $0 != 10 }
+        let origins = ReorderOverlay.origins(widths: widths, bandWidth: 960, spacing: 12)
+        check(origins.allSatisfy { $0 >= 0 && $0 < 960 }, "row origins stay inside visible band")
+        let mids = origins.enumerated().map { $0.element + 20 + min(50, (960 - $0.element) / 2) }
+        let reachable = Set((0...1000).map { computeReorderInsertionIndex(cursorX: Double($0), thumbnailMidpoints: mids,
+                                            nonDraggedOriginalIndices: others, draggedIndex: 10, columnCount: 20) })
+        check(reachable.contains(0) && reachable.contains(20), "first and last reorder destinations are reachable")
+    }
+    section("AuditB 12 menu recover reaches all groups") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(1, [window(1, x: 100)]); h.census(2, [window(2, x: 1200)], group: 2)
+        var requests: [FrameRequest] = []
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditB-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditB-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }),
+                        effects: { effects in requests += effects.compactMap { if case .setFrame(let r) = $0 { return r }; return nil } })
+        do {
+            let menu = try String(contentsOfFile: "Sources/Reel/MenuBar.swift", encoding: .utf8)
+            if menu.contains("@objc private func recover() { loop.recover() }") { _ = loop.recover() }
+            else { loop.send(.command(.recover, .ipc)) }
+            check(Set(requests.map(\.tile)) == [TileID(1), TileID(2)], "menu callback runs the same all-group recovery as IPC")
+        } catch { check(false, "menu source read: \(error)") }
+    }
+    section("AuditB disk snapshots are bounded") {
+        var h = Harness(), saved: [Snapshot] = []
+        for id in 1...80 { h.census(UInt64(id), [window(UInt32(id))]); saved.append(h.world.currentSnapshot(group: 1)!) }
+        var loaded = Harness()
+        loaded.send(.loadSnapshots(saved))
+        check(loaded.world.spaces.disk.count <= 64, "disk snapshot cache has a finite cap")
+    }
+}
+
+if let path = environment["AUDIT_LOG_PROBE"] {
+    try prepareLogFile(at: path)
+    freopen(path, "a", stdout)
+    freopen(path, "a", stderr)
+    MainActor.assumeIsolated { for _ in 0..<1600 { logLine(String(repeating: "x", count: 2000)) } }
+    fflush(stdout)
+    exit(0)
+}
+
 MainActor.assumeIsolated {
+    auditBRemainingTests()
     auditBLateFocusTest()
     auditBTests()
     do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests(); try pointerTests() }
