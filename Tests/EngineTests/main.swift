@@ -1020,8 +1020,8 @@ final class FocusObservationBox: @unchecked Sendable {
         var h = Harness()
         h.census(1, [window(1)])
         h.send(.windowAdded(window(2), frontmost: true))
-        check(h.effects.contains { if case .focus(TileID(2), _) = $0 { true } else { false } }, "frontmost adoption still focuses")
-        check(h.effects.contains { if case .raise(TileID(2)) = $0 { true } else { false } }, "frontmost adoption still raises")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "frontmost adoption only scrolls")
+        check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "frontmost adoption never raises")
     }
     section("Audit A unhide: nil-tile Dock crossing is fulfilled by its pid") {
         var h = Harness()
@@ -1030,7 +1030,7 @@ final class FocusObservationBox: @unchecked Sendable {
         h.send(.focus(FocusIntent(tile: nil, pid: 200, source: .appActivation)))
         h.send(.windowAdded(window(2, app: 200)), advance: 0.2)
         check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "unhidden clicked app fulfills nil-tile crossing")
-        check(h.effects.contains { if case .focus(TileID(2), _) = $0 { true } else { false } }, "unhide must execute the held Dock click")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "unhide fulfills the Dock decision without refocusing the OS")
     }
     section("R7 focus: a Dock click within 100 ms brings Fork into the middle snap") {
         var h = Harness()
@@ -1543,7 +1543,8 @@ final class FocusObservationBox: @unchecked Sendable {
         h.census(10, [window(1), window(2)])
         h.send(.ipc(id: 7, command: .focus(TileID(2))))
         check(h.effects.contains { if case .reply(7, .command(.accepted)) = $0 { return true }; return false }, "command reply correlates request ID")
-        check(h.effects.contains { if case .raise(TileID(2)) = $0 { return true }; return false }, "focus emits explicit raise")
+        check(h.effects.contains { if case .focus(TileID(2), .ipc) = $0 { true } else { false } }, "IPC still requests OS focus")
+        check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "focus has no duplicate raise")
         h.send(.query(id: 8))
         check(h.effects.contains {
             if case .reply(8, .snapshots(let snapshots)) = $0 { return snapshots.first?.activeColumnIndex == 1 }
@@ -5723,6 +5724,51 @@ final class CensusFixture: CensusObserver {
     #endif
 }
 
+@MainActor func audit2Tests() {
+    section("audit2 focus: OS observations scroll without focus work") {
+        var h = Harness()
+        h.send(.spaceChanged(key: .skylight(1), epoch: 1, windows: [window(10, app: 100), window(20, app: 200)], frontmost: TileID(20)))
+        h.send(.focus(FocusIntent(tile: TileID(10), pid: 100, source: .appActivation)))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(10), "Dock activation still selects kitty")
+        check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "Dock decision requests no OS focus")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "Dock activation emits no focus effect")
+        h.send(.windowAdded(window(30, app: 100), frontmost: true))
+        check(h.active == TileID(30), "frontmost adoption still selects the new window")
+        check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "adoption is observational")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "adoption emits no OS focus")
+        h.send(.focus(FocusIntent(tile: nil, pid: 300, source: .appActivation)))
+        h.census(2, [window(40, app: 300)])
+        check(h.active == TileID(40), "cross-Space Dock activation keeps its decision")
+        check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "cross-Space Dock activation does not refocus")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "crossing emits no OS focus")
+    }
+    section("audit2 focus: nil and unmanaged Space frontmost reads never raise") {
+        for frontmost: TileID? in [nil, TileID(999), TileID(10)] {
+            var h = Harness()
+            h.census(1, [window(10)])
+            h.send(.command(.focus(TileID(10)), .keyboard))
+            h.census(2, [window(20)])
+            h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1, windows: [window(10)], frontmost: frontmost))
+            check(h.active == TileID(10), "arrival restores its saved selection")
+            check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "unknown or matching frontmost read is quiet")
+            check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "Space arrival emits no speculative focus")
+        }
+    }
+    section("audit2 focus: explicit actions focus once and raise style still lays out") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
+        h.census(1, [window(10), window(20)])
+        for source: FocusSource in [.keyboard, .ipc, .click] {
+            h.send(.focus(FocusIntent(tile: TileID(20), source: source)))
+            check(h.effects.filter { if case .focus(TileID(20), _) = $0 { true } else { false } }.count == 1, "explicit action emits one focus")
+            check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "AX focus already raises")
+        }
+        check(h.world.frames[TileID(10)]!.frame.rect.minY == 50, "raise style lowers the inactive column")
+        check(h.world.frames[TileID(20)]!.frame.rect.minY == 30, "raise style leaves the focused column at its normal height")
+    }
+}
+
 @MainActor func auditBTests() {
     section("AuditB 1 independent-display migration and floating re-tile") {
         var h = Harness(displays: [display(), display(2, x: 1100)])
@@ -6060,6 +6106,7 @@ if let path = environment["AUDIT_LOG_PROBE"] {
 }
 
 MainActor.assumeIsolated {
+    audit2Tests()
     auditBRemainingTests()
     nativeTabTests()
     auditBLateFocusTest()
