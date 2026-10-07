@@ -14,6 +14,15 @@ public struct WindowFacts: Equatable, Sendable {
     public let frame: CGRect?
     public let classification: WindowClassification
 
+    package init(id: CGWindowID, pid: Int32, bundleID: String?, title: String, frame: CGRect?, classification: WindowClassification) {
+        self.id = id
+        self.pid = pid
+        self.bundleID = bundleID
+        self.title = title
+        self.frame = frame
+        self.classification = classification
+    }
+
     var observed: ObservedWindow { observed(at: frame) }
 
     func observed(at frame: CGRect?) -> ObservedWindow {

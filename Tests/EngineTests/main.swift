@@ -5744,7 +5744,9 @@ final class CensusFixture: CensusObserver {
                 h.census(1, [a])
                 h.send(.windowsHidden([a.id]))
                 h.census(2, [b])
-                let saved = h.world.spaces.live
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                let saved = h.world.spaces.live.mapValues { try! encoder.encode($0) }
                 var effects: [Effect] = []
                 let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-audit2-unused-config", "REEL_STATE_DIR": "/tmp/reel-audit2-unused-state"]),
                                 censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: 2, uuid: nil, isUserSpace: true) }, screen: { [] }, memberships: { _ in memberships }),
@@ -5753,9 +5755,9 @@ final class CensusFixture: CensusObserver {
                 let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
                                         managed: { [2] }, elsewhere: { [1] }, paused: { false }, emit: { kind, stamp in loop.send(kind, stamp: stamp) }, log: { _ in },
                                         frontmostPID: { 202 }, isVisible: { _ in false })
-                observer.receive(.restored(WindowFacts(id: 1, pid: 101, bundleID: "app101", title: "restored", frame: a.initialFrame!.rect, classification: .tile)), stamp: loop.world.stamp)
+                observer.receive(.restored(WindowFacts(id: 1, pid: 101, bundleID: "app101", title: "restored", frame: CGRect(x: 0, y: 30, width: 500, height: 800), classification: .tile)), stamp: loop.world.stamp)
                 check(observer.known[1]?.title == "restored", "off-Space restore still learns fresh AX facts")
-                check(loop.world.spaces.live == saved, "off-Space restore does not prune or mutate the saved strip")
+                check(loop.world.spaces.live.mapValues { try! encoder.encode($0) } == saved, "off-Space restore does not prune or mutate the saved strip")
                 check(loop.world.groups[1]!.windows[a.id] == nil, "off-Space restored window stays out of the current strip")
                 check(!effects.contains { switch $0 { case .setFrame, .focus, .raise: true; default: false } }, "off-Space restore emits no frame or focus effects")
             }
@@ -5775,7 +5777,7 @@ final class CensusFixture: CensusObserver {
                             effects: { effects.append(contentsOf: $0) })
             let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil, managed: { [] }, elsewhere: { [1] }, paused: { false },
                                     emit: { kind, stamp in loop.send(kind, stamp: stamp) }, log: { _ in }, frontmostPID: { 101 }, isVisible: { _ in true })
-            observer.receive(.restored(WindowFacts(id: 1, pid: 101, bundleID: "app101", title: "w1", frame: a.initialFrame!.rect, classification: .tile)), stamp: loop.world.stamp)
+            observer.receive(.restored(WindowFacts(id: 1, pid: 101, bundleID: "app101", title: "w1", frame: CGRect(x: 0, y: 30, width: 500, height: 800), classification: .tile)), stamp: loop.world.stamp)
             check((loop.world.groups[1]!.windows[a.id] != nil) == (state == "here"), "only a visible restore on the settled Space returns to its column")
             if state != "here" { check(effects.isEmpty, "membership and mid-transition rejections emit no layout effects") }
         }
