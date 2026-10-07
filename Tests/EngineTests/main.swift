@@ -748,7 +748,7 @@ final class FocusObservationBox: @unchecked Sendable {
         h.send(.spaceChanged(key: .skylight(5), epoch: h.world.groups[1]!.epoch + 1,
                              windows: [fork, window(105)], frontmost: TileID(105)))
         check(h.world.groups[1]?.focus.decision?.tile == TileID(104), "cross-Space Dock click selects Fork instead of the saved tile")
-        check(h.effects.contains { if case .focus(TileID(104), .appActivation) = $0 { true } else { false } }, "cross-Space Dock click activates Fork")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "cross-Space Dock click only scrolls Fork")
         check(h.world.frames[TileID(104)].map { abs($0.frame.rect.midX - 500) < 1 } ?? false, "Fork lands in the middle snap")
     }
     section("Audit A adoption: foreground late title may focus, background late title may not") {
@@ -757,7 +757,7 @@ final class FocusObservationBox: @unchecked Sendable {
             h.census(1, [window(1), window(2, floating: true)])
             h.send(.windowChanged(window(2), frontmost: frontmost))
             let focused = h.effects.contains { if case .focus(TileID(2), .adoption) = $0 { true } else { false } }
-            check(focused == frontmost, "late-title adoption only asks for OS focus in the frontmost app")
+            check(!focused, "late-title adoption never repeats OS focus")
         }
     }
     section("Audit A activation: a report with no original scope cannot borrow a later scope") {
@@ -791,7 +791,7 @@ final class FocusObservationBox: @unchecked Sendable {
         h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
                              windows: [window(1), window(2)], frontmost: TileID(1)))
         check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "explicit held click precedes census focus")
-        check(h.effects.contains { if case .focus(TileID(2), .appActivation) = $0 { true } else { false } }, "held crossing still activates the clicked app")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "held crossing only selects the clicked app")
     }
     section("Audit A return: frontmost on another display cannot override the destination strip") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
@@ -1088,8 +1088,7 @@ final class FocusObservationBox: @unchecked Sendable {
         var h = Harness()
         h.census(4, [window(321, app: 9001), window(104, app: 1245)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.focus(FocusIntent(tile: TileID(321), pid: 9001, source: .appActivation)))
-        h.advance(EngineConfig.focusDebounce)
+        h.send(.command(.focus(TileID(321)), .keyboard))
         h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation)), advance: 0.1)
         let pending = h.world.timers.keys
         check(!pending.isEmpty, "Fork's activation is pending")
@@ -1204,10 +1203,10 @@ final class FocusObservationBox: @unchecked Sendable {
         check(h.active == TileID(3), "echo did not change saved active column")
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         h.advance(EngineConfig.focusDebounce + margin)
-        check(h.active == TileID(3), "post-restore echo rejected on receipt, not after debounce")
+        check(h.active == TileID(1), "without executed restore focus an AX report is not an echo")
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus, observedSpace: .skylight(20))))
         h.advance(EngineConfig.focusDebounce + margin)
-        check(h.active == TileID(3), "AX focus from a different observed identity cannot beat delayed Space notification")
+        check(h.active == TileID(1), "AX focus from a different observed identity leaves the accepted decision intact")
         check(h.world.check().isEmpty, "focus echo invariants")
     }
     section("e3e6267 0ea87ee: cross-Space app activation wins once; local or arriving activation does not") {
@@ -2974,7 +2973,7 @@ struct FuzzStream {
         }
         dock.send(.spaceWillChange, group: 2)
         dock.census(22, [window(5), window(6, app: 60)], group: 2)
-        check(focused(dock.effects) == ["6 appActivation"], "a Dock click to an app on display 2's other Space lands on it: \(focused(dock.effects))")
+        check(dock.world.groups[2]!.focus.decision?.tile == TileID(6) && focused(dock.effects).isEmpty, "a Dock click to an app on display 2's other Space lands on it: \(focused(dock.effects))")
         var stacked = Harness(displays: [display(), display(2, y: 830)], separateSpaces: false)
         stacked.census(10, [window(1)])
         stacked.census(10, [window(2)], group: 2)
@@ -2983,7 +2982,7 @@ struct FuzzStream {
             stacked.send(.spaceWillChange)
             stacked.send(.spaceWillChange, group: 2)
             stacked.census(space, [window(tiles[0])])
-            check(focused(stacked.effects) == ["\(tiles[0]) restore"], "the display with focus restores it on Space \(space)")
+            check(focused(stacked.effects).isEmpty, "nil frontmost read restores selection without OS focus on Space \(space)")
             stacked.census(space, [window(tiles[1])], group: 2)
             check(focused(stacked.effects).isEmpty, "the display without focus restores quietly on Space \(space)")
             check(stacked.world.activeGroup == 1, "a Space switch leaves commands on the focused display")
@@ -2995,7 +2994,7 @@ struct FuzzStream {
         churn.send(.focus(FocusIntent(tile: TileID(99), pid: 99, source: .appActivation)))
         churn.send(.spaceWillChange)
         churn.census(10, [window(1, app: 10), window(2, app: 20)])
-        check(focused(churn.effects) == ["2 restore"], "a helper's activation is no Dock click: a keyboard switch still restores OS focus: \(focused(churn.effects))")
+        check(churn.active == TileID(2) && focused(churn.effects).isEmpty, "a helper activation is not a Dock click, and nil frontmost restore stays quiet: \(focused(churn.effects))")
     }
     section("R5 active group: commands act on the display the user last focused") {
         var closed = Harness(displays: [display(), display(2, x: 1000)])
@@ -3032,8 +3031,8 @@ struct FuzzStream {
         swapped.census(20, [window(3)], group: 2)
         swapped.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         swapped.advance(EngineConfig.focusDebounce + margin)
-        check(swapped.world.groups[2]!.focus.decision?.tile == TileID(3) && swapped.world.activeGroup == 2,
-              "a read racing the leading display's fresh restore does not override it")
+        check(swapped.world.groups[2]!.focus.decision?.tile == TileID(3) && swapped.world.activeGroup == 1,
+              "nil frontmost restore does not suppress a real OS focus report on another display")
 
         func asksFocus(_ effects: [Effect]) -> Bool { effects.contains { if case .focus = $0 { true } else { false } } }
         var launch = Harness(displays: [display(), display(2, x: 1000)])
@@ -3312,8 +3311,8 @@ final class CensusFixture: CensusObserver {
         check(loop.world.groups[1]!.windows.isEmpty && effects.isEmpty, "a departing-Space window cannot enter the settled destination")
         loop.send(.windowAdded(window(2), frontmost: true))
         check(Set(loop.world.groups[1]!.windows.keys) == [TileID(2)], "matching injected observation reaches Engine adoption")
-        check(effects.contains { if case .focus(let tile, .adoption) = $0 { tile == TileID(2) } else { false } },
-              "matching adoption produces a focus effect through Loop")
+        check(loop.world.groups[1]!.focus.decision?.tile == TileID(2) && !effects.contains { if case .focus = $0 { true } else { false } },
+              "matching adoption selects without OS focus through Loop")
         sid = 4
         effects = []
         loop.send(.windowAdded(window(4)))
@@ -4258,7 +4257,7 @@ final class CensusFixture: CensusObserver {
         let crossing = activated.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .appActivation)))
         let added = activated.send(.windowAdded(window(3, app: 7))) + activated.send(.windowAdded(window(2, app: 7)))
         activated.advance(1)
-        check(focuses(crossing + added) == ["focus 2 appActivation", "raise 2"], "only the activated window is focused: \(focuses(crossing + added))")
+        check(focuses(crossing + added).isEmpty, "only the activated window is focused: \(focuses(crossing + added))")
         check(activated.world.groups[1]!.focus.decision?.tile == TileID(2) && activated.active == TileID(2), "the activation decides focus")
         var late = hidden()
         late.send(.windowAdded(window(2, app: 7)))
@@ -4336,7 +4335,7 @@ final class CensusFixture: CensusObserver {
             h.advance(1)
             outcomes.append((h.world.groups[1]!.focus.decision.map { "\($0.tile.rawValue) \($0.source)" } ?? "none") + " asked=\(asked)")
         }
-        check(outcomes[0] == outcomes[1] && outcomes[0].hasSuffix("restore asked=true"), "the new Space restores its own focus: \(outcomes)")
+        check(outcomes[0] == outcomes[1] && outcomes[0].hasSuffix("restore asked=false"), "the new Space restores its own focus: \(outcomes)")
     }
     section("R3 hide: a window focused before it comes back takes focus when it does") {
         for source in [FocusSource.axFocus, .appActivation] {

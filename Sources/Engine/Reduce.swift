@@ -134,6 +134,8 @@ extension World {
     }
 
     fileprivate mutating func onFocusObserved(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
+        let intent = FocusIntent(tile: intent.tile, pid: intent.pid, source: intent.source, observedSpace: intent.observedSpace,
+                                 requestsOSFocus: intent.requestsOSFocus && intent.source != .appActivation)
         let group = groups[id]!
         guard group.phase.acceptsFocus || intent.source == .appActivation else {
             return pass.effects.append(.log(intent.droppedLog(reason: "space-changing")))
@@ -206,7 +208,6 @@ extension World {
         groups[id] = group
         if intent.source != .axFocus, quietSince == nil, intent.requestsOSFocus {
             pass.effects.append(.focus(tile: tile, source: intent.source))
-            pass.effects.append(.raise(tile))
         }
         pass.effects.append(.log("focus source=\(intent.source.rawValue) tile=\(tile.rawValue)"))
         pass.layout.insert(id)
@@ -228,9 +229,10 @@ extension World {
             return
         }
         // A window back from a hide is not new: its app's focus report or activation decides focus, even one that came first.
-        if !returning { focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: frontmost), group: id, &pass) }
+        if !returning { focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: false), group: id, &pass) }
         else if case .crossing(let intent, _, _) = group.focus, (intent.tile.map { $0 == window.id } ?? (intent.pid == window.pid)) {
-            let fulfilled = FocusIntent(tile: window.id, pid: intent.pid, source: intent.source, observedSpace: intent.observedSpace)
+            let fulfilled = FocusIntent(tile: window.id, pid: intent.pid, source: intent.source, observedSpace: intent.observedSpace,
+                                        requestsOSFocus: intent.requestsOSFocus)
             focus(fulfilled, group: id, &pass) }
         pass.persist = true
     }
@@ -293,7 +295,7 @@ extension World {
                     groups[id]!.windows[window.id] = known
                     continue
                 }
-                focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: frontmost), group: owner(of: window.id) ?? id, &pass)
+                focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: false), group: owner(of: window.id) ?? id, &pass)
             } else if !shouldFloat(known, config: config), shouldFloat(window, config: config),
                       groups[id]!.strip.columnIndex(of: window.id) != nil {
                 guard run(.toggleFloating(window.id), source: .adoption, group: id, &pass) == .accepted else { continue }
@@ -882,7 +884,8 @@ extension World {
         // at their old decision time, so they neither take the commands nor hold off a focus report.
         let restoringFrontmost = source == .restore && currentFrontmost == restore
         let quiet = source == .appActivation || leads || restoringFrontmost ? nil : departing.focus.decision?.time ?? -.infinity
-        focus(FocusIntent(tile: restore, source: source, requestsOSFocus: !restoringFrontmost), group: id, &pass, quietSince: quiet, animated: false)
+        let requestsOSFocus = source == .restore && frontmost.map { owner(of: $0) != nil && $0 != restore } == true
+        focus(FocusIntent(tile: restore, source: source, requestsOSFocus: requestsOSFocus), group: id, &pass, quietSince: quiet, animated: false)
         pass.layout.insert(id)
         pass.persist = true
     }
