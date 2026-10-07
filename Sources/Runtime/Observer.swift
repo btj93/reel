@@ -394,6 +394,7 @@ public final class Observer: CensusObserver {
     /// window is not set yet. The old runtime did the same; without it a Dock click on such an app was lost.
     private let activationFallback: (Int32) -> TileID?
     private let frontmostPID: () -> Int32?
+    private let isVisible: (CGWindowID) -> Bool
     private var tokens: [NSObjectProtocol] = []
     private var healthTimer: Timer?
     private var awaitingDiscovery = Set<Int32>()
@@ -420,7 +421,8 @@ public final class Observer: CensusObserver {
          emit: @escaping (Event.Kind, Stamp?) -> Void, log: @escaping (String) -> Void,
          onActivation: @escaping (Int32) -> Void = { _ in },
          activationFallback: @escaping (Int32) -> TileID? = { _ in nil },
-         frontmostPID: @escaping () -> Int32? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }) {
+         frontmostPID: @escaping () -> Int32? = { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+         isVisible: @escaping (CGWindowID) -> Bool = isWindowOnScreen) {
         self.executor = executor
         self.allowedPids = allowedPids
         self.managed = managed
@@ -430,6 +432,7 @@ public final class Observer: CensusObserver {
         self.onActivation = onActivation
         self.activationFallback = activationFallback
         self.frontmostPID = frontmostPID
+        self.isVisible = isVisible
         self.log = log
     }
 
@@ -620,7 +623,7 @@ public final class Observer: CensusObserver {
         case .created(let facts):
             learn(facts)
             // Only a window on the current Space joins; one that is not on screen yet joins at the next health check.
-            if !paused(), facts.classification != .ignore, isWindowOnScreen(facts.id) { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == frontmostPID())) }
+            if !paused(), facts.classification != .ignore, isVisible(facts.id) { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == frontmostPID())) }
         case .destroyed(let id):
             let tracked = managed().contains(id) || elsewhere().contains(id)
             forget(id)

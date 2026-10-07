@@ -5736,6 +5736,50 @@ final class CensusFixture: CensusObserver {
         check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "cross-Space Dock activation does not refocus")
         check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "crossing emits no OS focus")
     }
+    section("audit2 restore: off-Space deminiaturization preserves its saved strip") {
+        for transition in [false, true] {
+            for memberships: Set<UInt64>? in [nil, [1]] {
+                var h = Harness()
+                let a = window(1, app: 101), b = window(2, app: 202)
+                h.census(1, [a])
+                h.send(.windowsHidden([a.id]))
+                h.census(2, [b])
+                let saved = h.world.spaces.live
+                var effects: [Effect] = []
+                let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-audit2-unused-config", "REEL_STATE_DIR": "/tmp/reel-audit2-unused-state"]),
+                                censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: 2, uuid: nil, isUserSpace: true) }, screen: { [] }, memberships: { _ in memberships }),
+                                effects: { effects.append(contentsOf: $0) })
+                if transition { loop.send(.spaceWillChange); effects = [] }
+                let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                        managed: { [2] }, elsewhere: { [1] }, paused: { false }, emit: { kind, stamp in loop.send(kind, stamp: stamp) }, log: { _ in },
+                                        frontmostPID: { 202 }, isVisible: { _ in false })
+                observer.receive(.restored(WindowFacts(id: 1, pid: 101, bundleID: "app101", title: "restored", frame: a.initialFrame!.rect, classification: .tile)), stamp: loop.world.stamp)
+                check(observer.known[1]?.title == "restored", "off-Space restore still learns fresh AX facts")
+                check(loop.world.spaces.live == saved, "off-Space restore does not prune or mutate the saved strip")
+                check(loop.world.groups[1]!.windows[a.id] == nil, "off-Space restored window stays out of the current strip")
+                check(!effects.contains { switch $0 { case .setFrame, .focus, .raise: true; default: false } }, "off-Space restore emits no frame or focus effects")
+            }
+        }
+    }
+    section("audit2 restore: visible restore uses the Loop membership and transition gates") {
+        for state in ["here", "wrong membership", "mid-transition"] {
+            var h = Harness()
+            let a = window(1, app: 101)
+            h.census(1, [a])
+            h.send(.windowsHidden([a.id]))
+            let memberships: Set<UInt64>? = state == "wrong membership" ? [2] : nil
+            let observed: UInt64 = state == "mid-transition" ? 2 : 1
+            var effects: [Effect] = []
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-audit2-unused-config", "REEL_STATE_DIR": "/tmp/reel-audit2-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: observed, uuid: nil, isUserSpace: true) }, screen: { [] }, memberships: { _ in memberships }),
+                            effects: { effects.append(contentsOf: $0) })
+            let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil, managed: { [] }, elsewhere: { [1] }, paused: { false },
+                                    emit: { kind, stamp in loop.send(kind, stamp: stamp) }, log: { _ in }, frontmostPID: { 101 }, isVisible: { _ in true })
+            observer.receive(.restored(WindowFacts(id: 1, pid: 101, bundleID: "app101", title: "w1", frame: a.initialFrame!.rect, classification: .tile)), stamp: loop.world.stamp)
+            check((loop.world.groups[1]!.windows[a.id] != nil) == (state == "here"), "only a visible restore on the settled Space returns to its column")
+            if state != "here" { check(effects.isEmpty, "membership and mid-transition rejections emit no layout effects") }
+        }
+    }
     section("audit2 hide: minimize and app hide never become native-tab swaps") {
         for addFirst in [false, true] {
             for hideApp in [false, true] {
