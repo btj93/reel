@@ -5889,6 +5889,55 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
     }
 }
 
+@MainActor func nativeTabTests() {
+    section("Native tabs: switching tabs keeps the column in place and focus on the new tab") {
+        // Fork: each tab is its own window. Switching orders the old one out and shows the new one, in either order.
+        for order in ["hide first", "add first"] {
+            var h = Harness()
+            h.census(1, [window(1, app: 101, x: 0), window(2, app: 200, x: 400), window(3, app: 300, x: 800)])
+            h.send(.command(.focus(TileID(2)), .keyboard))
+            h.advance(EngineConfig.focusDebounce + margin)
+            let width = h.world.groups[1]!.strip.columns[1].width
+            if order == "hide first" {
+                h.send(.windowsHidden([TileID(2)]))
+                h.send(.windowAdded(window(4, app: 200), frontmost: true), advance: 0.3)
+            } else {
+                h.send(.windowAdded(window(4, app: 200), frontmost: true), advance: 0.3)
+                h.send(.windowsHidden([TileID(2)]))
+            }
+            h.advance(EngineConfig.focusDebounce + margin)
+            check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(1)], [TileID(4)], [TileID(3)]], "\(order): the new tab takes the old tab's column")
+            check(h.world.groups[1]!.strip.columns[1].width == width, "\(order): the column keeps its width")
+            check(h.world.groups[1]!.focus.decision?.tile == TileID(4) && h.active == TileID(4), "\(order): focus follows the new tab")
+            check(h.world.groups[1]!.hidden[TileID(2)] != nil, "\(order): the old tab stays known for its return")
+            // And back to the first tab.
+            if order == "hide first" {
+                h.send(.windowsHidden([TileID(4)]))
+                h.send(.windowAdded(window(2, app: 200), frontmost: true), advance: 0.3)
+            } else {
+                h.send(.windowAdded(window(2, app: 200), frontmost: true), advance: 0.3)
+                h.send(.windowsHidden([TileID(4)]))
+            }
+            h.advance(EngineConfig.focusDebounce + margin)
+            check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(1)], [TileID(2)], [TileID(3)]], "\(order): switching back restores the first tab in the same column")
+            check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "\(order): focus follows the switch back")
+        }
+    }
+    section("Native tabs: an unrelated hide and a later window are not a tab switch") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101, x: 0), window(2, app: 200, x: 400), window(3, app: 300, x: 800)])
+        h.send(.windowsHidden([TileID(2)]))
+        h.advance(2.0)
+        let effects = h.send(.windowAdded(window(4, app: 200), frontmost: true))
+        check(!effects.contains { if case .log(let line) = $0 { line.contains("tab switch") } else { false } }, "a window long after the hide is new, not a tab")
+        var other = Harness()
+        other.census(1, [window(1, app: 101, x: 0), window(2, app: 200, x: 400), window(3, app: 300, x: 800)])
+        other.send(.windowsHidden([TileID(2)]))
+        let unrelated = other.send(.windowAdded(window(4, app: 400), frontmost: true))
+        check(!unrelated.contains { if case .log(let line) = $0 { line.contains("tab switch") } else { false } }, "another app's window never takes the hidden tab's column")
+    }
+}
+
 @MainActor func auditBRemainingTests() {
     section("AuditB 8a focus-drop reasons are retained and rate limited") {
         var limiter = LogLimiter()
@@ -5998,6 +6047,7 @@ if let path = environment["AUDIT_LOG_PROBE"] {
 
 MainActor.assumeIsolated {
     auditBRemainingTests()
+    nativeTabTests()
     auditBLateFocusTest()
     auditBTests()
     do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests(); try pointerTests() }

@@ -215,9 +215,15 @@ extension World {
         guard window.isValid else { return pass.effects.append(.log("invalid window ignored tile=\(window.id.rawValue)")) }
         if groups[id]?.windows[window.id] != nil { return refreshIfSameOwner(window, frontmost: frontmost, &pass) }
         let returning = groups[id]?.returning(window) != nil
-        add(window, to: id, &pass)
+        let tookFocusedTab = add(window, to: id, &pass)
         guard let group = groups[id], group.windows[window.id] != nil else { return }
         prune([window.id.rawValue], from: otherSpaces(than: id))
+        if tookFocusedTab {
+            // The app already focused its new tab; follow it without asking the OS again.
+            focus(FocusIntent(tile: window.id, pid: window.pid, source: .adoption, requestsOSFocus: false), group: id, &pass)
+            pass.persist = true
+            return
+        }
         // A window back from a hide is not new: its app's focus report or activation decides focus, even one that came first.
         if !returning { focus(FocusIntent(tile: window.id, source: .adoption, requestsOSFocus: frontmost), group: id, &pass) }
         else if case .crossing(let intent, _, _) = group.focus, (intent.tile.map { $0 == window.id } ?? (intent.pid == window.pid)) {
@@ -304,12 +310,34 @@ extension World {
         if mismatched { pass.effects.append(.log("window identity changed tile=\(window.id.rawValue)")) }
     }
 
-    fileprivate mutating func add(_ window: ObservedWindow, to id: UInt32, _ pass: inout Pass) {
+    /// Returns true when the window took the column of a focused tab that just left, so it should take focus too.
+    @discardableResult
+    fileprivate mutating func add(_ window: ObservedWindow, to id: UInt32, _ pass: inout Pass) -> Bool {
         guard var group = groups[id], case .settled = group.phase else {
-            return pass.effects.append(.log("window add dropped during space change tile=\(window.id.rawValue)"))
+            pass.effects.append(.log("window add dropped during space change tile=\(window.id.rawValue)"))
+            return false
         }
-        if group.windows[window.id] != nil { return refreshIfSameOwner(window, &pass) }
-        guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return }
+        if group.windows[window.id] != nil { refreshIfSameOwner(window, &pass); return false }
+        guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return false }
+        if let left = group.recentHide, left.pid == window.pid, left.tile != window.id,
+           pass.now - left.time < RecentTile.tabSwapWindow, let place = group.hidden[left.tile], let width = place.width,
+           !shouldFloat(window, config: config) {
+            // A native tab switch: the old tab was ordered out first. The new one takes its column.
+            let window = group.hidden[window.id].map { window.adopting($0.window) } ?? window.adoptingTitle(window.ruleTitle ?? window.title)
+            cancelPointer(in: id, &pass)
+            group = groups[id]!
+            group.hidden.removeValue(forKey: window.id)
+            for other in groups.keys where other != id { groups[other]!.hidden[window.id] = nil }
+            group.windows[window.id] = window
+            group.strip.restoreColumn(Column(tiles: [window.id], width: width, presetIndex: place.presetIndex, isFullWidth: place.isFullWidth),
+                                      at: group.placeInStrip(place.place), time: pass.now)
+            group.recentHide = nil
+            group.hidden[left.tile] = place.asTab
+            groups[id] = group
+            pass.layout.insert(id)
+            pass.effects.append(.log("tab switch tile=\(left.tile.rawValue)->\(window.id.rawValue)"))
+            return left.focused
+        }
         let returning = group.returning(window)
         let window = returning.map { window.adopting($0.window) } ?? window.adoptingTitle(window.ruleTitle ?? window.title)
         if returning == nil { cancelTimers(group: id, &pass, focusOnly: true) }
@@ -323,8 +351,12 @@ extension World {
         if let returning { group.putBack(window, from: returning, config: config, width: width, at: pass.now) }
         else if shouldFloat(window, config: config) { group.floating.insert(window.id) }
         else { group.strip.insertTile(window.id, width: width, at: pass.now) }
+        if group.strip.columnIndex(of: window.id) != nil {
+            group.recentAdd = RecentTile(tile: window.id, pid: window.pid, time: pass.now, focused: false)
+        }
         groups[id] = group
         pass.layout.insert(id)
+        return false
     }
 
     private mutating func prune(_ ids: Set<UInt32>, from stashes: [GroupSpace: Snapshot], hiddenOnly: Bool = false) {
@@ -1038,16 +1070,38 @@ extension World {
     }
 
     private mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
-        let writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
+        var writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
         for tile in tiles {
             guard let group = groups[id], let window = group.windows[tile] else { continue }
             let index = group.strip.columnIndex(of: tile)
             let column = index.map { group.strip.columns[$0] }.map {
                 Column(tiles: [tile], width: $0.width, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
             }
+            let focused = group.focus.decision?.tile == tile
             remove(tile, from: id, &pass)
-            groups[id]!.hidden[tile] = HiddenTile(window: window, column: column, place: index.map(group.placeAmongHidden) ?? 0,
-                                                  frame: writes.first { $0.tile == tile }?.frame)
+            let hidden = HiddenTile(window: window, column: column, place: index.map(group.placeAmongHidden) ?? 0,
+                                    frame: writes.first { $0.tile == tile }?.frame)
+            groups[id]!.hidden[tile] = hidden
+            guard let column, tiles.filter({ group.windows[$0]?.pid == window.pid }).count == 1 else { continue }
+            if let added = group.recentAdd, added.pid == window.pid, added.tile != tile, pass.now - added.time < RecentTile.tabSwapWindow,
+               let from = groups[id]!.strip.columnIndex(of: added.tile), groups[id]!.strip.columns[from].tiles == [added.tile] {
+                // A native tab switch: the new tab was adopted first. It moves into the old tab's column, and the
+                // old tab, which shares its frame, is not moved.
+                var target = groups[id]!.placeInStrip(hidden.place)
+                groups[id]!.strip.removeTile(added.tile, at: pass.now)
+                if from < target { target -= 1 }
+                groups[id]!.strip.restoreColumn(Column(tiles: [added.tile], width: column.width, presetIndex: column.presetIndex,
+                                                       isFullWidth: column.isFullWidth), at: target, time: pass.now)
+                groups[id]!.recentAdd = nil
+                groups[id]!.hidden[tile] = hidden.asTab
+                writes.removeAll { $0.tile == tile }
+                pass.effects.append(.log("tab switch tile=\(tile.rawValue)->\(added.tile.rawValue)"))
+                if focused || group.focus.decision?.tile == added.tile {
+                    focus(FocusIntent(tile: added.tile, pid: window.pid, source: .adoption, requestsOSFocus: false), group: id, &pass)
+                }
+            } else {
+                groups[id]!.recentHide = RecentTile(tile: tile, pid: window.pid, time: pass.now, focused: focused)
+            }
         }
         write(writes, group: id, &pass)
     }

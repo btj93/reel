@@ -174,6 +174,10 @@ public struct GroupState: Sendable {
     /// Windows whose app hid, or that minimized, with the place they left. A Space change stashes them with the strip;
     /// a close forgets them.
     public internal(set) var hidden: [TileID: HiddenTile] = [:]
+    /// The last tiled window that left and the last that joined, so a native tab switch (one window of an app
+    /// ordered out while another of the same app appears, in either order) keeps the column in place. Not persisted.
+    var recentHide: RecentTile?
+    var recentAdd: RecentTile?
     public var space: SpaceKey? { phase.key }
 
     init(display: DisplayGroup, config: EngineConfig) {
@@ -192,7 +196,9 @@ public struct GroupState: Sendable {
         hidden.removeValue(forKey: window.id)
         windows[window.id] = window
         if let column = returning.column { strip.restoreColumn(column, at: placeInStrip(returning.place), time: time) }
-        else if joinsStrip(was: returning.window, now: window, config: config) { strip.insertTile(window.id, width: width, at: time) }
+        else if returning.tab == true || joinsStrip(was: returning.window, now: window, config: config) {
+            strip.insertTile(window.id, width: width, at: time)
+        }
         else { floating.insert(window.id) }
     }
 
@@ -227,6 +233,16 @@ public struct GroupState: Sendable {
 /// A hidden window comes back as its own column, or floating when `width` is nil. `place` counts the other hidden
 /// columns too, so windows hidden one app at a time come back in their own order, whichever returns first. `frame` is
 /// the release frame computed when it hid (the write itself is dropped if Reel was paused); release writes it again.
+struct RecentTile: Sendable {
+    let tile: TileID
+    let pid: Int32
+    let time: Double
+    let focused: Bool
+
+    /// Long enough for the health check (0.5 s) to see the old tab gone after the new one is adopted.
+    static let tabSwapWindow = 1.5
+}
+
 public struct HiddenTile: Codable, Sendable {
     public let window: ObservedWindow
     public let width: ColumnWidth?
@@ -234,8 +250,11 @@ public struct HiddenTile: Codable, Sendable {
     public let isFullWidth: Bool
     public let place: Int
     public let frame: AXRect?
+    /// A background native tab: tiled, but sharing the column of the tab on screen. Optional for older saved state.
+    public let tab: Bool?
 
-    init(window: ObservedWindow, column: Column?, place: Int, frame: AXRect?) {
+    init(window: ObservedWindow, column: Column?, place: Int, frame: AXRect?, tab: Bool? = nil) {
+        self.tab = tab
         self.window = window
         width = column?.width
         presetIndex = column?.presetIndex
@@ -245,8 +264,11 @@ public struct HiddenTile: Codable, Sendable {
     }
 
     func placed(at place: Int) -> HiddenTile {
-        HiddenTile(window: window, column: column, place: place, frame: frame)
+        HiddenTile(window: window, column: column, place: place, frame: frame, tab: tab)
     }
+
+    /// A background tab shares the column of the tab on screen, so it holds no place of its own.
+    var asTab: HiddenTile { HiddenTile(window: window, column: nil, place: 0, frame: frame, tab: true) }
 
     var column: Column? {
         width.map { Column(tiles: [window.id], width: $0, presetIndex: presetIndex, isFullWidth: isFullWidth) }
