@@ -35,11 +35,13 @@ public struct CGWindowInfo: Sendable {
 }
 
 /// Get info about all on-screen windows.
-public func getAllWindowInfo() -> [CGWindowInfo] {
-    guard let windowList = CGWindowListCopyWindowInfo(
-        [.optionOnScreenOnly, .excludeDesktopElements],
-        kCGNullWindowID
-    ) as? [[String: Any]] else {
+public func getAllWindowInfo() -> [CGWindowInfo] { windowInfo(onScreenOnly: true) }
+
+/// Every window the window server lists, on screen only or on any Space. A window without the on-screen key is on
+/// screen exactly when the query asked for on-screen windows only.
+public func windowInfo(onScreenOnly: Bool) -> [CGWindowInfo] {
+    let options: CGWindowListOption = onScreenOnly ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll]
+    guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
         return []
     }
 
@@ -70,7 +72,7 @@ public func getAllWindowInfo() -> [CGWindowInfo] {
             layer: dict[kCGWindowLayer as String] as? Int ?? 0,
             alpha: dict[kCGWindowAlpha as String] as? Double ?? 1.0,
             title: dict[kCGWindowName as String] as? String,
-            isOnScreen: dict[kCGWindowIsOnscreen as String] as? Bool ?? true
+            isOnScreen: dict[kCGWindowIsOnscreen as String] as? Bool ?? onScreenOnly
         )
     }
 }
