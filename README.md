@@ -39,6 +39,8 @@ Hold Fn and swipe horizontally to pan. Flick release projects velocity to a snap
 
 Horizontally touching displays share a strip when macOS's “Displays have separate Spaces” is off. Otherwise each display has its own strip. The status menu explains the setting and opens System Settings. Space round trips preserve order and focus. Pause hands control back to macOS. Quit returns managed windows on-screen.
 
+Dock clicks, Cmd-Tab and new windows scroll the strip to the window macOS focused; Reel does not re-activate it. Apps with native tabs (Finder, Fork, TablePlus) switch tabs in place: the new tab keeps the column and the focus. If Accessibility is switched off while Reel runs, Reel quits at once so keyboard and mouse input are never held up.
+
 Reorder thumbnails use ScreenCaptureKit. Screen Recording permission may be needed for screenshots. If capture fails, the overlay uses placeholders and reorder still works.
 
 ## Config
@@ -76,11 +78,11 @@ title_regex = "^Preferences"
 floating = true
 ```
 
-`bundle_id_regex` is also supported. Multiple match fields in a rule must all match. Rules apply when a window is added, not whenever its title changes. Unknown keys and invalid regexes are errors.
+`bundle_id_regex` is also supported. Multiple match fields in a rule must all match. Rules apply when a window is added, or when a window that appeared untitled gets its first title; later title changes do not re-apply them. Unknown keys and invalid regexes are errors.
 
 ## Upgrading from the old runtime
 
-The executable is still `Reel`, the bundle ID is still `dev.reel.Reel`, and the CLI and login-item identity are unchanged. No TCC reset or forced re-grant is built into this update. An ad-hoc signed update may still require Accessibility approval because its code hash changes. Retention of an existing grant must be checked on the lane host, not inferred from the bundle ID.
+The executable is still `Reel`, the bundle ID is still `dev.reel.Reel`, and the CLI and login-item identity are unchanged. No TCC reset is built into this update, but an ad-hoc signed build changes its code hash, so expect to grant Accessibility again: if Reel keeps showing a `?` in the menu bar, remove it from the Accessibility list with − and add `/Applications/Reel.app` back.
 
 The config schema is new. Your existing file is read at the same path and is never overwritten. An old-schema file produces a menu-bar error naming the first unknown key, and startup continues on defaults. Replace its contents using the new template. See [the migration inventory](docs/r7-cutover.md) for key mappings and removed settings.
 
@@ -101,7 +103,7 @@ Old saved layouts are not imported. The new runtime writes `~/.local/state/reel/
 
 Also available are width/move/floating/close commands, `clear-positions`, `clear-positions-app <bundle-id>`, `pause`, `resume`, `reload-config`, `get-status` and `quit`. The bundled CLI is `Reel.app/Contents/MacOS/reel-msg`.
 
-Bundle logs are `~/Library/Logs/Reel/reel.log`, with one `reel.log.1` backup rotated above 1 MB at launch. The development binary logs to its terminal. Diagnostics include window titles; avoid publishing logs containing private window content.
+Bundle logs are `~/Library/Logs/Reel/reel.log`, with one `reel.log.1` backup, rotated above 1 MB at launch and during a session. The development binary logs to its terminal. Log lines name windows by ID, not title; `list-windows`, `get-layout` and `get-layouts` do return titles, so avoid publishing their output.
 
 ## Architecture and tests
 
