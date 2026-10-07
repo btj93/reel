@@ -47,6 +47,9 @@ public func reduce(_ world: inout World, _ event: Event, now: TimeInterval) -> [
     case .windowsHidden(let tiles):
         world.hide(tiles, &pass)
         pass.persist = true
+    case .windowsOrderedOut(let tiles):
+        world.hide(tiles, release: false, &pass)
+        pass.persist = true
     case .windowMoved(let tile, let frame):
         world.revokeParking(tile, frame: frame)
         world.onWindowMoved(tile, frame: frame, group: id, &pass)
@@ -1049,6 +1052,8 @@ extension World {
 
     private func hiddenRelease(_ hidden: HiddenTile, on display: DisplayGroup) -> (tile: TileID, pid: Int32, frame: AXRect)? {
         // A hidden tile whose previous target was already on screen had no release write. After unplug it still needs one.
+        // An ordered-out window (a background tab) is never written: its visible sibling owns the shared frame.
+        guard hidden.tab != true else { return nil }
         let frame: AXRect
         if let saved = hidden.frame { frame = saved }
         else if let column = hidden.column {
@@ -1062,15 +1067,15 @@ extension World {
     /// Release only walks the strip, so windows that leave it alive (their app hid, or one minimized) get their release
     /// frames now, from one cascade. Written after the removals, whose invalidation would cancel them. Each one's
     /// column, or its floating, and its release frame are remembered.
-    fileprivate mutating func hide(_ tiles: [TileID], _ pass: inout Pass) {
+    fileprivate mutating func hide(_ tiles: [TileID], release: Bool = true, _ pass: inout Pass) {
         hideOnSavedStrips(Set(tiles).filter { owner(of: $0) == nil }, at: pass.now)
         for id in groups.keys.sorted() where tiles.contains(where: { groups[id]!.windows[$0] != nil }) {
-            hide(tiles.filter { groups[id]!.windows[$0] != nil }, from: id, &pass)
+            hide(tiles.filter { groups[id]!.windows[$0] != nil }, from: id, release: release, &pass)
         }
     }
 
-    private mutating func hide(_ tiles: [TileID], from id: UInt32, _ pass: inout Pass) {
-        var writes = releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) }
+    private mutating func hide(_ tiles: [TileID], from id: UInt32, release: Bool, _ pass: inout Pass) {
+        var writes = release ? releaseFrames(group: id, at: pass.now).filter { tiles.contains($0.tile) } : []
         for tile in tiles {
             guard let group = groups[id], let window = group.windows[tile] else { continue }
             let index = group.strip.columnIndex(of: tile)
@@ -1080,7 +1085,7 @@ extension World {
             let focused = group.focus.decision?.tile == tile
             remove(tile, from: id, &pass)
             let hidden = HiddenTile(window: window, column: column, place: index.map(group.placeAmongHidden) ?? 0,
-                                    frame: writes.first { $0.tile == tile }?.frame)
+                                    frame: writes.first { $0.tile == tile }?.frame, tab: release ? nil : true)
             groups[id]!.hidden[tile] = hidden
             guard let column, tiles.filter({ group.windows[$0]?.pid == window.pid }).count == 1 else { continue }
             if let added = group.recentAdd, added.pid == window.pid, added.tile != tile, pass.now - added.time < RecentTile.tabSwapWindow,

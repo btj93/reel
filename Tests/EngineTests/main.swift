@@ -5923,6 +5923,20 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
             check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "\(order): focus follows the switch back")
         }
     }
+    section("Ordered-out windows (background tabs) are never written, on hide or on quit") {
+        var h = Harness()
+        h.census(10, (1...6).map { window($0, app: 7) })
+        let area = h.world.topology.groups[0].frame
+        let off = h.world.frames.values.filter { $0.frame.rect.intersection(area).width < 2 }.map(\.tile).sorted { $0.rawValue < $1.rawValue }.last!
+        var effects = h.send(.windowsOrderedOut([off]))
+        check(!h.tiles.contains(off) && h.world.groups[1]!.hidden[off] != nil, "the ordered-out window leaves the strip and stays known")
+        effects += h.send(.command(.release, .ipc))
+        check(!effects.contains { if case .setFrame(let request) = $0 { request.tile == off } else { false } }, "no write ever reaches the ordered-out window")
+        var hidden = Harness()
+        hidden.census(10, (1...6).map { window($0, app: 7) })
+        let written = hidden.send(.windowsHidden([off])).contains { if case .setFrame(let request) = $0 { request.tile == off } else { false } }
+        check(written, "an app-hidden window still gets its release write")
+    }
     section("Native tabs: an unrelated hide and a later window are not a tab switch") {
         var h = Harness()
         h.census(1, [window(1, app: 101, x: 0), window(2, app: 200, x: 400), window(3, app: 300, x: 800)])

@@ -511,7 +511,7 @@ public final class Observer: CensusObserver {
         }
         if !orderedOut.isEmpty {
             log("observer: ordered out \(orderedOut.map(\.rawValue))")
-            emit(.windowsHidden(orderedOut), nil)
+            emit(.windowsOrderedOut(orderedOut), nil)
         }
         ignored.formIntersection(visible)
         guard !paused() else { return }

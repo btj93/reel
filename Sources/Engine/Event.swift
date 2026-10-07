@@ -131,6 +131,10 @@ public struct Event: Sendable {
         case windowRemoved(TileID)
         /// The windows left the strip but live on: their app hid, or one minimized.
         case windowsHidden([TileID])
+        /// The windows are alive but on no Space: a background native tab, or an app that closes to the Dock that
+        /// way. Hidden like the above, but never written to: a write to a background tab can leave its visible
+        /// sibling drawn on every Space.
+        case windowsOrderedOut([TileID])
         /// The user moved or resized a window: the runtime already dropped the engine's own writes as echoes.
         case windowMoved(TileID, AXRect)
         case focus(FocusIntent)

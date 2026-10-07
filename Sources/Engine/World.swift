@@ -250,7 +250,8 @@ public struct HiddenTile: Codable, Sendable {
     public let isFullWidth: Bool
     public let place: Int
     public let frame: AXRect?
-    /// A background native tab: tiled, but sharing the column of the tab on screen. Optional for older saved state.
+    /// Ordered out (a background native tab, or a window its app took off every Space): never written, since a write
+    /// to a background tab can leave its visible sibling drawn on every Space. Optional for older saved state.
     public let tab: Bool?
 
     init(window: ObservedWindow, column: Column?, place: Int, frame: AXRect?, tab: Bool? = nil) {
