@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Tests/Smoke/display-perf.sh — the R5 perf lane: time from a display reconfiguration to a settled layout on every
-# display, trunk `Reel` against head `ReelNext`, in interleaved blocks.
+# display, trunk `Reel` against head `Reel`, in interleaved blocks.
 #
 # Lane hosts only: it opens real windows and changes a display's resolution through `displayplacer`. It refuses to
 # run while any Reel or ReelNext is running, and puts the display back in mode A on exit.
@@ -9,7 +9,7 @@
 #   REEL_E2E_CONFIRM=1 PERF_MODE_A="id:<id> res:1920x1080 ..." PERF_MODE_B="id:<id> res:1600x900 ..." \
 #       bash Tests/Smoke/display-perf.sh
 #   PERF_BLOCKS=2 PERF_PER_BLOCK=5      two blocks of five toggles per binary, alternating (ten each)
-#   PERF_BINS="a b"                     binaries to compare, trunk first (default: .build/debug/Reel .build/debug/ReelNext)
+#   PERF_BINS="a b"                     binaries to compare, trunk first (default: .build/debug/Reel .build/debug/Reel)
 #   SMOKE_DRY_RUN=1                     walk the steps against fixtures, launch nothing
 #
 # PERF_MODE_A and PERF_MODE_B are `displayplacer` arguments for one display (`displayplacer list` prints them). Each
@@ -30,7 +30,7 @@ SMOKE_TAG="$$"
 BIN_DIR="$REPO_ROOT/.build/debug"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
-read -r -a BINS <<< "${PERF_BINS:-$BIN_DIR/Reel $BIN_DIR/ReelNext}"
+read -r -a BINS <<< "${PERF_BINS:-${BIN_TRUNK:-/tmp/reel-trunk/.build/debug/Reel} $BIN_DIR/Reel}"
 BLOCKS="${PERF_BLOCKS:-2}"
 PER_BLOCK="${PERF_PER_BLOCK:-5}"
 MODE_A="${PERF_MODE_A:-id:DRY-RUN res:1920x1080}"
@@ -68,6 +68,7 @@ place() {  # <displayplacer arguments>
 launch_reel() {  # <binary>
     BIN_REEL=$1
     write_test_config "$CFG" 16
+    if [ "$1" = "${BINS[0]}" ]; then cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"; fi
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
     REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" \
         "$1" >> "$REEL_LOG" 2>&1 &
@@ -98,11 +99,13 @@ measure() {  # <binary> <count>
         fi
         waitForSettle 10
         t1=$(now_ms)
-        printf '%s %d\n' "$(basename "$bin")" $((t1 - t0)) >> "$SAMPLES"
+        printf '%s %d\n' "$(side "$bin")" $((t1 - t0)) >> "$SAMPLES"
         if [ "$MODE" = B ]; then MODE=A; else MODE=B; fi
     done
     quit_reel
 }
+
+side() { if [ "$1" = "${BINS[0]}" ]; then echo trunk; else echo head; fi; }
 
 percentile() {  # <name> <p>
     grep "^$1 " "$SAMPLES" | awk '{print $2}' | sort -n | awk -v p="$2" '{v[NR]=$1} END {
@@ -126,18 +129,20 @@ main() {
     for _ in $(seq 1 "$BLOCKS"); do
         for bin in "${BINS[@]}"; do measure "$bin" "$PER_BLOCK"; done
     done
-    section "display reconfiguration to settled layout (ms)"
-    local trunk head
-    trunk="$(basename "${BINS[0]}")"
-    head="$(basename "${BINS[${#BINS[@]}-1]}")"
-    for bin in "${BINS[@]}"; do
-        local name; name="$(basename "$bin")"
-        info "$name: n=$(grep -c "^$name " "$SAMPLES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
-    done
-    if [ "$DRY" = 1 ]; then dry_note "rule: $head p95 <= $trunk p95 * 1.2"; return 0; fi
-    local limit; limit=$(( $(percentile "$trunk" 95) * 12 / 10 ))
-    [ "$(percentile "$head" 95)" -le "$limit" ] || fail "$head p95 above $trunk p95 * 1.2 ($limit)"
-    ok "$head p95 within $trunk p95 * 1.2"
+    report
 }
 
-main "$@"
+# Samples are tagged by side(), not by binary name: trunk and head are both called Reel since the cutover.
+report() {
+    section "display reconfiguration to settled layout (ms)"
+    local name
+    for name in trunk head; do
+        info "$name: n=$(grep -c "^$name " "$SAMPLES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
+    done
+    if [ "$DRY" = 1 ]; then dry_note "rule: head p95 <= trunk p95 * 1.2"; return 0; fi
+    local limit; limit=$(( $(percentile trunk 95) * 12 / 10 ))
+    [ "$(percentile head 95)" -le "$limit" ] || fail "head p95 above trunk p95 * 1.2 ($limit)"
+    ok "head p95 within trunk p95 * 1.2"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

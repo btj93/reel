@@ -13,27 +13,41 @@ public enum FocusSource: String, Codable, Sendable {
     }
 }
 
-public struct FocusIntent: Sendable {
+public struct FocusIntent: Equatable, Sendable {
     public let tile: TileID?
     public let pid: Int32?
     public let source: FocusSource
     public let observedSpace: SpaceKey?
+    public let requestsOSFocus: Bool
 
-    public init(tile: TileID?, pid: Int32? = nil, source: FocusSource, observedSpace: SpaceKey? = nil) {
+    public init(tile: TileID?, pid: Int32? = nil, source: FocusSource, observedSpace: SpaceKey? = nil, requestsOSFocus: Bool = true) {
         self.tile = tile
         self.pid = pid
         self.source = source
         self.observedSpace = observedSpace
+        self.requestsOSFocus = requestsOSFocus
+    }
+
+    public func droppedLog(reason: String) -> String {
+        "focus dropped source=\(source.rawValue) tile=\(tile.map { String($0.rawValue) } ?? "nil") pid=\(pid.map { String($0) } ?? "nil") reason=\(reason)"
     }
 }
 
-public struct FocusDecision: Sendable {
+public struct FocusDecision: Equatable, Sendable {
     public let tile: TileID
     public let source: FocusSource
     public let time: Double
+    public let requestsOSFocus: Bool
+
+    init(tile: TileID, source: FocusSource, time: Double, requestsOSFocus: Bool = true) {
+        self.tile = tile
+        self.source = source
+        self.time = time
+        self.requestsOSFocus = requestsOSFocus
+    }
 }
 
-public enum FocusState: Sendable {
+public enum FocusState: Equatable, Sendable {
     case none
     case resolved(FocusDecision)
     case crossing(intent: FocusIntent, time: Double, previous: FocusDecision?)

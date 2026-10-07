@@ -1,4 +1,7 @@
+import AppKit
+import ApplicationServices
 import Core
+import CoreGraphics
 import Engine
 import Foundation
 import Platform
@@ -34,6 +37,24 @@ func topology(_ revision: UInt64, _ displays: [Display], separateSpaces: Bool = 
     Topology(revision: revision, displays: displays, separateSpaces: separateSpaces, primaryScreenHeight: 900)
 }
 
+func scroll(_ phase: ScrollPhase, _ dx: Double = 0, dy: Double = 0, modifier: Bool = true, x: Double = 500) -> PointerInput {
+    .scroll(ScrollInput(phase: phase, dx: dx, dy: dy, modifier: modifier, at: AXPoint(CGPoint(x: x, y: 400))))
+}
+
+let began = scroll(.began)
+let lift = scroll(.ended)
+func swipe(_ dx: Double) -> PointerInput { scroll(.changed, dx) }
+
+extension PointerInput {
+    var isWheel: Bool { if case .scroll(let sample) = self { sample.phase == .discrete } else { false } }
+}
+
+/// The middle of `tile`'s title bar.
+func titleBar(_ tile: TileID, in world: World) -> AXPoint {
+    let frame = world.frames[tile]?.frame.rect ?? .zero
+    return AXPoint(CGPoint(x: frame.midX, y: frame.minY + 10))
+}
+
 func threadCPUTime() -> Duration {
     var spec = timespec()
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &spec)
@@ -50,6 +71,14 @@ struct Harness {
     var stolenFocus = 0
     /// Events after which a group's `focusedAt` moved back.
     var rewoundFocus = 0
+    /// The overlay the runtime would show after the effects so far.
+    var overlay = Overlay.hidden
+    /// When the last sample of a gesture whose swipe ended came, until a began, its last momentum sample, a pause or a release.
+    var tailAt: Double?
+    /// The rest of that gesture is still arriving: it went quiet less than `gestureQuiet` ago.
+    var tail: Bool { tailAt.map { time - $0 < EngineConfig.gestureQuiet } ?? false }
+    /// Samples of a taken gesture's rest that reached the app.
+    var leakedTail = 0
 
     init(animate: Bool = false, gestureSnap: Bool = true, rules: [Rule] = [], displays: [Display] = [display()],
          separateSpaces: Bool = true) {
@@ -63,8 +92,9 @@ struct Harness {
         switch kind {
         case .pointer(let input, nil):
             switch input {
-            case .beginGesture, .openMenu, .beginReorder: stamped = kind
-            default: stamped = .pointer(input, session: world.pointer.token)
+            case .press: stamped = kind
+            case .scroll(let scroll) where scroll.phase == .began || scroll.phase == .discrete: stamped = kind
+            default: stamped = .pointer(input, session: world.pointer?.token)
             }
         default: stamped = kind
         }
@@ -77,7 +107,21 @@ struct Harness {
         let start = ContinuousClock.now
         let leader = world.activeGroup
         let focusedAt = world.groups.mapValues(\.focusedAt)
+        let swiping = world.pointer?.swipe != nil
+        let session = world.pointer
         effects = reduce(&world, event, now: time)
+        for case .overlay(let shown) in effects { overlay = shown }
+        let live = tail
+        if swiping, world.pointer?.swipe == nil { tailAt = time }
+        switch event.kind {
+        case .pointer(.scroll(let scroll), _) where scroll.phase == .began: tailAt = nil
+        case .pointer(.scroll(let scroll), _) where live && scroll.phase != .discrete:
+            if !consumed { leakedTail += 1 }
+            tailAt = scroll.phase == .momentumEnded ? nil : time
+        case .pointer(.cancel, let token?) where token == session?.token && session?.scope == event.scope: tailAt = nil
+        case .command(.release, _): tailAt = nil
+        default: break
+        }
         if world.groups.contains(where: { $0.value.focusedAt < focusedAt[$0.key] ?? -.infinity }) { rewoundFocus += 1 }
         if event.scope.group != leader, effects.contains(where: { if case .focus(_, .restore) = $0 { true } else { false } }) { stolenFocus += 1 }
         reduceTime += start.duration(to: .now)
@@ -97,18 +141,38 @@ struct Harness {
 
     mutating func advance(_ delta: Double) {
         let target = time + delta
-        while let entry = world.timers.filter({ $0.value.deadline <= target }).min(by: {
-            if $0.value.deadline == $1.value.deadline { return $0.key.rawValue < $1.key.rawValue }
-            return $0.value.deadline < $1.value.deadline
-        }) {
-            time = max(time, entry.value.deadline)
-            apply(Event(scope: entry.value.scope, kind: .timer(entry.key)))
+        while true {
+            var due = world.timers.map { (token: $0.key, deadline: $0.value.deadline, scope: $0.value.scope) }
+            if let session = world.pointer, let timer = session.timer { due.append((timer.token, timer.deadline, session.scope)) }
+            guard let entry = due.filter({ $0.deadline <= target }).min(by: { ($0.deadline, $0.token) < ($1.deadline, $1.token) }) else { break }
+            time = max(time, entry.deadline)
+            apply(Event(scope: entry.scope, kind: .timer(entry.token)))
         }
         time = target
     }
 
+    /// A modifier press on `tile`'s title bar, held past the long press.
+    mutating func openMenu(_ tile: TileID, group: UInt32 = 1) {
+        send(.pointer(.press(tile, at: titleBar(tile, in: world))), group: group)
+        advance(EngineConfig.longPress + margin)
+    }
+
+    /// A modifier drag on `tile`'s title bar past the threshold, with the overlay showing.
+    mutating func beginReorder(_ tile: TileID, group: UInt32 = 1) {
+        let origin = titleBar(tile, in: world).point
+        send(.pointer(.press(tile, at: AXPoint(origin))), group: group)
+        send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + EngineConfig.dragThreshold + 1, y: origin.y)))), group: group)
+        send(.pointer(.overlayReady), group: group)
+    }
+
+    /// Release the drag and answer with the overlay's gap.
+    mutating func drop(_ gap: Int, group: UInt32 = 1) {
+        send(.pointer(.release(AXPoint(.zero))), group: group)
+        send(.pointer(.drop(gap)), group: group)
+    }
+
     var active: TileID? { world.groups[1]?.strip.activeColumn?.activeTile }
-    var gesture: GestureSession? { if case .gesture(let session) = world.pointer { session } else { nil } }
+    var gesture: PointerSession? { world.pointer?.swipe != nil ? world.pointer : nil }
     var tiles: [TileID] { world.groups[1]!.strip.columns.flatMap(\.tiles) }
     var offset: Double { world.groups[1]!.strip.viewOffset.current(at: time) }
 
@@ -117,6 +181,8 @@ struct Harness {
     var requests: [FrameRequest] {
         effects.compactMap { if case .setFrame(let request) = $0 { return request }; return nil }
     }
+
+    var consumed: Bool { effects.contains { if case .consumeInput = $0 { true } else { false } } }
 
     var persisted: Bool { effects.contains { if case .persist = $0 { return true }; return false } }
 
@@ -133,7 +199,945 @@ struct Harness {
     }
 }
 
+final class QueuedFocusApp: AXApp, @unchecked Sendable {
+    private let lock = NSLock()
+    private var queue: [@Sendable () -> Void] = []
+    let focused: CGWindowID?
+    init(pid: Int32, focused: CGWindowID?) {
+        self.focused = focused
+        super.init(pid: pid, bundleIdentifier: nil)
+    }
+    override func perform(_ work: @escaping @Sendable () -> Void) -> Bool {
+        lock.withLock { queue.append(work) }
+        return true
+    }
+    override func focusedWindowID() -> CGWindowID? { focused }
+    func drain() {
+        let batch = lock.withLock { let copy = queue; queue = []; return copy }
+        batch.forEach { $0() }
+    }
+}
+
+final class FocusProbeWindow: AXWindow, @unchecked Sendable {
+    private let lock = NSLock()
+    private var focused = 0
+    private var raised = 0
+    var focusCount: Int { lock.withLock { focused } }
+    var raiseCount: Int { lock.withLock { raised } }
+    init(_ id: UInt32, pid: Int32) {
+        super.init(element: AXUIElementCreateApplication(pid), windowID: id, pid: pid)
+    }
+    override func focus(timeout: Float?) { lock.withLock { focused += 1 } }
+    override func raise() -> AXResult<Void> { lock.withLock { raised += 1 }; return .success(()) }
+    override func getFrame() -> AXResult<CGRect> { .success(CGRect(x: 100, y: 30, width: 300, height: 600)) }
+    override func getPropertiesFast() -> WindowProperties {
+        WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: "window-\(windowID)", frame: try? getFrame().get())
+    }
+}
+
+final class TitleFlickerProbeWindow: AXWindow, @unchecked Sendable {
+    private let lock = NSLock()
+    private var properties = WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: "Document",
+                                              frame: CGRect(x: 100, y: 30, width: 500, height: 600))
+    init() { super.init(element: AXUIElementCreateApplication(99001), windowID: 99001, pid: 99001) }
+    func retitle(_ title: String, subrole: String = "AXStandardWindow", width: Double = 500) {
+        lock.withLock {
+            properties.title = title
+            properties.subrole = subrole
+            properties.frame?.size.width = width
+        }
+    }
+    override func getPropertiesFast() -> WindowProperties { lock.withLock { properties } }
+    override func getFrame() -> AXResult<CGRect> { .success(lock.withLock { properties.frame! }) }
+}
+
+final class FocusTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 100.0
+    var time: Double {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
+    }
+}
+
+final class FocusObservationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: [(Observation, Stamp?)] = []
+    func append(_ event: Observation, _ stamp: Stamp?) { lock.withLock { pending.append((event, stamp)) } }
+    func drain() -> [(Observation, Stamp?)] { lock.withLock { let copy = pending; pending = []; return copy } }
+}
+
 @MainActor func replayTests() throws {
+    section("Review A11 lifecycle removal retires identities before PID reuse") {
+        for path in ["visible", "hidden", "saved", "exit", "no display"] {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 202), window(3, app: 101)])
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 202, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "the old app has a confirmed identity before lifecycle changes")
+            loop.send(.windowRemoved(TileID(3)), stamp: Stamp(revision: loop.world.topology.revision, epochs: [1: loop.world.groups[1]!.epoch - 1]))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "stale scoped removal cannot retire a current confirmation")
+            switch path {
+            case "hidden":
+                loop.send(.windowsHidden([TileID(3)]))
+                loop.send(.windowAdded(window(3, app: 101), frontmost: false))
+                check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "hiding alone preserves the entry for an unhidden window")
+                loop.send(.windowsHidden([TileID(3)]))
+            case "saved":
+                loop.send(.spaceChanged(key: .skylight(2), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(4, app: 404)]))
+                loop.send(.spaceChanged(key: .skylight(1), epoch: loop.world.groups[1]!.epoch + 1,
+                                        windows: [window(1, app: 101), window(2, app: 202), window(3, app: 101)]))
+                check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "another Space alone preserves confirmation for return")
+                loop.send(.spaceChanged(key: .skylight(2), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(4, app: 404)]))
+            case "exit":
+                loop.send(.windowRemoved(TileID(1)))
+                check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "retiring an app's other window does not evict the still-live target")
+            case "no display":
+                loop.send(.topologyChanged(topology(loop.world.topology.revision + 1, [])))
+                check(loop.world.groups.isEmpty, "the lifecycle fact can arrive with no display group")
+            default: break
+            }
+            loop.send(.windowRemoved(TileID(3)))
+            if path == "no display" {
+                let stamp = loop.world.stamp
+                loop.send(.topologyChanged(topology(loop.world.topology.revision + 1, [display()])), group: 0, stamp: stamp)
+            }
+            if path == "saved" || path == "no display" {
+                loop.send(.spaceChanged(key: .skylight(1), epoch: loop.world.groups[1]!.epoch + 1,
+                                        windows: [window(1, app: 101), window(2, app: 202)]))
+            }
+            loop.send(.windowAdded(window(3, app: 101), frontmost: false))
+            check(loop.indicatorFocus(frontmostPID: 101) == nil, "a reused PID and tile require fresh confirmation after \(path) removal")
+            check(loop.indicatorFocus(frontmostPID: 202) == TileID(2), "retirement preserves the unrelated peer app's identity")
+            loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "the reused identity can acquire a ring after a fresh report")
+            check(loop.world.check().isEmpty, "lifecycle replay preserves World invariants")
+        }
+    }
+    section("Review A11 one removal retires every historical owner of a tile") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 202)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        loop.send(.spaceChanged(key: .skylight(2), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(1, app: 303)]))
+        check(loop.pid(of: TileID(1)) == 303, "the reused tile is now held by a different app")
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 303, source: .axFocus)))
+        check(loop.indicatorFocus(frontmostPID: 303) == TileID(1), "the new owner has its own confirmation")
+        loop.send(.windowRemoved(TileID(1)))
+        for (space, pid): (UInt64, Int32) in [(3, 101), (4, 303)] {
+            loop.send(.spaceChanged(key: .skylight(space), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(1, app: pid)]))
+            check(loop.pid(of: TileID(1)) == pid && loop.indicatorFocus(frontmostPID: pid) == nil,
+                  "one tile removal invalidates every historical PID entry, not just its latest owner")
+        }
+    }
+    section("Review A11 PID churn cannot revive retired confirmations") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        for id: UInt32 in 1000..<1032 {
+            loop.send(.windowAdded(window(id, app: Int32(id)), frontmost: false))
+            loop.send(.focus(FocusIntent(tile: TileID(id), pid: Int32(id), source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: Int32(id)) == TileID(id), "each historical PID starts with a real confirmation")
+            loop.send(.windowRemoved(TileID(id)))
+        }
+        for id: UInt32 in 1000..<1032 {
+            loop.send(.windowAdded(window(id, app: Int32(id)), frontmost: false))
+            check(loop.indicatorFocus(frontmostPID: Int32(id)) == nil, "every historical PID needs fresh confirmation when reused")
+            loop.send(.windowRemoved(TileID(id)))
+        }
+    }
+    section("Review A10 fresh unmanaged focus invalidates only its own app's ring") {
+        for source in [FocusSource.axFocus, .appActivation] {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 202), window(3, app: 101)])
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 202, source: .axFocus)))
+            loop.send(.command(.focus(TileID(1)), .keyboard))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "A has a confirmed managed ring before the negative report")
+            let popup = FocusIntent(tile: TileID(900), pid: 101, source: source)
+            loop.send(.focus(popup), stamp: Stamp(revision: loop.world.topology.revision - 1, epochs: [1: loop.world.groups[1]!.epoch]))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "stale topology cannot invalidate A's ring")
+            loop.send(.focus(popup), stamp: Stamp(revision: loop.world.topology.revision, epochs: [1: loop.world.groups[1]!.epoch - 1]))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "stale Space epoch cannot invalidate A's ring")
+            loop.send(.focus(FocusIntent(tile: TileID(900), pid: 101, source: source, observedSpace: .skylight(2))))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "a different-Space report cannot invalidate A's ring")
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 101, source: source)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "conflicting managed ownership cannot invalidate A's ring")
+            loop.send(.focus(popup))
+            check(loop.indicatorFocus(frontmostPID: 101) == nil, "a current unmanaged focused window clears A's old managed identity")
+            check(loop.indicatorFocus(frontmostPID: 202) == TileID(2), "A's unmanaged report cannot clear B's independent identity")
+            loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "a fresh same-app managed confirmation restores its ring during protection")
+        }
+    }
+    section("Review A10 named hidden and saved windows remain managed identities") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 202)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        loop.send(.windowsHidden([TileID(1)]))
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        loop.send(.windowAdded(window(1, app: 101), frontmost: false))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "a hidden managed report preserves confirmation for its return")
+        loop.send(.spaceChanged(key: .skylight(2), epoch: loop.world.groups[1]!.epoch + 1, windows: [window(3, app: 303)]))
+        check(loop.world.trackedElsewhere.contains(1), "A is still managed in a saved Space")
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .appActivation)))
+        loop.send(.spaceChanged(key: .skylight(1), epoch: loop.world.groups[1]!.epoch + 1,
+                                windows: [window(1, app: 101), window(2, app: 202)]))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "a saved managed report preserves confirmation across Space return")
+    }
+    section("Daily Fork: a Dock click whose focused-window read comes back empty still focuses the app") {
+        // Fork's AX often misses the 100 ms timeout; the old runtime fell back to the app's tracked window.
+        for confirmedFirst in [false, true] {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 202), window(3, app: 101)])
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            if confirmedFirst {
+                loop.send(.command(.focus(TileID(3)), .keyboard))
+                loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            }
+            loop.send(.command(.focus(TileID(2)), .keyboard))
+            let app = QueuedFocusApp(pid: 101, focused: nil), box = FocusObservationBox(), clock = ScopeClock()
+            clock.current = loop.world.stamp
+            let worker = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101), 3: FocusProbeWindow(3, pid: 101)], clock: clock, send: box.append)
+            var lines: [String] = []
+            let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                    managed: { [1, 2, 3] }, elsewhere: { [] }, paused: { false },
+                                    emit: { event, stamp in loop.send(event, stamp: stamp) }, log: { lines.append($0) },
+                                    activationFallback: { loop.activationFallback(pid: $0) })
+            observer.workers[101] = worker
+            observer.clock.current = clock.current
+            observer.activated(101)
+            app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            let expected = TileID(confirmedFirst ? 3 : 1)
+            check(loop.world.timers.values.contains { if case .focus(let intent) = $0.action { intent.tile == expected && intent.source == .appActivation } else { false } },
+                  "an empty activation read falls back to the app's \(confirmedFirst ? "last confirmed" : "first") window")
+            check(lines.contains { $0.contains("activation-fallback pid=101") }, "the fallback is logged")
+            check(loop.activationFallback(pid: 404) == nil, "an app with no managed window has no fallback")
+        }
+    }
+    section("Review A10 pending activation and nil AX reads preserve the latest confirmation") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(3, app: 101)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        loop.send(.command(.focus(TileID(1)), .keyboard))
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        let app = QueuedFocusApp(pid: 101, focused: nil), box = FocusObservationBox(), clock = ScopeClock()
+        clock.current = loop.world.stamp
+        let worker = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: clock, send: box.append)
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [1, 3] }, elsewhere: { [] }, paused: { false }, emit: { event, stamp in loop.send(event, stamp: stamp) }, log: { _ in })
+        observer.workers[101] = worker
+        observer.clock.current = clock.current
+        observer.activated(101)
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "an activation whose app queue has not read focus keeps the ring")
+        loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "same-app confirmation still works while the activation read is pending")
+        app.drain()
+        let completed = box.drain()
+        check(completed.contains { if case .focused(101, nil, _, _) = $0.0 { true } else { false } }, "the app queue completed a nil focused-window read")
+        completed.forEach { observer.receive($0.0, stamp: $0.1) }
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "ambiguous nil completion preserves the latest confirmed tile")
+        observer.receive(.focused(pid: 101, nil, activation: nil, space: nil), stamp: loop.world.stamp)
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "a nil AX notification read remains unknown rather than confirmed absence")
+    }
+    section("Review A9 background AX focus cannot replace the foreground ring") {
+        for otherDisplay in [false, true] {
+            var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
+            h.census(1, otherDisplay ? [window(1, app: 101), window(3, app: 101)]
+                     : [window(1, app: 101), window(2, app: 202), window(3, app: 101)])
+            if otherDisplay { h.census(2, [window(2, app: 202, x: 1100)], group: 2) }
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            loop.send(.command(.focus(TileID(1)), .keyboard))
+            loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "foreground A's managed focus is confirmed")
+            let rejected = loop.send(.focus(FocusIntent(tile: TileID(2), pid: 202, source: .axFocus)))
+            check(rejected.contains { if case .log(let line) = $0 { line.contains("reason=debounce") } else { false } }, "background B's AX report is rejected during A's protection")
+            check(loop.focusedTile == TileID(1), "the rejected background report cannot change layout selection")
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "the rejected background report cannot remove A's foreground ring")
+            loop.send(.focus(FocusIntent(tile: TileID(3), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "same-app OS focus can confirm A3 while the layout decision remains protected")
+            check(loop.focusedTile == TileID(1), "same-app confirmation does not bypass reducer AX protection")
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 202, source: .appActivation)))
+            check(loop.world.timers.values.contains { if case .focus(let intent) = $0.action { intent.tile == TileID(2) } else { false } }, "a genuine B activation still schedules its focus")
+            check(loop.indicatorFocus(frontmostPID: 202) == TileID(2), "the ring follows B when B is actually foreground")
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(3), "foreground A retains its own last confirmed tile after B reports")
+            check(loop.indicatorFocus(frontmostPID: 999) == nil, "an unmanaged foreground app has no managed ring")
+            loop.send(.windowRemoved(TileID(3)))
+            check(loop.indicatorFocus(frontmostPID: 101) == nil, "a removed confirmed tile cannot be reused for a ring")
+        }
+    }
+    section("Review B8 hidden census return retains established classification for a later dialog") {
+        func document(_ title: String, classification: WindowClassification) -> ObservedWindow {
+            ObservedWindow(id: TileID(1), pid: 101, bundleID: "test.app", title: title,
+                           floating: classification != .tile, classification: classification,
+                           initialFrame: AXRect(CGRect(x: 100, y: 30, width: 500, height: 600)))
+        }
+        for path in ["notification", "same-space census", "cross-space census"] {
+            var h = Harness()
+            h.census(1, [document("Document", classification: .tile), window(2, x: 600)])
+            h.send(.windowsHidden([TileID(1)]))
+            check(h.tiles == [TileID(2)], "hiding the document retains only its neighbor in the visible strip")
+            switch path {
+            case "notification": h.send(.windowAdded(document("", classification: .provisionalTitle), frontmost: false))
+            case "same-space census": h.census(1, [document("", classification: .provisionalTitle), window(2, x: 600)])
+            default:
+                h.census(2, [window(3)])
+                h.census(1, [document("", classification: .provisionalTitle), window(2, x: 600)])
+            }
+            check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(1)], [TileID(2)]], "the hidden census return restores the document's original column")
+            check(h.world.groups[1]!.windows[TileID(1)]?.ruleTitle == "Document", "the hidden census return retains the established first title")
+            check(h.world.groups[1]!.windows[TileID(1)]?.floating == false
+                  && h.world.groups[1]!.windows[TileID(1)]?.classification == .tile, "provisional census facts cannot replace established tiled classification")
+            check(h.world.groups[1]!.windows[TileID(1)]?.title == "", "the returned document still exposes its current empty title")
+            for _ in 0..<2 {
+                h.send(.windowChanged(document("Dialog", classification: .float)))
+                check(h.world.groups[1]!.floating == [TileID(1)] && h.tiles == [TileID(2)], "a genuine dialog classification floats after the hidden census return")
+                check(h.requests.allSatisfy { $0.tile != TileID(1) }, "the floating dialog receives no managed layout write")
+            }
+            check(h.world.check().isEmpty, "hidden census return and structural dialog preserve invariants")
+        }
+    }
+    section("Review B7 the first late title may tile once and stays stable across Space restore") {
+        func document(_ title: String) -> ObservedWindow {
+            let frame = CGRect(x: 100, y: 30, width: 500, height: 600)
+            let classification = classifyWindow(WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: title, frame: frame))
+            return ObservedWindow(id: TileID(1), pid: 101, bundleID: "test.app", title: title,
+                                  floating: classification == .float || classification == .provisionalTitle,
+                                  classification: classification, initialFrame: AXRect(frame))
+        }
+        var h = Harness()
+        h.census(1, [document(""), window(2, x: 600)])
+        check(h.world.groups[1]!.floating == [TileID(1)] && h.tiles == [TileID(2)], "an initially untitled standard window floats provisionally")
+        h.send(.windowChanged(document("Document")))
+        check(h.world.groups[1]!.floating.isEmpty && h.tiles == [TileID(2), TileID(1)], "its first usable title may insert a column once")
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.send(.command(.moveLeft, .keyboard))
+        h.census(2, [window(3)])
+        h.send(.windowChanged(document("")))
+        h.census(1, [document(""), window(2, x: 600)])
+        check(h.world.groups[1]!.floating.isEmpty && h.tiles == [TileID(1), TileID(2)], "saved established classification and column survive an empty-title return")
+        check(h.world.groups[1]!.windows[TileID(1)]?.ruleTitle == "Document", "the restored window keeps its first title latch")
+        h.send(.windowsHidden([TileID(1)]))
+        h.send(.windowAdded(document(""), frontmost: false))
+        check(h.world.groups[1]!.floating.isEmpty && h.tiles == [TileID(1), TileID(2)], "hidden established windows return to their column despite provisional facts")
+        check(h.world.check().isEmpty, "provisional title lifecycle preserves invariants")
+    }
+    section("Review B7 repeated empty titles preserve established document columns") {
+        var h = Harness()
+        h.census(1, [ObservedWindow(id: TileID(99001), pid: 99001, bundleID: nil, title: "Document"), window(2, x: 600)])
+        let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), probe = TitleFlickerProbeWindow(), clock = ScopeClock()
+        clock.current = h.world.stamp
+        let worker = AppWorker(app: app, windows: [99001: probe], clock: clock, send: box.append)
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [99001, 2] }, elsewhere: { [] }, paused: { false }, emit: { event, _ in h.send(event) }, log: { _ in })
+        observer.clock.current = clock.current
+        for title in ["", "Document", "", "Document"] {
+            probe.retitle(title)
+            worker.refreshClassifications([99001]); app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            check(h.world.groups[1]!.floating.isEmpty, "a title flicker cannot float an established document")
+            check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(99001)], [TileID(2)]], "title flicker retains the original column order")
+            check(h.world.groups[1]!.windows[TileID(99001)]?.ruleTitle == "Document", "first-title rule latch survives live title changes")
+            check(h.world.groups[1]!.windows[TileID(99001)]?.title == title, "live title metadata still updates")
+        }
+        check(h.world.check().isEmpty, "title flicker preserves invariants")
+    }
+    section("Review B7 structural dialogs and small frames still float after a title latch") {
+        for small in [false, true] {
+            var h = Harness()
+            h.census(1, [ObservedWindow(id: TileID(99001), pid: 99001, bundleID: nil, title: "Document"), window(2, x: 600)])
+            let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), probe = TitleFlickerProbeWindow(), clock = ScopeClock()
+            clock.current = h.world.stamp
+            let worker = AppWorker(app: app, windows: [99001: probe], clock: clock, send: box.append)
+            let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                    managed: { [99001, 2] }, elsewhere: { [] }, paused: { false }, emit: { event, _ in h.send(event) }, log: { _ in })
+            observer.clock.current = clock.current
+            probe.retitle("", subrole: small ? "AXStandardWindow" : "AXSystemDialog", width: small ? 200 : 500)
+            worker.refreshClassifications([99001]); app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            check(h.world.groups[1]!.floating == [TileID(99001)] && h.tiles == [TileID(2)], "positive structural floating facts remain effective with an empty title")
+            probe.retitle("Document")
+            worker.refreshClassifications([99001]); app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            check(h.world.groups[1]!.floating.isEmpty && h.tiles == [TileID(2), TileID(99001)], "a genuine structural return to tileable facts can re-tile")
+            check(h.world.check().isEmpty, "structural transitions preserve invariants")
+        }
+    }
+    section("Review B6 settled minimum width preserves preset cycling") {
+        var h = Harness()
+        h.census(1, [window(1)])
+        let expectedWidths = [330.0, 500.0, 670.0, 330.0]
+        for (cycle, expected) in expectedWidths.enumerated() {
+            h.send(.command(.cycleWidthPreset, .keyboard))
+            let request = h.world.frames[TileID(1)]!
+            check(request.frame.rect.width == expected, "cycle reaches each configured preset despite prior minimum-width refusal")
+            check(h.world.groups[1]!.strip.columns[0].presetIndex == cycle % 3, "cycle records the next preset index")
+            var landed = request.frame.rect
+            landed.size.width = max(expected, 650)
+            h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: .applied, landed: AXRect(landed)))
+            check(h.world.groups[1]!.strip.columns[0].presetIndex == cycle % 3, "settled app feedback retains the selected preset")
+            check(h.world.groups[1]!.strip.columnData[0].cachedWidth == max(expected, 650), "logical width respects the settled minimum")
+        }
+        h.send(.windowMoved(TileID(1), AXRect(CGRect(x: 100, y: 30, width: 720, height: 800))))
+        check(h.world.groups[1]!.strip.columns[0].presetIndex == nil, "a genuine manual resize still clears preset selection")
+        check(h.world.check().isEmpty, "constraint feedback and manual resize preserve invariants")
+    }
+    section("Review A4 managed return cancels the unmanaged fade before idle") {
+        let frame = CGRect(x: 100, y: 200, width: 500, height: 600)
+        for snap in [false, true] {
+            for changed in [false, true] {
+                let indicator = FocusIndicator()
+                indicator.overlaySuppressed = true
+                indicator.snapTo(frame: frame)
+                check(indicator.fadeOut(), "unmanaged activation starts a headless fade")
+                indicator.tick(time: TimeUtil.now() + 0.05)
+                check(indicator.opacity < 1, "the unmanaged fade has reduced opacity")
+                let target = changed ? frame.offsetBy(dx: 20, dy: 0) : frame
+                if snap { indicator.snapTo(frame: target) } else { indicator.trackFrame(target) }
+                check(indicator.opacity == 1, "managed return restores ring opacity for snap and tracking")
+                check(!indicator.isAnimating, "managed return cancels the old fade without new animation")
+                indicator.tick(time: TimeUtil.now() + 1)
+                check(indicator.currentFrame == target && indicator.opacity == 1 && !indicator.isAnimating,
+                      "an idle Loop can pause with the managed ring visible after the old deadline")
+            }
+        }
+    }
+    section("Review A4 managed return does not restart a completed flash") {
+        let indicator = FocusIndicator()
+        indicator.overlaySuppressed = true
+        var config = FocusIndicatorConfig()
+        config.style = .flash
+        indicator.reloadConfig(config)
+        let frame = CGRect(x: 100, y: 200, width: 500, height: 600)
+        indicator.snapTo(frame: frame)
+        indicator.tick(time: TimeUtil.now() + 1)
+        check(indicator.opacity == 0 && !indicator.isAnimating, "flash finishes at zero opacity")
+        check(indicator.fadeOut(), "unmanaged transition can arrive after the flash finished")
+        indicator.trackFrame(frame)
+        indicator.tick(time: TimeUtil.now() + 1)
+        check(indicator.currentFrame == frame && indicator.opacity == 0 && !indicator.isAnimating,
+              "completed flash keeps its frame without a stale fade or a permanent tint")
+    }
+    section("Review A3 destination census confirms only a committed foreground tile") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 101)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+        loop.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
+                                windows: [window(1, app: 101), window(2, app: 101)], frontmost: TileID(1)))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "committed census confirms the OS-focused managed tile")
+        loop.send(.spaceChanged(key: .skylight(1), epoch: loop.world.groups[1]!.epoch,
+                                windows: [window(1, app: 101), window(2, app: 101)], frontmost: TileID(2)))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "rejected duplicate census cannot replace confirmed focus")
+    }
+    section("Review A3 background selection preserves the confirmed foreground ring") {
+        for otherDisplay in [false, true] {
+            var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
+            h.census(1, [window(1, app: 101), window(2, app: 101)])
+            if otherDisplay { h.census(2, [window(3, app: 303, x: 1100)], group: 2) }
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-review-unused-config", "REEL_STATE_DIR": "/tmp/reel-review-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }, memberships: { _ in nil }), effects: { _ in })
+            loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "confirmed A1, not the other same-pid tile, owns the ring")
+            loop.send(.windowAdded(window(4, app: 404, x: otherDisplay ? 1200 : 100), frontmost: false), group: otherDisplay ? 2 : 1)
+            check(loop.focusedTile == TileID(4), "background adoption still selects its own layout tile")
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "background selection cannot replace A1's foreground ring")
+            check(loop.indicatorFocus(frontmostPID: 404) == nil, "unconfirmed background tile cannot acquire the ring")
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 101, source: .axFocus)), stamp: Stamp(revision: 0, epochs: [1: 0]))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "stale observation cannot replace confirmed focus")
+            loop.send(.focus(FocusIntent(tile: TileID(2), pid: 101, source: .axFocus)))
+            check(loop.indicatorFocus(frontmostPID: 101) == TileID(2), "fresh OS focus changes the ring within the same app")
+            loop.send(.windowRemoved(TileID(2)))
+            check(loop.indicatorFocus(frontmostPID: 101) == nil, "removed confirmed tile no longer owns a ring")
+        }
+    }
+    section("Review A2 background adoption preserves a pending genuine activation") {
+        for otherDisplay in [false, true] {
+            var h = Harness(displays: otherDisplay ? [display(), display(2, x: 1000)] : [display()])
+            h.census(1, [window(1, app: 101), window(2, app: 202)])
+            if otherDisplay { h.census(2, [window(3, app: 303, x: 1100)], group: 2) }
+            h.send(.command(.focus(TileID(2)), .keyboard))
+            let app = QueuedFocusApp(pid: 101, focused: 1), box = FocusObservationBox()
+            let worker = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: ScopeClock(), focusSpace: { _ in nil }, send: box.append)
+            let executor = Executor(worker: { _ in worker }, log: { _ in })
+            executor.synchronizeFocus(with: h.world, paused: false)
+            var reasons: [String] = []
+            let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2, 3, 4] }, elsewhere: { [] }, paused: { false },
+                                    emit: { event, _ in h.send(event); executor.synchronizeFocus(with: h.world, paused: false) }, log: { reasons.append($0) })
+            observer.workers[101] = worker
+            observer.clock.current = h.world.stamp
+            observer.activated(101)
+            h.send(.windowAdded(window(4, app: 404, x: otherDisplay ? 1200 : 100), frontmost: false), group: otherDisplay ? 2 : 1)
+            executor.synchronizeFocus(with: h.world, paused: false)
+            app.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            h.advance(EngineConfig.focusDebounce + margin)
+            check(!reasons.contains { $0.contains("superseded-activation") }, "background adoption cannot revoke the pending foreground read")
+            check(h.world.activeGroup == 1 && h.active == TileID(1), "Dock focus returns to A after unrelated background adoption")
+        }
+    }
+    section("Review A1 cancelled focus cannot debounce a genuine Dock click") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 101), window(3, app: 202)])
+        h.send(.command(.focus(TileID(3)), .keyboard))
+        let app = QueuedFocusApp(pid: 101, focused: 2), box = FocusObservationBox()
+        let a1 = FocusProbeWindow(1, pid: 101), a2 = FocusProbeWindow(2, pid: 101)
+        let worker = AppWorker(app: app, windows: [1: a1, 2: a2], clock: ScopeClock(), focusSpace: { _ in nil }, send: box.append)
+        let executor = Executor(worker: { _ in worker }, log: { _ in }, now: { 1 })
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2, 3] }, elsewhere: { [] }, paused: { false },
+                                emit: { event, _ in h.send(event); executor.synchronizeFocus(with: h.world, paused: false) }, log: { _ in })
+        observer.workers[101] = worker
+        observer.clock.current = h.world.stamp
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        executor.synchronizeFocus(with: h.world, paused: false)
+        executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!)
+        executor.raise(TileID(1), pid: 101)
+        observer.activated(101)
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(a1.focusCount == 0 && a1.raiseCount == 0, "Dock cancels A1 before its queued focus or raise executes")
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(2), "genuine Dock-selected A2 wins over the never-executed A1 decision")
+    }
+    section("Review A1 a second activation survives a consumed executed ticket") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 101)])
+        let app = QueuedFocusApp(pid: 101, focused: 2), box = FocusObservationBox()
+        let a1 = FocusProbeWindow(1, pid: 101)
+        let worker = AppWorker(app: app, windows: [1: a1, 2: FocusProbeWindow(2, pid: 101)], clock: ScopeClock(), focusSpace: { _ in nil }, send: box.append)
+        let executor = Executor(worker: { _ in worker }, log: { _ in }, now: { 1 })
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { event, _ in h.send(event); executor.synchronizeFocus(with: h.world, paused: false) }, log: { _ in })
+        observer.workers[101] = worker
+        observer.clock.current = h.world.stamp
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        executor.synchronizeFocus(with: h.world, paused: false)
+        executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!)
+        app.drain()
+        observer.activated(101)
+        check(box.drain().isEmpty && a1.focusCount == 1, "first activation consumes the executed ticket without a read")
+        observer.activated(101)
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(2), "second same-pid activation is genuine after the ticket was consumed")
+    }
+    section("Audit A Dock: cross-Space Fork click beats saved destination focus") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(animate: false, snapPoints: [.middle])))
+        let kitty = window(321, app: 9001, bundle: "net.kovidgoyal.kitty")
+        let fork = window(104, app: 1245, bundle: "com.DanPristupov.Fork")
+        h.census(5, [fork, window(105)])
+        h.send(.command(.focus(TileID(105)), .keyboard))
+        h.census(4, [kitty])
+        h.send(.command(.focus(TileID(321)), .keyboard))
+        h.send(.focus(FocusIntent(tile: nil, pid: 1245, source: .appActivation)), advance: 0.1)
+        h.send(.spaceWillChange)
+        h.send(.spaceChanged(key: .skylight(5), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [fork, window(105)], frontmost: TileID(105)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(104), "cross-Space Dock click selects Fork instead of the saved tile")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "cross-Space Dock click only scrolls Fork")
+        check(h.world.frames[TileID(104)].map { abs($0.frame.rect.midX - 500) < 1 } ?? false, "Fork lands in the middle snap")
+    }
+    section("Audit A adoption: foreground late title may focus, background late title may not") {
+        for frontmost in [false, true] {
+            var h = Harness()
+            h.census(1, [window(1), window(2, floating: true)])
+            h.send(.windowChanged(window(2), frontmost: frontmost))
+            let focused = h.effects.contains { if case .focus(TileID(2), .adoption) = $0 { true } else { false } }
+            check(!focused, "late-title adoption never repeats OS focus")
+        }
+    }
+    section("Audit A activation: a report with no original scope cannot borrow a later scope") {
+        let app = QueuedFocusApp(pid: 101, focused: 1), box = FocusObservationBox()
+        var emitted = 0
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [1] }, elsewhere: { [] }, paused: { false }, emit: { _, _ in emitted += 1 }, log: { _ in })
+        observer.workers[101] = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.activated(101)
+        observer.clock.current = Stamp(revision: 1, epochs: [1: 1])
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(emitted == 0, "scope-less activation cannot emit after the clock becomes valid")
+    }
+
+    section("Audit A return: current OS focus beats a stale saved window") {
+        var h = Harness()
+        h.census(1, [window(1), window(2)])
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.census(2, [window(3)])
+        h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [window(1), window(2)], frontmost: TileID(2)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "Space return prefers the OS's current managed window")
+        check(!h.effects.contains { if case .focus(TileID(1), _) = $0 { true } else { false } }, "return cannot reassert stale saved focus")
+    }
+    section("Audit A return: a held Dock click wins over the sampled OS focus") {
+        var h = Harness()
+        h.census(1, [window(1), window(2)])
+        h.census(2, [window(3)])
+        h.send(.focus(FocusIntent(tile: nil, pid: 2, source: .appActivation)))
+        h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [window(1), window(2)], frontmost: TileID(1)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "explicit held click precedes census focus")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "held crossing only selects the clicked app")
+    }
+    section("Audit A return: frontmost on another display cannot override the destination strip") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(1, [window(1), window(2)])
+        h.census(10, [window(10, x: 1100)], group: 2)
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.census(2, [window(3)])
+        h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1,
+                             windows: [window(1), window(2)], frontmost: TileID(10)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(1), "foreign display focus is not adopted into this strip")
+    }
+
+    section("Audit A indicator: unmanaged frontmost clears the managed ring target") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101)])
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(), effects: { _ in })
+        loop.send(.focus(FocusIntent(tile: TileID(1), pid: 101, source: .axFocus)))
+        check(loop.indicatorFocus(frontmostPID: 101) == TileID(1), "managed frontmost retains indicator")
+        check(loop.indicatorFocus(frontmostPID: 999) == nil, "unmanaged frontmost has no ring target")
+        check(loop.indicatorFocus(frontmostPID: nil) == nil, "unknown frontmost has no ring target")
+        var notified: [Int32] = []
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [] }, elsewhere: { [] }, paused: { false }, emit: { _, _ in }, log: { _ in },
+                                onActivation: { notified.append($0) })
+        observer.activated(999)
+        check(notified == [999], "untracked activation still refreshes the indicator")
+    }
+    section("Audit A resume: health reconciliation runs while writes are still paused") {
+        let h = Harness()
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(), effects: { _ in })
+        loop.changePauseState(true) {}
+        var held = false
+        loop.changePauseState(false) { held = loop.paused }
+        check(held && !loop.paused, "resume reconciles under pause, then releases writes")
+    }
+    section("Audit A adoption: background decision does not suppress the real frontmost AX read") {
+        var h = Harness()
+        h.census(1, [window(1)])
+        h.send(.windowAdded(window(2)))
+        h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)), advance: 0.05)
+        h.advance(0.2)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(1), "unwritten adoption has no OS echo to protect")
+    }
+
+    for (name, delay, twice, expected) in [("executed A echo after B", 0.10, false, UInt32(2)),
+                                          ("matching echo is consumed once", 0.10, true, UInt32(1)),
+                                          ("expired echo is a real activation", 0.20, false, UInt32(1))] {
+        section("Audit A echo: " + name) {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 102)])
+            let clock = ScopeClock(), time = FocusTestClock(), box = FocusObservationBox()
+            clock.current = h.world.stamp
+            let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
+            let workers = [Int32(101): AppWorker(app: a, windows: [1: FocusProbeWindow(1, pid: 101)], clock: clock, focusSpace: { _ in nil }, send: box.append),
+                           Int32(102): AppWorker(app: b, windows: [2: FocusProbeWindow(2, pid: 102)], clock: clock, focusSpace: { _ in nil }, send: box.append)]
+            let executor = Executor(worker: { workers[$0] }, log: { _ in }, now: { time.time })
+            let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                    emit: { kind, _ in h.send(kind) }, log: { _ in })
+            observer.workers = workers
+            observer.clock.current = h.world.stamp
+            executor.synchronizeFocus(with: h.world, paused: false)
+            h.send(.command(.focus(TileID(1)), .keyboard)); executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!); a.drain()
+            h.send(.command(.focus(TileID(2)), .keyboard)); executor.focus(TileID(2), pid: 102, scope: h.world.scope(for: 1)!); b.drain()
+            time.time = 100 + delay
+            observer.activated(101); a.drain()
+            box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+            h.advance(0.3)
+            if twice {
+                observer.activated(101); a.drain()
+                box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+                h.advance(0.3)
+            }
+            check(h.world.groups[1]?.focus.decision?.tile == TileID(expected), "executed-focus echo policy: " + name)
+        }
+    }
+
+    section("Audit A echo: stale echo cannot supersede a pending real Dock click") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 102)])
+        let box = FocusObservationBox(), time = FocusTestClock(), clock = ScopeClock()
+        clock.current = h.world.stamp
+        let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
+        let workers = [Int32(101): AppWorker(app: a, windows: [1: FocusProbeWindow(1, pid: 101)], clock: clock, focusSpace: { _ in nil }, send: box.append),
+                       Int32(102): AppWorker(app: b, windows: [2: FocusProbeWindow(2, pid: 102)], clock: clock, focusSpace: { _ in nil }, send: box.append)]
+        let executor = Executor(worker: { workers[$0] }, log: { _ in }, now: { time.time })
+        executor.synchronizeFocus(with: h.world, paused: false)
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!); a.drain()
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in h.send(kind) }, log: { _ in })
+        observer.clock.current = h.world.stamp
+        observer.workers = workers
+        observer.activated(102)
+        observer.activated(101) // a real OS echo of the executed A work, not a newer user decision
+        b.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(0.3)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "echo cannot revoke B's still-pending activation read")
+    }
+    section("Audit A routing: activation starts on settled epoch and named tile uses its own display") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1, app: 101)])
+        h.census(20, [window(2, app: 102, x: 1100)], group: 2)
+        let box = FocusObservationBox(), app = QueuedFocusApp(pid: 101, focused: 1)
+        var intents: [FocusIntent] = []
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in if case .focus(let intent) = kind { intents.append(intent) } },
+                                log: { _ in })
+        observer.clock.current = h.world.stamp
+        observer.workers[101] = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock,
+                                          focusSpace: { frame in frame == nil ? nil : .skylight(10) }, send: box.append)
+        observer.activated(101)
+        check(intents.first?.observedSpace == nil, "unnamed activation must not use destination/main-display Space")
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(intents.last?.observedSpace == .skylight(10), "named activation reads the tile's frame-local Space")
+    }
+
+    section("Audit A routing: missing tile geometry cannot borrow the main-display Space") {
+        let app = QueuedFocusApp(pid: 101, focused: 1), box = FocusObservationBox()
+        var intents: [FocusIntent] = []
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [1] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in if case .focus(let intent) = kind { intents.append(intent) } }, log: { _ in })
+        observer.clock.current = Stamp(revision: 1, epochs: [1: 1])
+        observer.workers[101] = AppWorker(app: app, windows: [:], clock: observer.clock, focusSpace: { _ in .skylight(20) }, send: box.append)
+        observer.activated(101); app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(intents.count == 2 && intents.last?.observedSpace == nil, "missing frame uses the activation epoch, not a global Space key")
+    }
+    section("Audit A activation: a newer explicit focus decision revokes a pending Dock read") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 102)])
+        let box = FocusObservationBox(), app = QueuedFocusApp(pid: 102, focused: 2)
+        let executor = Executor(worker: { _ in nil }, log: { _ in })
+        executor.synchronizeFocus(with: h.world, paused: false)
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in h.send(kind) }, log: { _ in })
+        observer.clock.current = h.world.stamp
+        observer.workers[102] = AppWorker(app: app, windows: [2: FocusProbeWindow(2, pid: 102)], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.activated(102)
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        executor.synchronizeFocus(with: h.world, paused: false)
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(0.3)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(1), "newer explicit decision supersedes the pending Dock read")
+    }
+    section("Audit A activation: slow app read cannot supersede a newer activation") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 102)])
+        let box = FocusObservationBox()
+        let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
+        let executor = Executor(worker: { _ in nil }, log: { _ in })
+        let observer = Observer(executor: executor, allowedPids: nil, managed: { [1, 2] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in h.send(kind) }, log: { _ in })
+        observer.clock.current = h.world.stamp
+        observer.workers[101] = AppWorker(app: a, windows: [1: FocusProbeWindow(1, pid: 101)], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.workers[102] = AppWorker(app: b, windows: [2: FocusProbeWindow(2, pid: 102)], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.activated(101)
+        observer.activated(102)
+        b.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(0.3)
+        a.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        h.advance(0.3)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "slow superseded activation cannot refocus A")
+    }
+    for change in ["decision", "pause", "Space begin", "Space commit", "topology", "stale topology", "stale epoch"] {
+        section("Audit A queued scope: " + change) {
+            var h = Harness()
+            h.census(1, [window(1, app: 101), window(2, app: 102)])
+            let clock = ScopeClock(), app = QueuedFocusApp(pid: 101, focused: 1), window = FocusProbeWindow(1, pid: 101)
+            let worker = AppWorker(app: app, windows: [1: window], clock: clock, send: { _, _ in })
+            let executor = Executor(worker: { _ in worker }, log: { _ in })
+            executor.synchronizeFocus(with: h.world, paused: false)
+            let scope = h.world.scope(for: 1)!
+            executor.focus(TileID(1), pid: 101, scope: EventScope(topologyRevision: change == "stale topology" ? 0 : scope.topologyRevision, group: 1, spaceEpoch: change == "stale epoch" ? 0 : scope.spaceEpoch))
+            executor.raise(TileID(1), pid: 101)
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(), executor: executor, effects: { _ in })
+            switch change {
+            case "decision": loop.send(.command(.focus(TileID(2)), .keyboard))
+            case "pause": executor.invalidateFocus()
+            case "Space begin": loop.send(.spaceWillChange)
+            case "Space commit": loop.send(.spaceChanged(key: .skylight(2), epoch: 2, windows: [ObservedWindow(id: TileID(3), pid: 103, bundleID: nil)]))
+            case "topology": loop.send(.topologyChanged(topology(2, [display()])))
+            default: break
+            }
+            app.drain()
+            check(window.focusCount == 0 && window.raiseCount == 0, "queued work is rejected after " + change)
+        }
+    }
+    section("Audit A queued focus: old app-thread focus and raise cannot outlive newer focus") {
+        let clock = ScopeClock()
+        let a = QueuedFocusApp(pid: 101, focused: 1), b = QueuedFocusApp(pid: 102, focused: 2)
+        let wa = FocusProbeWindow(1, pid: 101), wb = FocusProbeWindow(2, pid: 102)
+        let workers = [Int32(101): AppWorker(app: a, windows: [1: wa], clock: clock, send: { _, _ in }),
+                       Int32(102): AppWorker(app: b, windows: [2: wb], clock: clock, send: { _, _ in })]
+        let executor = Executor(worker: { workers[$0] }, log: { _ in })
+        var h = Harness()
+        h.census(1, [window(1, app: 101), window(2, app: 102)])
+        executor.synchronizeFocus(with: h.world, paused: false)
+        executor.focus(TileID(1), pid: 101, scope: h.world.scope(for: 1)!)
+        executor.raise(TileID(1), pid: 101)
+        executor.focus(TileID(2), pid: 102, scope: h.world.scope(for: 1)!)
+        executor.raise(TileID(2), pid: 102)
+        b.drain(); a.drain()
+        check(wa.focusCount == 0 && wa.raiseCount == 0, "stale queued focus and raise must be discarded")
+        check(wb.focusCount == 1 && wb.raiseCount == 1, "new queued focus and raise must execute")
+    }
+
+    section("Audit A adoption: background addition centres without stealing OS focus") {
+        var h = Harness()
+        h.census(1, [window(1)])
+        h.send(.windowAdded(window(2)))
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "adoption still selects the new column")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "background adoption must not activate its app")
+        check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "background adoption must not raise")
+    }
+    section("Audit A adoption: frontmost addition is allowed to activate") {
+        var h = Harness()
+        h.census(1, [window(1)])
+        h.send(.windowAdded(window(2), frontmost: true))
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "frontmost adoption only scrolls")
+        check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "frontmost adoption never raises")
+    }
+    section("Audit A unhide: nil-tile Dock crossing is fulfilled by its pid") {
+        var h = Harness()
+        h.census(1, [window(1), window(2, app: 200)])
+        h.send(.windowsHidden([TileID(2)]))
+        h.send(.focus(FocusIntent(tile: nil, pid: 200, source: .appActivation)))
+        h.send(.windowAdded(window(2, app: 200)), advance: 0.2)
+        check(h.world.groups[1]?.focus.decision?.tile == TileID(2), "unhidden clicked app fulfills nil-tile crossing")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "unhide fulfills the Dock decision without refocusing the OS")
+    }
+    section("R7 focus: a Dock click within 100 ms brings Fork into the middle snap") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(animate: false, snapPoints: [.middle])))
+        h.census(4, [window(321, app: 9001, bundle: "net.kovidgoyal.kitty"), window(104, app: 1245, bundle: "com.DanPristupov.Fork")])
+        h.send(.command(.focus(TileID(321)), .keyboard))
+        h.send(.command(.moveLeft, .keyboard))
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.focus(FocusIntent(tile: TileID(321), pid: 9001, source: .appActivation)))
+        h.advance(EngineConfig.focusDebounce)
+        check(h.world.groups[1]!.focus.decision?.source == .appActivation && h.active == TileID(321), "kitty activation has committed")
+        let before = h.world.frames[TileID(104)]!.frame.rect
+        check(before.minX < 1000 && before.maxX > 1000, "Fork starts partly off the right edge")
+        h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation)), advance: 0.1)
+        h.advance(EngineConfig.focusDebounce)
+        check(h.active == TileID(104), "different-pid Fork activation is not a stale kitty echo")
+        check(h.world.groups[1]!.focus.decision?.source == .appActivation, "Fork is committed as an activation, not a keyboard focus")
+        check(h.offset == -250, "incremental snap centres Fork at the middle-only snap")
+        check(h.world.frames[TileID(104)]!.frame.rect == CGRect(x: 250, y: 30, width: 500, height: 800), "Fork is fully in view with its centre at x=500")
+    }
+    section("R7 focus: an absent app activation still crosses Spaces after a recent kitty decision") {
+        var h = Harness()
+        h.census(4, [window(321, app: 9001)])
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.focus(FocusIntent(tile: TileID(321), pid: 9001, source: .appActivation)))
+        h.advance(EngineConfig.focusDebounce)
+        h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation, observedSpace: .skylight(4))), advance: 0.1)
+        if case .crossing(let intent, _, _) = h.world.groups[1]!.focus {
+            check(intent.tile == TileID(104) && intent.pid == 1245, "Fork's later activation is held for the destination census")
+        } else { check(false, "the absent Fork activation crosses Spaces") }
+        h.send(.spaceWillChange)
+        h.census(5, [window(104, app: 1245)])
+        check(h.active == TileID(104) && h.world.groups[1]!.focus.decision?.source == .appActivation,
+              "the crossing census commits Fork, not the earlier kitty activation")
+    }
+    section("R7 focus: genuine same-app activation wins while AX echoes drop with diagnostics") {
+        for source in [FocusSource.appActivation, .axFocus] {
+            var h = Harness()
+            h.census(4, [window(321, app: 9001), window(322, app: 9001), window(104, app: 1245)])
+            h.send(.command(.focus(TileID(321)), .keyboard))
+            let tile = source == .appActivation ? TileID(322) : TileID(104)
+            let pid: Int32 = source == .appActivation ? 9001 : 1245
+            h.send(.focus(FocusIntent(tile: tile, pid: pid, source: source)), advance: 0.1)
+            h.advance(EngineConfig.focusDebounce)
+            if source == .appActivation {
+                check(h.active == TileID(322), "activation without an executed echo ticket replaces the keyboard decision")
+                check(h.world.groups[1]?.focus.decision?.source == .appActivation, "same-app activation commits as observed focus")
+            } else {
+                check(h.active == TileID(321), "AX echo cannot replace keyboard focus")
+                check(h.logged("focus dropped source=axFocus tile=104 pid=1245 reason=debounce"), "AX rejection identifies its source, tile, pid and reason")
+            }
+        }
+    }
+    section("R7 focus: rejected AX echoes preserve timers, newer Dock activations cancel them") {
+        var h = Harness()
+        h.census(4, [window(321, app: 9001), window(104, app: 1245)])
+        h.send(.command(.focus(TileID(321)), .keyboard))
+        h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation)), advance: 0.1)
+        let pending = Set(h.world.timers.keys)
+        h.send(.focus(FocusIntent(tile: TileID(321), pid: 9001, source: .axFocus)))
+        check(Set(h.world.timers.keys) == pending, "a rejected AX echo leaves Fork's pending scroll intact")
+        h.send(.focus(FocusIntent(tile: nil, pid: 1245, source: .appActivation)))
+        check(h.world.timers.isEmpty, "a newer Dock click revokes the previous scroll")
+        check(h.logged("focus dropped source=appActivation tile=nil pid=1245 reason=missing-tile"), "a tile-less report is diagnosed without guessing its window")
+        h.advance(EngineConfig.focusDebounce)
+        check(h.active == TileID(321), "a cancelled timer cannot change the strip decision")
+    }
+    section("an unvisited Space starts at its final viewport instead of animating from offset zero") {
+        var h = Harness(animate: true)
+        h.census(4, [window(1), window(2)])
+        check(!h.world.needsTicks, "first Space layout is already settled")
+        check(h.requests.allSatisfy { !$0.animating }, "first Space frames do not add a post-switch scroll animation")
+        h.send(.spaceWillChange)
+        h.census(5, [window(3), window(4)])
+        check(!h.world.needsTicks, "unvisited destination has no invented previous viewport")
+        check(h.requests.allSatisfy { !$0.animating }, "unvisited Space frames are final")
+        h.send(.command(.focusRight, .keyboard))
+        check(h.world.needsTicks, "real focus changes still animate")
+    }
+    section("a settled size confirmation uses the scoped frame retry timer") {
+        var h = Harness()
+        h.census(4, [window(1), window(2)])
+        let first = h.requests.first!
+        h.send(.frameCompleted(tile: first.tile, revision: first.revision, result: .sizeUnconfirmed))
+        check(h.world.timers.count == 1, "one deferred confirmation is scheduled")
+        h.advance(EngineConfig.frameRetryDelay + margin)
+        let retry = h.requests.first { $0.tile == first.tile }
+        check(retry != nil && retry!.revision > first.revision && !retry!.animating, "a new settled write confirms the actual kept size")
+        h.send(.frameCompleted(tile: first.tile, revision: first.revision, result: .sizeUnconfirmed))
+        check(h.world.timers.isEmpty, "a stale completion cannot schedule another resize")
+        h.send(.frameCompleted(tile: first.tile, revision: retry!.revision, result: .sizeUnconfirmed))
+        h.send(.spaceWillChange)
+        check(h.world.timers.isEmpty, "Space teardown cancels pending confirmation")
+    }
+    section("animation ends with a settled size-confirming frame request") {
+        var h = Harness(animate: true)
+        h.census(1, [window(1), window(2), window(3)])
+        h.send(.command(.focusRight, .keyboard))
+        check(h.requests.contains { $0.animating }, "moving frames carry animation ownership")
+        h.send(.tick, advance: 10)
+        check(!h.requests.isEmpty, "settle emits a final frame even when geometry matches the previous tick")
+        check(h.requests.allSatisfy { !$0.animating }, "final frames permit size retry")
+        let frames = h.world.frames
+        h.send(.command(.recover, .ipc))
+        check(h.requests.allSatisfy { !$0.animating }, "recover permits size retry")
+        check(!frames.isEmpty, "settle retains current frame revisions")
+    }
     section("2d4bb1d: mixed and empty census preserve both Space stashes") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
@@ -187,15 +1191,16 @@ struct Harness {
         h.census(20, [window(4)])
         h.send(.timer(deferred), scope: old)
         let staleEffects = h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)), scope: old)
-        check(staleEffects.isEmpty, "old-epoch focus produces no effects")
+        check(staleEffects.count == 1 && h.logged("focus dropped source=axFocus tile=1 pid=nil reason=stale-scope"),
+              "old-epoch focus produces only its diagnostic")
         h.census(10, [window(1), window(2), window(3)])
         check(h.active == TileID(3), "echo did not change saved active column")
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         h.advance(EngineConfig.focusDebounce + margin)
-        check(h.active == TileID(3), "post-restore echo rejected on receipt, not after debounce")
+        check(h.active == TileID(1), "without executed restore focus an AX report is not an echo")
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus, observedSpace: .skylight(20))))
         h.advance(EngineConfig.focusDebounce + margin)
-        check(h.active == TileID(3), "AX focus from a different observed identity cannot beat delayed Space notification")
+        check(h.active == TileID(1), "AX focus from a different observed identity leaves the accepted decision intact")
         check(h.world.check().isEmpty, "focus echo invariants")
     }
     section("e3e6267 0ea87ee: cross-Space app activation wins once; local or arriving activation does not") {
@@ -228,8 +1233,8 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
         h.send(.command(.focus(TileID(1)), .ipc))
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(50)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(50)))
         h.send(.pointer(.cancel))
         let prior = h.offset
         h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .appActivation)))
@@ -264,10 +1269,10 @@ struct Harness {
     section("abf1b87 d227a21: adoption and Space observation cancel old gesture and focus latches") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(90)))
-        h.send(.pointer(.beginGesture(TileID(999))))
-        check(h.world.pointer.token == nil, "rejected gesture resets idle")
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(90)))
+        h.send(.pointer(.drop(0)))
+        check(h.world.pointer?.token == nil, "an out-of-order input resets idle")
         if case .gesture = h.world.groups[1]!.strip.viewOffset { check(false, "reject left gesture latch") }
         h.advance(EngineConfig.focusDebounce + margin)
         h.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
@@ -276,48 +1281,49 @@ struct Harness {
         check(h.world.timers.isEmpty, "adoption cancels deferred old focus")
         h.send(.timer(timer), advance: EngineConfig.focusDebounce + margin)
         check(h.active == TileID(3), "late pre-adoption focus cannot win")
-        h.send(.pointer(.beginGesture(TileID(3))))
+        h.send(.pointer(began))
         h.send(.spaceWillChange)
-        check(h.world.pointer.token == nil, "observed Space change cancels immediately")
+        check(h.world.pointer?.token == nil, "observed Space change cancels immediately")
     }
     section("eebb564: menu commands retain open-time target after active column changes") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.send(.pointer(.openMenu(TileID(1))))
+        h.openMenu(TileID(1))
         h.send(.command(.focus(TileID(2)), .ipc))
-        h.send(.pointer(.menu(.setWidth(TileID(2), 333))))
+        h.send(.pointer(.choose(.setWidth(TileID(2), 333))))
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(333), "menu acts on captured tile")
         check(h.world.groups[1]!.strip.columns[1].width != .fixed(333), "later active tile unchanged")
-        check(h.world.pointer.token == nil, "menu consumed")
+        check(h.world.pointer?.token == nil, "menu consumed")
     }
     section("eebb564: late menu and reorder callbacks cannot act on a replacement session") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.send(.pointer(.openMenu(TileID(1))))
-        let oldMenu = h.world.pointer.token!
-        h.send(.pointer(.openMenu(TileID(2))))
-        let newMenu = h.world.pointer.token!
-        h.send(.pointer(.menu(.setWidth(TileID(1), 311)), session: oldMenu))
-        check(h.effects.isEmpty && h.world.pointer.token == newMenu, "old menu callback cannot mutate or cancel new menu")
+        h.openMenu(TileID(1))
+        let oldMenu = h.world.pointer!.token
+        h.openMenu(TileID(2))
+        let newMenu = h.world.pointer!.token
+        h.send(.pointer(.choose(.setWidth(TileID(1), 311)), session: oldMenu))
+        check(h.effects.isEmpty && h.world.pointer?.token == newMenu, "old menu callback cannot mutate or cancel new menu")
         check(h.world.groups[1]!.strip.columns.allSatisfy { $0.width != .fixed(311) }, "stale callback touches neither tile")
-        h.send(.pointer(.menu(.setWidth(TileID(1), 322)), session: newMenu))
+        h.send(.pointer(.choose(.setWidth(TileID(1), 322)), session: newMenu))
         check(h.world.groups[1]!.strip.columns[1].width == .fixed(322), "current menu still acts on captured target")
-        h.send(.pointer(.beginReorder(TileID(1))))
-        let oldDrag = h.world.pointer.token!
-        h.send(.pointer(.beginReorder(TileID(2))))
-        let newDrag = h.world.pointer.token!
-        h.send(.pointer(.dropReorder(0), session: oldDrag))
-        check(h.tiles == [TileID(1), TileID(2)] && h.world.pointer.token == newDrag, "late drop cannot commit new drag")
+        h.beginReorder(TileID(1))
+        let oldDrag = h.world.pointer!.token
+        h.beginReorder(TileID(2))
+        let newDrag = h.world.pointer!.token
+        h.send(.pointer(.release(AXPoint(.zero)), session: oldDrag))
+        h.send(.pointer(.drop(0), session: oldDrag))
+        check(h.tiles == [TileID(1), TileID(2)] && h.world.pointer?.token == newDrag, "late drop cannot commit new drag")
     }
     section("5753fc0: topology revision invalidates gesture, overlay, queued frames and stale events") {
         var h = Harness(displays: [display(), display(2, x: 1000)])
         h.census(10, [window(1)])
         h.census(10, [window(2)], group: 2)
-        h.send(.pointer(.openMenu(TileID(1))))
+        h.openMenu(TileID(1))
         let old = h.world.scope(for: 1)!
         let oldFrame = h.world.frames[TileID(1)]!
         h.send(.topologyChanged(topology(2, [display()])))
-        check(h.world.pointer.token == nil, "topology cancels overlay")
+        check(h.world.pointer?.token == nil, "topology cancels overlay")
         check(Set(h.tiles) == Set([TileID(1), TileID(2)]), "hot-unplug migrates windows")
         let staleEffects = h.send(.windowRemoved(TileID(1)), scope: old)
         check(staleEffects.count == 1 && h.logged("stale topology revision dropped rev=1 current=2"),
@@ -331,41 +1337,45 @@ struct Harness {
         var h = Harness(animate: true)
         h.census(10, [window(1), window(2)])
         h.send(.command(.setWidth(TileID(1), 650), .ipc))
-        h.send(.pointer(.beginGesture(TileID(1))))
-        let targets = h.gesture!.snapTargets
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(1)))
         h.send(.command(.setWidth(TileID(1), 350), .ipc))
-        h.send(.pointer(.delta(400)))
+        h.send(.command(.setWidth(TileID(2), 300), .ipc))
+        check(h.gesture != nil && h.active == TileID(1), "width changes leave the swipe on the first column")
+        h.send(.pointer(swipe(399)))
         let strip = h.world.groups[1]!.strip
         let shift = strip.columnX(at: 0, time: h.time + 0.01) - strip.columnX(at: 1, time: h.time + 0.01)
-        h.send(.pointer(.endGesture))
+        let lifted = h.offset
+        h.send(.pointer(lift))
         check(h.world.groups[1]!.strip.activeColumnIndex == 1, "release lands on the next column")
         if case .animation(let release) = h.world.groups[1]!.strip.viewOffset {
-            check(abs(release.to - shift - targets[1]) < 0.001, "release targets the captured column boundary, not a new-width grid")
+            check(abs(release.from - lifted - shift) < 0.001, "the spring starts where the fingers left the view, in the new column's basis")
         } else { check(false, "gesture release starts spring") }
         check(h.world.groups[1]!.strip.columns[0].width == .fixed(350), "logical width is latest target")
         h.send(.tick, advance: 5)
         check(h.world.groups[1]!.strip.columnData[0].cachedWidth == 350, "animated width settles to logical width")
+        check(abs(h.world.frames[TileID(2)]!.frame.rect.midX - 500) < 1, "the landed column rests at its snap point once the widths settle")
         check(h.world.check().isEmpty, "overlapping animation invariants")
     }
     section("2b2457b 67240b9: free gesture projection retains the starting coordinate basis") {
         var h = Harness(gestureSnap: false)
         h.census(10, [window(1), window(2)])
         h.send(.command(.focus(TileID(2)), .ipc))
-        h.send(.pointer(.beginGesture(TileID(2))))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(-90)))
         let start = h.gesture!.startOffset
-        h.send(.pointer(.delta(-90)))
-        h.send(.pointer(.delta(-30)))
+        h.send(.pointer(swipe(-30)))
         guard case .gesture(let gesture) = h.world.groups[1]!.strip.viewOffset else { check(false, "gesture state"); return }
         let expected = start + gesture.tracker.projectedEndPosition(isTouchpad: true)
         check(start != 0, "nonzero starting offset exercises the coordinate bug")
         check(h.world.groups[1]!.strip.viewOffsetBounds(at: h.time).contains(expected), "projection lands inside the strip")
-        h.send(.pointer(.endGesture))
+        h.send(.pointer(lift))
         check(abs(h.offset - expected) < 0.001, "free release uses start offset plus tracker projection")
-        check(h.world.pointer.token == nil, "release clears latch without a tick")
-        h.send(.pointer(.beginGesture(TileID(2))))
-        h.send(.pointer(.delta(17)), advance: 0.1)
+        check(h.gesture == nil, "release clears latch without a tick")
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(17)), advance: 0.1)
         let dropped = h.offset
-        h.send(.pointer(.endGesture), advance: 0.1)
+        h.send(.pointer(lift), advance: 0.1)
         check(h.offset == dropped, "slow free release does not snap or reuse old momentum")
     }
     section("2be34bd: secondary screen coordinate round trip and reorder at end") {
@@ -382,8 +1392,8 @@ struct Harness {
         check(axPoint(screenPoint(point, in: topology), in: topology) == point, "typed point round trip")
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
-        h.send(.pointer(.beginReorder(TileID(1))))
-        h.send(.pointer(.dropReorder(Int.max)))
+        h.beginReorder(TileID(1))
+        h.drop(Int.max)
         check(h.tiles == [TileID(2), TileID(3), TileID(1)], "past-end drop moves to end")
     }
     section("524cd8a 283afe2: hung app does not block a healthy app; cancelled retries cannot fire") {
@@ -526,7 +1536,8 @@ struct Harness {
         h.census(10, [window(1), window(2)])
         h.send(.ipc(id: 7, command: .focus(TileID(2))))
         check(h.effects.contains { if case .reply(7, .command(.accepted)) = $0 { return true }; return false }, "command reply correlates request ID")
-        check(h.effects.contains { if case .raise(TileID(2)) = $0 { return true }; return false }, "focus emits explicit raise")
+        check(h.effects.contains { if case .focus(TileID(2), .ipc) = $0 { true } else { false } }, "IPC still requests OS focus")
+        check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "focus has no duplicate raise")
         h.send(.query(id: 8))
         check(h.effects.contains {
             if case .reply(8, .snapshots(let snapshots)) = $0 { return snapshots.first?.activeColumnIndex == 1 }
@@ -579,15 +1590,15 @@ struct Harness {
     section("eebb564: menu focus, close and width act on the captured tile") {
         var h = Harness()
         h.census(10, [window(1), window(2)])
-        h.send(.pointer(.openMenu(TileID(1))))
-        h.send(.pointer(.menu(.focus(TileID(2)))))
+        h.openMenu(TileID(1))
+        h.send(.pointer(.choose(.focus(TileID(2)))))
         check(h.active == TileID(1), "menu focus targets the captured tile")
-        h.send(.pointer(.openMenu(TileID(2))))
-        h.send(.pointer(.menu(.close(TileID(1)))))
+        h.openMenu(TileID(2))
+        h.send(.pointer(.choose(.close(TileID(1)))))
         check(h.effects.contains { if case .close(TileID(2)) = $0 { return true }; return false }, "menu close targets the captured tile")
-        h.send(.pointer(.openMenu(TileID(2))))
-        h.send(.pointer(.menu(.cycleWidthPreset)))
-        check(h.world.pointer.token == nil && h.world.groups[1]!.strip.columns[1].presetIndex == nil, "strip-wide menu action is ignored")
+        h.openMenu(TileID(2))
+        h.send(.pointer(.choose(.cycleWidthPreset)))
+        check(h.world.pointer?.token == nil && h.world.groups[1]!.strip.columns[1].presetIndex == nil, "strip-wide menu action is ignored")
     }
     section("configChanged and frame routing") {
         var h = Harness()
@@ -606,9 +1617,9 @@ struct Harness {
         var h = Harness(animate: true)
         h.census(10, [window(1), window(2), window(3)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(300)))
-        h.send(.pointer(.endGesture))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(300)))
+        h.send(.pointer(lift))
         let landed = h.active
         check(landed != TileID(1), "swipe landed away from the focus target")
         h.send(.focus(FocusIntent(tile: TileID(1), pid: 1, source: .appActivation)))
@@ -737,17 +1748,17 @@ struct Harness {
     section("Gesture basis: releases clamp and re-anchor the active column") {
         var free = Harness(gestureSnap: false)
         free.census(10, [window(1), window(2)])
-        free.send(.pointer(.beginGesture(TileID(1))))
-        free.send(.pointer(.delta(50_000)))
-        free.send(.pointer(.endGesture))
+        free.send(.pointer(began))
+        free.send(.pointer(swipe(50_000)))
+        free.send(.pointer(lift))
         let bounds = free.world.groups[1]!.strip.viewOffsetBounds(at: free.time)
         check(bounds.contains(free.offset), "free scroll stays inside view bounds")
         var snapped = Harness()
         snapped.census(10, [window(1), window(2), window(3), window(4)])
         snapped.send(.command(.focus(TileID(1)), .ipc))
-        snapped.send(.pointer(.beginGesture(TileID(1))))
-        snapped.send(.pointer(.delta(1_500)))
-        snapped.send(.pointer(.endGesture))
+        snapped.send(.pointer(began))
+        snapped.send(.pointer(swipe(1_500)))
+        snapped.send(.pointer(lift))
         check(snapped.world.groups[1]!.strip.activeColumnIndex == 3, "snapped swipe moves the active column")
         check(abs(snapped.offset - snapped.world.groups[1]!.strip.snapTarget(forColumn: 3, at: snapped.time)) < 0.001,
               "release rests on the landed column's snap point")
@@ -758,14 +1769,14 @@ struct Harness {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
+        h.send(.pointer(began))
         let start = h.offset
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(swipe(40)))
         h.send(.focus(FocusIntent(tile: TileID(3), pid: 3, source: .appActivation)))
         h.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus)))
         h.advance(EngineConfig.focusDebounce + margin)
         check(h.gesture != nil, "swipe survives external focus")
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(swipe(40)))
         check(abs(h.offset - start - 80) < 0.001, "later deltas still apply")
     }
     section("Space census: a same-Space read listing another Space's windows is not trusted") {
@@ -901,14 +1912,14 @@ struct Harness {
         h.send(.command(.focus(TileID(4)), .ipc))
         h.census(10, [window(1, app: 10), window(2, app: 20)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         let offset = h.offset
         h.send(.focus(FocusIntent(tile: TileID(2), source: .axFocus)))
         h.advance(EngineConfig.focusDebounce + margin)
         check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "AX focus during a swipe is recorded")
         check(h.gesture != nil && h.offset == offset, "recorded focus does not scroll the swipe")
-        h.send(.pointer(.endGesture))
+        h.send(.pointer(lift))
         h.send(.focus(FocusIntent(tile: TileID(3), pid: 30, source: .appActivation)))
         h.census(20, [window(3, app: 30), window(4, app: 40)])
         check(h.active == TileID(3), "dock click during momentum still crosses Spaces")
@@ -916,16 +1927,16 @@ struct Harness {
     section("Gesture basis: removing a window mid-swipe ends the gesture") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         h.send(.windowRemoved(TileID(3)))
         check(h.tiles.count == 2 && h.gesture == nil, "stale snap basis cannot survive a removed column")
     }
     section("Gesture basis: adding a window mid-swipe ends the gesture") {
         var h = Harness()
         h.census(10, [window(1), window(2), window(3)])
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3), window(4)]))
         check(h.tiles.count == 4 && h.gesture == nil, "stale snap basis cannot survive an added column")
     }
@@ -1137,8 +2148,8 @@ struct Harness {
         h.census(20, [window(3), window(4)])
         h.census(10, [window(1), window(2)])
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
         check(h.censusRequest != nil && h.gesture != nil, "the deferral keeps the swipe")
         h.send(.windowAdded(window(8)))
@@ -1146,6 +2157,19 @@ struct Harness {
         h.advance(EngineConfig.censusSettle + margin)
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2)]))
         check(h.tiles == [TileID(1), TileID(2)] && h.gesture != nil, "a re-read that changes nothing keeps the swipe")
+    }
+    section("R6: a drop during a same-Space hold is refused like a command") {
+        var h = Harness()
+        h.census(20, [window(4), window(5)])
+        h.census(10, [window(1), window(2), window(3)])
+        let order = h.tiles
+        h.beginReorder(TileID(1))
+        h.send(.pointer(.release(AXPoint(.zero))))
+        h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3), window(4)]))
+        check(h.censusRequest != nil && h.world.pointer != nil, "the hold keeps the drag")
+        h.send(.pointer(.drop(3)))
+        check(h.tiles == order && h.world.pointer == nil && h.overlay == .hidden, "the drop ends the drag and leaves the order")
+        check(h.logged("pointer: drop refused, strip changing Space"), "and says why")
     }
     section("Moved windows: focus lands during a same-Space hold") {
         var h = Harness()
@@ -1221,8 +2245,8 @@ struct Harness {
         h.census(10, [window(1), window(2)])
         h.send(.command(.focus(TileID(2)), .keyboard))
         h.advance(EngineConfig.focusDebounce + margin)
-        h.send(.pointer(.beginGesture(TileID(1))))
-        h.send(.pointer(.delta(40)))
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(40)))
         h.send(.spaceChanged(key: .skylight(10), epoch: h.world.groups[1]!.epoch + 1, windows: [window(1), window(2), window(3)]))
         check(h.gesture != nil, "the hold keeps the swipe")
         h.census(30, [window(1), window(3)])
@@ -1378,10 +2402,96 @@ struct FuzzStream {
         ]
         let next = topology(h.world.topology.revision + 1, pick(layouts)!, separateSpaces: rng.next(2) == 0)
         let known = h.world.knownWindows
+        if h.world.pointer != nil { reached["session ended by a topology change", default: 0] += 1 }
         h.send(.topologyChanged(next), scope: EventScope(topologyRevision: h.world.topology.revision, group: 0, spaceEpoch: 0))
         if !h.world.knownWindows.isSuperset(of: known) { reached["window lost on a topology change", default: 0] += 1 }
         if next.groups.contains(where: { $0.displays.count > 1 }) { reached["merged group", default: 0] += 1 }
         if next.groups.isEmpty { reached["no display", default: 0] += 1 }
+    }
+
+    /// Raw trackpad and mouse samples in any order, including ones from ended sessions and session deadlines.
+    mutating func pointerStep(group id: UInt32, tile: TileID) {
+        let x = Double(rng.next(3000) - 1000)
+        let modifier = rng.next(5) != 0
+        let dx = Double(rng.next(400) - 200), dy = Double(rng.next(3) == 0 ? rng.next(400) - 200 : 0)
+        let token = rng.next(6) == 0 ? PointerToken(UInt64(rng.next(50))) : h.world.pointer?.token
+        let point = h.world.frames[tile].map { AXPoint(CGPoint(x: $0.frame.rect.midX + Double(rng.next(40) - 20), y: $0.frame.rect.minY + 10)) }
+            ?? AXPoint(CGPoint(x: x, y: 400))
+        let input: PointerInput
+        switch rng.next(18) {
+        case 0: input = scroll(.began, modifier: modifier, x: x)
+        case 1, 2: input = scroll(.changed, dx, dy: dy, modifier: modifier, x: x)
+        case 3: input = scroll(rng.next(3) == 0 ? .cancelled : .ended, modifier: modifier, x: x)
+        case 4: input = scroll(rng.next(3) == 0 ? .momentumEnded : .momentum, dx, modifier: modifier, x: x)
+        case 5: input = scroll(.discrete, dx, dy: dy, modifier: modifier, x: x)
+        case 6: input = .press(rng.next(4) == 0 ? nil : tile, at: point)
+        case 7: input = .drag(AXPoint(CGPoint(x: point.point.x + Double(rng.next(30)), y: point.point.y)))
+        case 8: input = .release(point)
+        case 9: input = .overlayReady
+        case 10:
+            input = .choose(pick([.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile), .focusLeft])!)
+        case 11: input = .drop(rng.next(10) - 3)
+        case 12: input = .cancel
+        case 13:
+            h.openMenu(tile, group: id)
+            guard case .menuOpen? = h.world.pointer?.phase, rng.next(2) == 0 else { return }
+            if rng.next(2) == 0 { h.send(.command(.focus(pick(group(id))!), .ipc), group: id) }
+            h.send(.pointer(.choose(pick([.toggleFloating(tile), .setWidth(tile, 400), .close(tile), .toggleFullWidth(tile)])!)), group: id)
+            if h.logged("pointer: menu") { reached["menu chose", default: 0] += 1 }
+            return
+        case 14: return h.beginReorder(tile, group: id)
+        case 15:
+            h.send(.pointer(scroll(.began, x: x)), group: route(scroll(.began, x: x), id))
+            for _ in 0...rng.next(3) { h.send(.pointer(swipe(dx)), group: route(swipe(dx), id)) }
+            let swiped = h.gesture != nil
+            h.send(.pointer(lift), group: route(lift, id))
+            if swiped, case .momentum? = h.world.pointer?.phase { reached["swipe released", default: 0] += 1 }
+            return
+        case 16:
+            h.beginReorder(tile, group: id)
+            let dragging = if case .reorderDragging? = h.world.pointer?.phase { true } else { false }
+            h.drop(rng.next(10) - 3, group: h.world.pointer?.scope.group ?? id)
+            if dragging, h.logged("pointer: drop") { reached["reorder dropped", default: 0] += 1 }
+            return
+        default:
+            if h.world.pointer?.timer == nil {
+                h.beginReorder(tile, group: id)
+                h.send(.pointer(.release(point)), group: route(.release(point), id))
+            }
+            guard let session = h.world.pointer, let timer = session.timer else { return }
+            h.send(.timer(timer.token), scope: session.scope, advance: max(0, timer.deadline - h.time))
+            reached["session deadline", default: 0] += 1
+            return
+        }
+        let before = h.world.pointer
+        let tail = h.tail
+        let target = route(input, id)
+        h.send(.pointer(input, session: token), group: target)
+        let consumed = h.effects.contains { if case .consumeInput = $0 { true } else { false } }
+        if let before, before.token == token, before.scope.group == target, !consumed {
+            switch (before.phase, input) {
+            case (.titleArmed, .drag), (.titleArmed, .release), (.titleDragging(_, _, false), .drag), (.titleDragging(_, _, false), .release),
+                 (.reorderDragging(_, _, false), .drag), (.reorderDragging(_, _, false), .release),
+                 (.menuOpen, .drag), (.menuOpen, .release), (.menuOpen, .choose), (_, .cancel):
+                reached["a held button's input reached the app", default: 0] += 1
+            default: break
+            }
+        }
+        if case .scroll = input, before?.press != nil, h.world.pointer?.token != before?.token { reached["a scroll ended a title-bar session", default: 0] += 1 }
+        if consumed, before == nil, !tail, h.world.pointer == nil, !(input.isWheel) { reached["idle consumed a stray input", default: 0] += 1 }
+        if case .scroll(let sample) = input, !sample.modifier, before == nil, !tail, consumed { reached["no-modifier scroll consumed", default: 0] += 1 }
+        switch (before?.phase, h.world.pointer?.phase) {
+        case (.gestureTracking(.some)?, .momentum?): reached["swipe released", default: 0] += 1
+        case (.reorderDragging?, nil) where h.logged("pointer: drop"): reached["reorder dropped", default: 0] += 1
+        default: break
+        }
+    }
+
+    func group(_ id: UInt32) -> [TileID] { h.world.groups[id]!.windows.keys.sorted { $0.rawValue < $1.rawValue } }
+
+    /// The group the Loop would send `input` to.
+    func route(_ input: PointerInput, _ fallback: UInt32) -> UInt32 {
+        h.world.route(.pointer(input)).flatMap { h.world.groups[$0] == nil ? nil : $0 } ?? fallback
     }
 
     mutating func step() {
@@ -1394,13 +2504,7 @@ struct FuzzStream {
         case 0: h.send(.command(.focus(tile), .ipc), group: id)
         case 1: h.send(.focus(FocusIntent(tile: tile, source: .axFocus)), group: id)
         case 2: h.send(.command(.setWidth(tile, Double(50 + rng.next(1400))), .keyboard), group: id)
-        case 3: h.send(.pointer(.beginGesture(tile)), group: id)
-        case 4: h.send(.pointer(.delta(Double(rng.next(400) - 200))), group: id)
-        case 5: h.send(.pointer(.endGesture), group: id)
-        case 6: h.send(.pointer(.openMenu(tile)), group: id)
-        case 7:
-            let actions: [Command] = [.toggleFloating(tile), .setWidth(tile, 400), .focus(tile), .close(tile), .toggleFullWidth(tile)]
-            h.send(.pointer(.menu(pick(actions)!)), group: id)
+        case 3, 4, 5, 6, 7, 16, 17, 30: pointerStep(group: id, tile: tile)
         case 8:
             if tile.rawValue % 2 == 0, let hidden = group.windows[tile] { hiddenWindows.append(hidden) }
             h.send(tile.rawValue % 2 == 0 ? .windowsHidden([tile]) : .windowRemoved(tile), group: id)
@@ -1425,7 +2529,14 @@ struct FuzzStream {
             h.send(.windowAdded(window(nextID, bundle: rng.next(2) == 0 ? nil : "fuzz", floating: rng.next(4) == 0)), group: id)
         case 10:
             let request = h.world.frames.values.sorted { $0.tile.rawValue < $1.tile.rawValue }.first { $0.scope.group == id }
-            if let request { h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: rng.next(2) == 0 ? .applied : .timedOut), group: id) }
+            if let request {
+                let result: FrameResult = switch rng.next(3) {
+                case 0: .applied
+                case 1: .timedOut
+                default: .sizeUnconfirmed
+                }
+                h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: result), group: id)
+            }
             else { h.send(.tick, group: id) }
         case 11:
             if let timer = h.world.timers.min(by: { $0.key < $1.key }) {
@@ -1441,9 +2552,10 @@ struct FuzzStream {
         case 13: h.send(.windowRemoved(tile), group: id, scope: pick(priorScopes)!)
         case 14: h.send(.command(.toggleFloating(tile), .ipc), group: id)
         case 15: reconfigure()
-        case 16: h.send(.pointer(.beginReorder(tile)), group: id)
-        case 17: h.send(.pointer(.dropReorder(rng.next(10) - 3)), group: id)
-        case 18: h.send(.spaceWillChange, group: id)
+        case 18:
+            let session = h.world.pointer?.scope.group == id
+            h.send(.spaceWillChange, group: id)
+            if session, h.world.pointer == nil { reached["session ended by a Space change", default: 0] += 1 }
         case 19:
             let all = h.world.groups.values.flatMap { $0.windows.values }.sorted { $0.id.rawValue < $1.id.rawValue }
             let target = pick(all)
@@ -1463,7 +2575,6 @@ struct FuzzStream {
             guard let visit = pick(saved) else { h.send(.tick, group: id); break }
             let key: SpaceKey = rng.next(2) == 0 ? .fingerprint(visit.fingerprint) : visit.space
             h.send(.spaceChanged(key: key.isEmpty ? .skylight(10) : key, epoch: epoch, windows: visit.windows), group: id)
-        case 30: h.send(.pointer(.cancel), group: id)
         case 31: h.send(.configChanged(EngineConfig(gap: Double(rng.next(20)), animate: rng.next(2) == 0, gestureSnap: rng.next(2) == 0,
                                                     snapPoints: pick([[.middle], [.left, .right], [.left, .middle, .right]])!,
                                                     raiseHeight: Double(rng.next(3) * 10))), group: id)
@@ -1633,9 +2744,9 @@ struct FuzzStream {
         check(tiles(h, 2) == [2, 5] && tiles(h, 1) == [1], "the rightmost display's columns join the middle strip: \(tiles(h, 1)) | \(tiles(h, 2))")
         var scrolled = Harness(gestureSnap: false)
         scrolled.census(10, (1...5).map { window($0) })
-        scrolled.send(.pointer(.beginGesture(TileID(1))))
-        scrolled.send(.pointer(.delta(-170)))
-        scrolled.send(.pointer(.endGesture))
+        scrolled.send(.pointer(began))
+        scrolled.send(.pointer(swipe(-170)))
+        scrolled.send(.pointer(lift))
         let view = scrolled.offset
         scrolled.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)])))
         check(scrolled.offset == view, "plugging in another display leaves this strip's view: \(view) -> \(scrolled.offset)")
@@ -1692,8 +2803,10 @@ struct FuzzStream {
         var moved = h
         h.send(.topologyChanged(topology(2, [display()])))
         h.send(.command(.release, .ipc))
-        check(h.world.groups[1]!.hidden[TileID(7)] != nil && !h.requests.contains { $0.tile == TileID(7) },
-              "an unplugged display's hidden window is not written back there: \(h.requests.filter { $0.tile == TileID(7) })")
+        let release = h.requests.filter { $0.tile == TileID(7) }
+        check(h.world.groups[1]!.hidden[TileID(7)] != nil && hiddenFrame(h, 1) == nil &&
+              release.count == 1 && release.allSatisfy { $0.scope.group == 1 && display().area.contains($0.frame.rect) },
+              "the unplugged display affinity is dropped; quit releases once onto the surviving display: \(release)")
         moved.send(.topologyChanged(topology(2, [display(), display(2, y: 830)])))
         check(hiddenFrame(moved, 2) == parked.offsetBy(dx: -1000, dy: 830), "a moved display carries it: \(String(describing: hiddenFrame(moved, 2)))")
     }
@@ -1854,7 +2967,7 @@ struct FuzzStream {
         }
         dock.send(.spaceWillChange, group: 2)
         dock.census(22, [window(5), window(6, app: 60)], group: 2)
-        check(focused(dock.effects) == ["6 appActivation"], "a Dock click to an app on display 2's other Space lands on it: \(focused(dock.effects))")
+        check(dock.world.groups[2]!.focus.decision?.tile == TileID(6) && focused(dock.effects).isEmpty, "a Dock click to an app on display 2's other Space lands on it: \(focused(dock.effects))")
         var stacked = Harness(displays: [display(), display(2, y: 830)], separateSpaces: false)
         stacked.census(10, [window(1)])
         stacked.census(10, [window(2)], group: 2)
@@ -1863,7 +2976,7 @@ struct FuzzStream {
             stacked.send(.spaceWillChange)
             stacked.send(.spaceWillChange, group: 2)
             stacked.census(space, [window(tiles[0])])
-            check(focused(stacked.effects) == ["\(tiles[0]) restore"], "the display with focus restores it on Space \(space)")
+            check(focused(stacked.effects).isEmpty, "nil frontmost read restores selection without OS focus on Space \(space)")
             stacked.census(space, [window(tiles[1])], group: 2)
             check(focused(stacked.effects).isEmpty, "the display without focus restores quietly on Space \(space)")
             check(stacked.world.activeGroup == 1, "a Space switch leaves commands on the focused display")
@@ -1875,7 +2988,7 @@ struct FuzzStream {
         churn.send(.focus(FocusIntent(tile: TileID(99), pid: 99, source: .appActivation)))
         churn.send(.spaceWillChange)
         churn.census(10, [window(1, app: 10), window(2, app: 20)])
-        check(focused(churn.effects) == ["2 restore"], "a helper's activation is no Dock click: a keyboard switch still restores OS focus: \(focused(churn.effects))")
+        check(churn.active == TileID(2) && focused(churn.effects).isEmpty, "a helper activation is not a Dock click, and nil frontmost restore stays quiet: \(focused(churn.effects))")
     }
     section("R5 active group: commands act on the display the user last focused") {
         var closed = Harness(displays: [display(), display(2, x: 1000)])
@@ -1912,8 +3025,8 @@ struct FuzzStream {
         swapped.census(20, [window(3)], group: 2)
         swapped.send(.focus(FocusIntent(tile: TileID(1), source: .axFocus)))
         swapped.advance(EngineConfig.focusDebounce + margin)
-        check(swapped.world.groups[2]!.focus.decision?.tile == TileID(3) && swapped.world.activeGroup == 2,
-              "a read racing the leading display's fresh restore does not override it")
+        check(swapped.world.groups[2]!.focus.decision?.tile == TileID(3) && swapped.world.activeGroup == 1,
+              "nil frontmost restore does not suppress a real OS focus report on another display")
 
         func asksFocus(_ effects: [Effect]) -> Bool { effects.contains { if case .focus = $0 { true } else { false } } }
         var launch = Harness(displays: [display(), display(2, x: 1000)])
@@ -1995,7 +3108,273 @@ struct FuzzStream {
     }
 }
 
+@MainActor
+final class CensusFixture: CensusObserver {
+    var known: [CGWindowID: WindowFacts] { [:] }
+    var windows: [ObservedWindow] = []
+    var pending: [() -> Void] = []
+    var frontmost: TileID?
+    var reads = 0
+
+    func prepareCensus(_ onScreen: [CGWindowInfo], completion: @escaping (TileID?) -> Void) {
+        pending.append { completion(self.frontmost) }
+    }
+
+    func census(_ onScreen: [CGWindowInfo], space: SpaceKey?) -> [ObservedWindow] {
+        reads += 1
+        return windows
+    }
+}
+
 @MainActor func runtimeTests() {
+    section("Audit A return runtime: fresh frontmost reaches the scoped destination census") {
+        var h = Harness()
+        h.census(1, [window(1), window(2)])
+        h.send(.command(.focus(TileID(1)), .keyboard))
+        h.census(2, [window(3)])
+        let fixture = CensusFixture()
+        fixture.windows = [window(1), window(2)]
+        fixture.frontmost = TileID(2)
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditA-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditA-unused-state"]), censusObserver: fixture,
+                        reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: 1, uuid: nil, isUserSpace: true) }, screen: { [] }, memberships: { _ in [1] }), effects: { _ in })
+        loop.census(group: 1)
+        fixture.pending.first?()
+        check(loop.world.groups[1]?.focus.decision?.tile == TileID(2), "Loop carries current focused tile into Engine restore")
+    }
+    section("Audit A return runtime: focus read is bounded, fresh, and activation-versioned") {
+        let app = QueuedFocusApp(pid: 101, focused: 1), clock = ScopeClock()
+        let worker = AppWorker(app: app, windows: [1: FocusProbeWindow(1, pid: 101)], clock: clock, send: { _, _ in })
+        var frontmost: Int32? = 101
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [1] }, elsewhere: { [] }, paused: { false }, emit: { _, _ in }, log: { _ in }, frontmostPID: { frontmost })
+        observer.workers[101] = worker
+        var results: [TileID?] = []
+        observer.readFrontmost { results.append($0) }
+        app.drain(); RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        check(results == [TileID(1)], "fresh app-thread AX focus is reported")
+        results = []
+        observer.readFrontmost { results.append($0) }
+        frontmost = 999
+        app.drain(); RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        check(results == [nil], "a changed frontmost pid rejects the stale read")
+        frontmost = 101; results = []
+        observer.readFrontmost { results.append($0) }
+        observer.activated(999)
+        app.drain(); RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        check(results == [nil], "a superseded activation rejects the read even if pid has returned")
+        results = []
+        observer.readFrontmost { results.append($0) }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.20))
+        check(results == [nil], "hung app's focus read completes with explicit missing focus")
+        app.drain(); RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        check(results == [nil], "late AX focus cannot replace the timed-out answer")
+    }
+
+    section("R7 parking survives topology and genuine moves override parking") {
+        let builtIn = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+                              area: CGRect(x: 0, y: 39, width: 1800, height: 1032))
+        let external = Display(id: 3, frame: CGRect(x: -379, y: -1440, width: 2560, height: 1440),
+                               area: CGRect(x: -379, y: -1440, width: 2560, height: 1440))
+        var h = Harness(displays: [builtIn, external], separateSpaces: false)
+        let original = (1...5).map { window($0) }
+        h.census(4, original)
+        h.census(4, [], group: 3)
+        let positions = h.world.frames.mapValues { $0.frame.rect }
+        h.send(.spaceWillChange)
+        h.send(.spaceWillChange, group: 3)
+        h.census(5, [])
+        h.census(5, [], group: 3)
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(5, [])
+        h.census(5, [], group: 3)
+        let parked = original.map { item in
+            ObservedWindow(id: item.id, pid: item.pid, bundleID: item.bundleID, initialFrame: AXRect(CGRect(x: positions[item.id]!.minX, y: 39, width: 900, height: 705)))
+        }
+        let lost = parked.filter { h.world.route(.windowAdded($0)) == 1 && topology(2, [builtIn, external], separateSpaces: false).nearestGroup(to: CGPoint(x: $0.initialFrame!.rect.midX, y: $0.initialFrame!.rect.midY))?.id == 3 }
+        check(!lost.isEmpty, "risk fixture includes parked windows nearest external")
+        let moved = lost.map { ObservedWindow(id: $0.id, pid: $0.pid, bundleID: $0.bundleID, initialFrame: AXRect(CGRect(x: 100, y: -1000, width: 900, height: 705))) }
+        check(moved.allSatisfy { h.world.route(.windowAdded($0)) == 3 }, "risk genuine move onto external overrides old parking")
+        var retitled = h
+        retitled.send(.windowChanged(moved[0]))
+        check(retitled.world.route(.windowAdded(lost[0])) == 3, "a genuine observed move revokes affinity even if a later read resembles old parking")
+        var movedHarness = h
+        movedHarness.census(5, movedHarness.world.routed(moved, to: 3), group: 3)
+        movedHarness.advance(EngineConfig.censusSettle + margin)
+        movedHarness.census(5, movedHarness.world.routed(moved, to: 3), group: 3)
+        check(moved.allSatisfy { movedHarness.world.groups[3]!.windows[$0.id] != nil }, "risk destination census actually adopts moved parked tiles")
+        h.send(.topologyChanged(topology(2, [builtIn, external], separateSpaces: false)))
+        check(lost.allSatisfy { h.world.route(.windowAdded($0)) == 1 }, "risk no-op topology revision preserves parked ownership")
+        var unplugged = h
+        let right = Display(id: 5, frame: CGRect(x: 2400, y: 0, width: 1800, height: 1169),
+                            area: CGRect(x: 2400, y: 39, width: 1800, height: 1032))
+        unplugged.send(.topologyChanged(topology(3, [external, right], separateSpaces: false)))
+        check(lost.allSatisfy { unplugged.world.route(.windowAdded($0)) == 3 }, "departed groups remap parking to the surviving display")
+        unplugged.send(.topologyChanged(topology(4, [], separateSpaces: false)), group: 3)
+        unplugged.send(.topologyChanged(topology(5, [builtIn, external], separateSpaces: false)),
+                       scope: EventScope(topologyRevision: 4, group: 0, spaceEpoch: 0))
+        check(lost.allSatisfy { unplugged.world.route(.windowAdded($0)) == 1 }, "physical display identity survives an all-displays-disconnected interval")
+        h.census(4, h.world.routed(parked, to: 3), group: 3)
+        h.census(4, h.world.routed(parked, to: 1))
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(4, h.world.routed(parked, to: 3), group: 3)
+        h.census(4, h.world.routed(parked, to: 1))
+        check(original.allSatisfy { h.world.groups[1]!.windows[$0.id] != nil }, "risk topology round trip retains original built-in membership")
+    }
+    section("stacked displays retain saved ownership despite parked census frames") {
+        let builtIn = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+                              area: CGRect(x: 0, y: 39, width: 1800, height: 1032))
+        let external = Display(id: 3, frame: CGRect(x: -379, y: -1440, width: 2560, height: 1440),
+                               area: CGRect(x: -379, y: -1440, width: 2560, height: 1440))
+        var h = Harness(displays: [builtIn, external], separateSpaces: false)
+        let original = (1...5).map { window($0) }
+        h.census(4, original)
+        h.census(4, [], group: 3)
+        let positions = h.world.frames.mapValues { $0.frame.rect }
+        h.send(.spaceWillChange)
+        h.send(.spaceWillChange, group: 3)
+        h.census(5, [])
+        h.census(5, [], group: 3)
+        h.advance(EngineConfig.censusSettle + margin)
+        h.census(5, [])
+        h.census(5, [], group: 3)
+        check(h.world.groups[1]!.windows.isEmpty, "the destination commits an empty built-in strip")
+        let parked = original.map { item in
+            ObservedWindow(id: item.id, pid: item.pid, bundleID: item.bundleID, initialFrame: AXRect(CGRect(x: positions[item.id]!.minX, y: 39, width: 900, height: 705)))
+        }
+        check(parked.allSatisfy { h.world.route(.windowAdded($0)) == 1 }, "rediscovery belongs to the group that parked the window")
+        check(h.world.routed(parked, to: 3).isEmpty, "the external census excludes the built-in parked windows")
+        let returning = h.world.routed(parked, to: 1)
+        check(returning.map(\.id) == original.map(\.id), "the built-in census retains all five windows")
+        h.census(4, returning)
+        h.census(4, h.world.routed(parked, to: 3), group: 3)
+        check(h.world.groups[1]!.strip.columns.flatMap(\.tiles) == original.map(\.id), "the round trip preserves built-in order")
+        check(h.world.groups[3]!.windows.isEmpty, "the external strip remains empty")
+    }
+    section("release brings partially visible columns fully on screen") {
+        var h = Harness()
+        h.census(4, (1...5).map { window($0) })
+        let area = h.world.topology.groups[0].displays[0].area
+        let outside = Set(h.world.frames.values.filter { !area.contains($0.frame.rect) }.map(\.tile))
+        check(!outside.isEmpty, "the focused five-column strip has clipped columns")
+        h.send(.command(.release, .ipc))
+        let requests = h.requests
+        check(outside.isSubset(of: Set(requests.map(\.tile))), "release writes every fully or partially off-screen tile")
+        check(requests.allSatisfy { area.contains($0.frame.rect) }, "every released tile is fully inside its display")
+    }
+    section("Loop census delivery waits for injected discovery before committing a new Space") {
+        var h = Harness()
+        h.census(4, [window(1)])
+        let fixture = CensusFixture()
+        var effects: [Effect] = []
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-loop-config", "REEL_STATE_DIR": "/tmp/reel-loop-state"]),
+                        censusObserver: fixture,
+                        reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: 5, uuid: nil, isUserSpace: true) },
+                                         screen: { [] }, memberships: { _ in [5] }),
+                        effects: { effects += $0 })
+        loop.send(.spaceWillChange)
+        effects = []
+        loop.census(group: 1)
+        check(fixture.pending.count == 1 && fixture.reads == 0, "Loop requests discovery without reading an incomplete registry")
+        check(loop.world.groups[1]!.space == .skylight(4) && effects.isEmpty, "no census or effects are delivered before discovery")
+        fixture.windows = [window(2)]
+        fixture.pending.first?()
+        check(fixture.reads == 1, "Loop reads the fresh registry after discovery completes")
+        check(loop.world.groups[1]!.space == .skylight(5), "Loop delivers the destination census to Engine")
+        check(Set(loop.world.groups[1]!.windows.keys) == [TileID(2)], "Engine adopts only the newly discovered destination window")
+        check(effects.contains { if case .setFrame(let request) = $0 { request.tile == TileID(2) } else { false } },
+              "the delivered census produces the destination frame effect")
+    }
+    section("Loop rejects injected cross-Space adoption and delivers matching additions") {
+        var h = Harness()
+        h.census(4, [])
+        let fixture = CensusFixture()
+        var sid: UInt64 = 5
+        var effects: [Effect] = []
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-loop-config", "REEL_STATE_DIR": "/tmp/reel-loop-state"]),
+                        censusObserver: fixture,
+                        reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: sid, uuid: nil, isUserSpace: true) },
+                                         screen: { [] }, memberships: { id in id == 3 ? [4] : [5] }),
+                        effects: { effects += $0 })
+        loop.send(.windowAdded(window(2)))
+        check(loop.world.groups[1]!.windows.isEmpty && effects.isEmpty, "an observed destination window cannot enter the still-departing strip")
+        loop.census(group: 1)
+        fixture.pending.first?()
+        check(loop.world.groups[1]!.space == .skylight(5), "the empty destination census commits before adoption")
+        effects = []
+        loop.send(.windowAdded(window(3)))
+        check(loop.world.groups[1]!.windows.isEmpty && effects.isEmpty, "a departing-Space window cannot enter the settled destination")
+        loop.send(.windowAdded(window(2), frontmost: true))
+        check(Set(loop.world.groups[1]!.windows.keys) == [TileID(2)], "matching injected observation reaches Engine adoption")
+        check(loop.world.groups[1]!.focus.decision?.tile == TileID(2) && !effects.contains { if case .focus = $0 { true } else { false } },
+              "matching adoption selects without OS focus through Loop")
+        sid = 4
+        effects = []
+        loop.send(.windowAdded(window(4)))
+        check(Set(loop.world.groups[1]!.windows.keys) == [TileID(2)] && effects.isEmpty, "later OS Space changes hold additions until their census")
+    }
+    section("Loop drops stale discovery completions after Space, scope or request changes") {
+        for change in ["space", "scope", "request"] {
+            var h = Harness()
+            h.census(4, [window(1)])
+            let fixture = CensusFixture()
+            var sid: UInt64 = 5
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-loop-config", "REEL_STATE_DIR": "/tmp/reel-loop-state"]),
+                            censusObserver: fixture,
+                            reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: sid, uuid: nil, isUserSpace: true) },
+                                             screen: { [] }, memberships: { _ in [5] }), effects: { _ in })
+            loop.census(group: 1)
+            fixture.windows = [window(2)]
+            switch change {
+            case "space": sid = 6
+            case "scope": loop.send(.topologyChanged(topology(2, [display()])))
+            default: loop.census(group: 1)
+            }
+            fixture.pending.first?()
+            check(fixture.reads == 0 && loop.world.groups[1]!.space == .skylight(4), "stale \(change) completion never reads or delivers a census")
+            if change == "request" {
+                fixture.pending.last?()
+                check(fixture.reads == 1 && loop.world.groups[1]!.space == .skylight(5), "the newest pending census still reaches Engine")
+            }
+        }
+    }
+    section("census discovery waits for fresh AX facts instead of submitting an empty unvisited Space") {
+        var requested: [Int32] = []
+        var known = Set<UInt32>()
+        var censuses: [Set<UInt32>] = []
+        let discovery = CensusDiscovery { requested.append($0) }
+        discovery.refresh([101, 102]) { censuses.append(known) }
+        discovery.refresh([101, 102]) { censuses.append(known) }
+        check(censuses.isEmpty, "no false empty census before app discovery")
+        check(requested == [101, 102], "display groups share one discovery per app")
+        known.insert(1)
+        discovery.reported(101)
+        check(censuses.isEmpty, "the second app is still pending")
+        known.insert(2)
+        discovery.reported(102)
+        check(censuses == [[1, 2], [1, 2]], "both groups census fresh registry facts as soon as discovery completes")
+        discovery.reported(102)
+        check(censuses.count == 2, "duplicate reports do not deliver duplicate censuses")
+        discovery.refresh([]) { censuses.append(known) }
+        check(censuses.count == 3, "visited Spaces do not wait for discovery")
+    }
+    section("census discovery bounds a hung app without caching a substitute census") {
+        var completions = 0
+        let discovery = CensusDiscovery { _ in }
+        discovery.refresh([999]) { completions += 1 }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.6))
+        check(completions == 1, "deadline permits a fresh read even when an app never reports")
+        discovery.reported(999)
+        check(completions == 1, "late discovery cannot answer the timed-out request again")
+    }
+    section("Space census and health adoption reject departing-Space windows") {
+        check(!censusMembership([4], matches: .skylight(5)), "CG transition overlap is not a destination census")
+        check(censusMembership([4, 5], matches: .skylight(5)), "a window on both Spaces belongs to the destination")
+        check(!censusAdoption([4], observed: .skylight(5), settled: .skylight(5)), "health cannot adopt old-Space windows on an empty destination")
+        check(!censusAdoption([5], observed: .skylight(5), settled: .skylight(4)), "new-Space windows cannot land on the Space not yet torn down")
+        check(censusAdoption([5], observed: .skylight(5), settled: .skylight(5)), "settled matching membership permits normal adoption")
+        check(censusMembership(nil, matches: .skylight(5)), "unavailable SkyLight membership keeps conservative Engine census guards")
+        check(censusMembership([4], matches: .fingerprint([1])), "fingerprint fallback still relies on permanent census guards")
+    }
     section("R3 config: every key parses into the schema") {
         let text = """
         [layout]
@@ -2058,6 +3437,192 @@ struct FuzzStream {
               "an empty file gives the defaults")
         let ring = try? AppConfig.parse("[indicator]\nstyle = \"ring\"\nraise_height = 24")
         check(ring?.engine.raiseHeight == 0, "raise_height lowers columns only in raise style")
+    }
+    section("R7: legacy display grouping boundaries belong to Engine topology") {
+        for (gap, expected) in [(0.4, 1), (0.5, 1), (0.6, 2)] {
+            let first = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 900), area: CGRect(x: 0, y: 0, width: 1000, height: 900))
+            let second = Display(id: 2, frame: CGRect(x: 1000 + gap, y: 0, width: 1000, height: 900), area: CGRect(x: 1000 + gap, y: 0, width: 1000, height: 900))
+            let topology = Topology(revision: 1, displays: [first, second], separateSpaces: false, primaryScreenHeight: 900)
+            check(topology.groups.count == expected, "X edge grouping respects inclusive half-point tolerance")
+        }
+        for (y, expected) in [(899.0, 1), (900.0, 2)] {
+            let first = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 900), area: CGRect(x: 0, y: 0, width: 1000, height: 900))
+            let second = Display(id: 2, frame: CGRect(x: 1000, y: y, width: 1000, height: 900), area: CGRect(x: 1000, y: y, width: 1000, height: 900))
+            let topology = Topology(revision: 1, displays: [first, second], separateSpaces: false, primaryScreenHeight: 900)
+            check(topology.groups.count == expected, "positive Y overlap required for a shared strip")
+        }
+        check(Topology(revision: 1, displays: [], separateSpaces: false, primaryScreenHeight: 900).groups.isEmpty, "empty display census has no groups")
+    }
+    section("R7: packaged defaults, struts and add-time regex rules") {
+        check(!defaultConfigSource().isEmpty, "the shipped default config resource exists")
+        guard let config = try? AppConfig.parse(defaultConfigSource()) else { return check(false, "bundled defaults parse") }
+        check(config.engine.gap == EngineConfig().gap && config.engine.widthPresets == EngineConfig().widthPresets
+              && config.engine.bounceDistance == EngineConfig().bounceDistance && config.keys == AppConfig().keys, "bundled defaults match code defaults")
+        var insets = WorkingInsets()
+        insets.top = 10; insets.bottom = 20; insets.left = 30; insets.right = 40
+        check(insets.apply(to: CGRect(x: -100, y: 50, width: 1000, height: 700)) == CGRect(x: -70, y: 60, width: 930, height: 670), "per-display working area has CG insets")
+        insets.left = 2000
+        check(insets.apply(to: CGRect(x: 0, y: 0, width: 100, height: 100)).width == 1, "struts cannot make an invalid area")
+        let parsed = try? AppConfig.parse("[[rules]]\nbundle_id_regex = \"com[.]example[.].*\"\ntitle_regex = \"^Dialog\"\nfloating = true")
+        check(parsed?.engine.rules.count == 1, "bundle/title regex rules parse")
+        var rules = Harness(rules: [Rule(bundleIDRegex: "^test[.]", titleRegex: "window-2$", floating: true)])
+        rules.census(10, [window(1), window(2)])
+        check(rules.world.groups[1]!.floating == [TileID(2)], "regex selects only its matching add-time title")
+        rules.send(.windowAdded(ObservedWindow(id: TileID(4), pid: 4, bundleID: nil, title: "window-2")))
+        rules.send(.windowAdded(ObservedWindow(id: TileID(5), pid: 5, bundleID: "other.app", title: "window-2")))
+        check(!rules.world.groups[1]!.floating.contains(TileID(4)) && !rules.world.groups[1]!.floating.contains(TileID(5)),
+              "matching titles with nil or wrong bundles stay tiled")
+        rules.send(.windowAdded(window(3)))
+        check(!rules.world.groups[1]!.floating.contains(TileID(3)), "nonmatching add stays tiled")
+        let changed = ObservedWindow(id: TileID(2), pid: 2, bundleID: "test.app", title: "now not a match")
+        rules.send(.windowChanged(changed))
+        check(rules.world.groups[1]!.floating.contains(TileID(2)), "a title change does not undo the add-time rule")
+        rules.census(11, [])
+        rules.census(10, [window(1), changed, window(3)])
+        check(rules.world.groups[1]!.floating.contains(TileID(2)), "add-time title survives a Space round trip")
+        let previous = rules.world.currentSnapshot(group: 1)!
+        var relaunched = Harness(rules: [Rule(bundleIDRegex: "^test[.]", titleRegex: "window-2$", floating: true)])
+        relaunched.send(.loadSnapshots([previous]))
+        relaunched.census(10, [ObservedWindow(id: TileID(22), pid: 222, bundleID: "test.app", title: "now not a match")])
+        check(!relaunched.world.groups[1]!.floating.contains(TileID(22))
+              && relaunched.world.groups[1]!.strip.columns.flatMap(\.tiles).contains(TileID(22)),
+              "a new window matched to disk placement evaluates its own adoption title")
+        do { _ = try AppConfig.parse("[[rules]]\ntitle_regex = \"[\"\nfloating = true"); check(false, "invalid regex rejected") }
+        catch { check(String(describing: error).contains("title_regex"), "invalid regex names its key") }
+    }
+    section("R7: startup struts preserve disk order and widths before discovery") {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let paths = Paths(environment: ["REEL_CONFIG_DIR": dir + "/config", "REEL_STATE_DIR": dir + "/state"])
+        let loop = Loop(paths: paths)
+        guard let group = loop.world.topology.groups.first else { return check(false, "startup topology has a display") }
+        let saved = Snapshot(group: group.id, space: .skylight(42), columns: [
+            SnapshotColumn(windows: [window(2)], width: .fixed(333)),
+            SnapshotColumn(windows: [window(1)], width: .fixed(444)),
+        ])
+        loop.store.save([saved]); loop.store.flush()
+        check(loop.store.load().flatMap { $0.columns.flatMap(\.windows).map(\.id) } == [TileID(2), TileID(1)], "startup test seeds disk before configuration")
+        loop.send(.loadSnapshots(loop.store.load()), group: group.id)
+        do {
+            try FileManager.default.createDirectory(atPath: paths.configDir, withIntermediateDirectories: true)
+            let keys = KeyAction.allCases.map { "\($0.rawValue) = \"\"" }.joined(separator: "\n")
+            try ("[layout.struts]\ntop = 17\n[animation]\nenabled = false\n[indicator]\nstyle = \"none\"\n[keys]\n" + keys)
+                .write(toFile: paths.configFile, atomically: true, encoding: .utf8)
+        } catch { return check(false, "isolated startup config: \(error)") }
+        check(loop.reloadConfig() == nil, "startup struts parse")
+        check(loop.world.groups.values.allSatisfy { $0.space == nil } && loop.world.spaces.live.isEmpty,
+              "startup configuration does not commit a premature empty census")
+        loop.send(.spaceChanged(key: .skylight(42), epoch: 1, windows: [window(1), window(2)]), group: group.id)
+        let restored = loop.world.groups[group.id]!.strip.columns
+        check(restored.flatMap(\.tiles) == [TileID(2), TileID(1)] && restored.map(\.width) == [.fixed(333), .fixed(444)],
+              "first discovery restores saved order [2,1] and widths with startup struts")
+    }
+    section("R7: first matching rule wins when rules overlap") {
+        var rules = Harness(rules: [Rule(bundleID: "test.app", floating: true), Rule(bundleIDRegex: "^test[.]", floating: false)])
+        rules.census(10, [window(1)])
+        check(rules.world.groups[1]!.floating.contains(TileID(1)), "first exact rule wins over a later regex")
+        var inverse = Harness(rules: [Rule(bundleIDRegex: "^test[.]", floating: false), Rule(bundleID: "test.app", floating: true)])
+        inverse.census(10, [window(1, floating: true)])
+        check(!inverse.world.groups[1]!.floating.contains(TileID(1)), "first regex rule can force a matching window tiled")
+    }
+    section("R7: gesture modifier aliases retain trunk spellings") {
+        for (name, modifier) in [("control", GestureModifier.ctrl), ("opt", .alt), ("option", .alt), ("command", .cmd),
+                                 ("fn", .fn), ("ctrl", .ctrl), ("alt", .alt), ("cmd", .cmd)] {
+            let parsed = try? AppConfig.parse("[gesture]\nmodifier = \"\(name)\"")
+            check(parsed?.gestureModifier == modifier, "gesture modifier accepts \(name)")
+        }
+        for name in ["none", ""] {
+            do { _ = try AppConfig.parse("[gesture]\nmodifier = \"\(name)\""); check(false, "unmodified scroll remains rejected") }
+            catch { check(String(describing: error).contains("gesture.modifier"), "unmodified scroll error names its key") }
+        }
+    }
+    section("R7: bundled logs rotate at one MB with one backup") {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let path = dir.appendingPathComponent("reel.log").path
+        defer { try? FileManager.default.removeItem(at: dir) }
+        do {
+            try prepareLogFile(at: path)
+            try Data(repeating: 7, count: 1_000_001).write(to: URL(fileURLWithPath: path))
+            try prepareLogFile(at: path)
+            check(!FileManager.default.fileExists(atPath: path), "oversized current file moved before append")
+            let first = try Data(contentsOf: URL(fileURLWithPath: path + ".1"))
+            check(first.count == 1_000_001, "backup keeps log data")
+            try Data(repeating: 8, count: 1_000_001).write(to: URL(fileURLWithPath: path))
+            try prepareLogFile(at: path)
+            let second = try Data(contentsOf: URL(fileURLWithPath: path + ".1"))
+            check(second.first == 8, "next rotation replaces the single backup")
+        } catch { check(false, "temporary log rotation failed \(error)") }
+    }
+    section("R7: old config names its first unknown key and every removed key fails") {
+        let path = FileManager.default.currentDirectoryPath + "/Tests/Smoke/trunk-config.toml"
+        do {
+            let old = try String(contentsOfFile: path, encoding: .utf8)
+            _ = try AppConfig.parse(old)
+            check(false, "old-schema fixture must not parse")
+        } catch {
+            check(String(describing: error) == "unknown key animation.scroll_damping_ratio", "old file reports deterministic first unknown key")
+        }
+        for source in ["start_at_login = true", "[layout]\nposition_memory = false",
+                       "[cursor]\ndrag_threshold_px = 2", "[cursor]\nlong_press_delay_ms = 500",
+                       "[cursor]\ntitle_bar_corner_inset_px = 8", "[cursor]\nswipe_threshold_px = 20",
+                       "[reorder_overlay]\nthumbnail_style = \"icon\"", "[reorder_overlay]\nthumbnail_height = 160"] {
+            do { _ = try AppConfig.parse(source); check(false, "removed key must fail schema") }
+            catch { check(String(describing: error).hasPrefix("unknown key"), "removed key produces a schema error") }
+        }
+    }
+    section("R7: SnapshotStore lists pending writes and clear survives restart") {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = SnapshotStore(directory: dir, log: { _ in })
+        let snapshot = Snapshot(group: 1, space: .skylight(42), columns: [])
+        store.save([snapshot])
+        check(store.list().count == 1, "pending snapshot is listed before disk flush")
+        store.flush()
+        check(SnapshotStore(directory: dir, log: { _ in }).load().count == 1, "clear test starts with a nonempty disk book")
+        store.clear()
+        check(store.list().isEmpty && SnapshotStore(directory: dir, log: { _ in }).load().isEmpty, "clear persists empty book")
+    }
+    section("R7: app-scoped clear removes only that bundle from live and disk snapshots") {
+        var h = Harness()
+        h.census(10, [window(1, bundle: "clear.me"), window(2, bundle: "keep.me")])
+        h.census(11, [window(3, bundle: "clear.me"), window(4, bundle: "keep.me", floating: true)])
+        h.send(.windowsHidden([TileID(3)]))
+        h.census(12, [window(5, bundle: "keep.me", floating: true), window(6, bundle: "clear.me")])
+        let disk = Snapshot(group: 1, space: .skylight(90), columns: [SnapshotColumn(windows: [window(9, bundle: "clear.me"), window(10, bundle: "keep.me")], width: .proportion(0.5))])
+        h.send(.loadSnapshots([disk]))
+        let before = h.world.spaces.persisted
+        check(before.contains { $0.hidden.contains { $0.window.id == TileID(3) } }, "hidden target is really in a stored snapshot")
+        h.send(.command(.clearPositionsApp("clear.me"), .ipc))
+        let book = h.world.spaces.persisted
+        check(book.allSatisfy { ($0.windows + $0.hidden.map(\.window)).allSatisfy { $0.bundleID != "clear.me" } }, "target absent from live/disk/hidden snapshots")
+        check(Set(book.flatMap { $0.windows.map(\.bundleID) }) == ["keep.me"], "other bundle survives")
+        check(h.world.groups[1]?.floating.contains(TileID(5)) == true && h.world.groups[1]?.windows[TileID(6)] != nil,
+              "current managed layout is not removed, including the cleared app")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = SnapshotStore(directory: dir, log: { _ in })
+        store.save(before)
+        store.clear(bundleID: "clear.me")
+        let loaded = SnapshotStore(directory: dir, log: { _ in }).load()
+        check(Set(loaded.flatMap(\.windows).map(\.id)) == [TileID(2), TileID(4), TileID(5), TileID(10)],
+              "app-scoped clear preserves other apps across restart")
+        check(loaded.flatMap(\.hidden).allSatisfy { $0.window.bundleID != "clear.me" }, "hidden target also stays cleared on disk")
+    }
+    section("R7: fresh frame reads finish once, deadline reports missing reads as unreadable") {
+        var results: [[UInt32: CGRect]] = []
+        let probe = FrameProbe(ids: [TileID(1), TileID(2)], timeout: 60) { results.append($0) }
+        let fresh = CGRect(x: 1, y: 2, width: 300, height: 400)
+        probe.receive(TileID(1), frame: fresh)
+        check(results.isEmpty, "waits for remaining read without blocking")
+        probe.finish()
+        probe.receive(TileID(2), frame: fresh)
+        probe.finish()
+        check(results.count == 1 && results[0][1] == fresh && results[0][2] == nil, "one bounded result with missing frame omitted")
+        var timedOut = false
+        let timerProbe = FrameProbe(ids: [TileID(9)], timeout: 0.001) { frames in timedOut = frames.isEmpty }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        check(timedOut, "real run-loop deadline finishes unreadable reads")
+        timerProbe.finish()
     }
     section("R3 config: unknown keys and bad values are load errors that name the key") {
         func error(_ text: String) -> String? {
@@ -2388,11 +3953,11 @@ struct FuzzStream {
         var h = Harness()
         h.census(10, (1...6).map { window($0) })
         let area = h.world.topology.groups[0].frame
-        let offScreen = h.world.frames.values.filter { $0.frame.rect.intersection(area).width < 2 }.map(\.tile)
+        let offScreen = h.world.frames.values.filter { !area.contains($0.frame.rect) }.map(\.tile)
         check(!offScreen.isEmpty, "a six-column strip hides some columns")
         h.send(.command(.release, .ipc))
         let released = Dictionary(uniqueKeysWithValues: h.requests.map { ($0.tile, $0.frame.rect) })
-        check(Set(released.keys) == Set(offScreen), "only off-screen windows move")
+        check(Set(released.keys) == Set(offScreen), "only fully or partially off-screen windows move")
         check(released.values.allSatisfy { area.contains($0) }, "each lands fully inside the working area")
         check(Set(released.values.map(\.origin)).count == released.count, "cascaded, so none hides another exactly")
         var changing = Harness()
@@ -2501,8 +4066,8 @@ struct FuzzStream {
         check(!still.world.needsTicks, "without animation there is no bounce")
         var swiping = Harness(animate: true)
         swiping.census(10, [window(1), window(2)])
-        swiping.send(.pointer(.beginGesture(TileID(1))))
-        swiping.send(.pointer(.delta(20)))
+        swiping.send(.pointer(began))
+        swiping.send(.pointer(swipe(20)))
         swiping.send(.command(.focusLeft, .keyboard))
         let viewSwipes = if case .gesture = swiping.world.groups[1]!.strip.viewOffset { true } else { false }
         check(viewSwipes == (swiping.gesture != nil), "edge focus during a swipe never leaves a swipe without its view")
@@ -2547,7 +4112,11 @@ struct FuzzStream {
         let released = Dictionary(uniqueKeysWithValues: h.requests.map { ($0.tile, $0.frame.rect) })
         check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minY == raised.minY && released[$0]?.height == raised.height + 20 },
               "every column comes back up at full height")
-        check([TileID(1), TileID(2)].allSatisfy { released[$0]?.minX == before[$0]?.minX }, "in its own column, not cascaded")
+        let area = h.world.topology.groups[0].displays[0].area
+        check([TileID(1), TileID(2)].allSatisfy { tile in
+            guard let frame = released[tile], let original = before[tile] else { return false }
+            return area.contains(frame) && (!area.contains(original) || frame.minX == original.minX)
+        }, "fully visible columns retain their place; clipped columns come fully on screen")
     }
     section("R3 release: a window hidden or minimized while off screen still comes back on screen") {
         var h = Harness()
@@ -2621,8 +4190,8 @@ struct FuzzStream {
         h.advance(1)
         h.send(.windowChanged(window(4)))
         let focused = h.effects.contains { if case .focus(TileID(4), .adoption) = $0 { true } else { false } }
-        check(focused && h.active == TileID(4) && h.world.groups[1]!.focus.decision?.tile == TileID(4),
-              "the titled window is focused, and is the active column")
+        check(!focused && h.active == TileID(4) && h.world.groups[1]!.focus.decision?.tile == TileID(4),
+              "the background titled window becomes the active column without OS focus")
         let area = h.world.topology.groups[0].frame
         check(h.world.frames[TileID(4)].map { area.contains($0.frame.rect) } ?? false, "the titled window is on screen")
         var clicked = Harness()
@@ -2682,7 +4251,7 @@ struct FuzzStream {
         let crossing = activated.send(.focus(FocusIntent(tile: TileID(2), pid: 7, source: .appActivation)))
         let added = activated.send(.windowAdded(window(3, app: 7))) + activated.send(.windowAdded(window(2, app: 7)))
         activated.advance(1)
-        check(focuses(crossing + added) == ["focus 2 appActivation", "raise 2"], "only the activated window is focused: \(focuses(crossing + added))")
+        check(focuses(crossing + added).isEmpty, "only the activated window is focused: \(focuses(crossing + added))")
         check(activated.world.groups[1]!.focus.decision?.tile == TileID(2) && activated.active == TileID(2), "the activation decides focus")
         var late = hidden()
         late.send(.windowAdded(window(2, app: 7)))
@@ -2760,7 +4329,7 @@ struct FuzzStream {
             h.advance(1)
             outcomes.append((h.world.groups[1]!.focus.decision.map { "\($0.tile.rawValue) \($0.source)" } ?? "none") + " asked=\(asked)")
         }
-        check(outcomes[0] == outcomes[1] && outcomes[0].hasSuffix("restore asked=true"), "the new Space restores its own focus: \(outcomes)")
+        check(outcomes[0] == outcomes[1] && outcomes[0].hasSuffix("restore asked=false"), "the new Space restores its own focus: \(outcomes)")
     }
     section("R3 hide: a window focused before it comes back takes focus when it does") {
         for source in [FocusSource.axFocus, .appActivation] {
@@ -3350,11 +4919,46 @@ struct FuzzStream {
         check(positions.count == 4 && positions.contains { $0["windowID"] as? UInt32 == 2 && $0["hidden"] as? Bool == true },
               "one entry per saved window, hidden ones marked")
         let area = h.world.topology.groups[0].frame
-        let layouts = IPCBridge.layouts(world: h.world, active: 1, windows: [
-            3: (CGRect(x: area.minX + 10, y: area.minY, width: 400, height: 400), true),
-            1: (CGRect(x: area.maxX - 1, y: area.minY, width: 400, height: 400), false)])
+        let layouts = IPCBridge.layouts(world: h.world, active: 1, frames: [
+            3: CGRect(x: area.minX + 10, y: area.minY, width: 400, height: 400),
+            1: CGRect(x: area.maxX - 1, y: area.minY, width: 400, height: 400)], onScreenIDs: [3])
         let spaces = layouts["spaces"] as? [[String: Any]] ?? []
         check(spaces.map { $0["source"] as? String ?? "" } == ["live", "session", "disk"], "current, then this session's stashes, then disk")
+        let live = (spaces[0]["windows"] as? [[String: Any]])?.first
+        check(live?["expectedFrame"] is [String: Double] && live?["unreadable"] as? Bool == false, "fresh frame and expected placement both reported")
+        let missing = (spaces[2]["windows"] as? [[String: Any]])?.first
+        check(missing?["unreadable"] as? Bool == true && missing?["currentFrame"] is NSNull, "failed fresh read is explicit, not a cached frame")
+        var visibility = Harness()
+        visibility.census(10, [window(10), window(11), window(12), window(13), window(14)])
+        let overlapping = CGRect(x: 10, y: 10, width: 100, height: 100)
+        let classified = IPCBridge.layouts(world: visibility.world, active: 1,
+                                           frames: [10: overlapping, 11: overlapping, 12: overlapping, 13: overlapping],
+                                           onScreenIDs: [10, 14])
+        let visibilitySpaces = classified["spaces"] as? [[String: Any]] ?? []
+        let visibleEntries = visibilitySpaces.first?["windows"] as? [[String: Any]] ?? []
+        check(visibleEntries.filter { $0["isOnScreen"] as? Bool == true }.compactMap { $0["windowID"] as? UInt32 } == [10, 14],
+              "window-server membership alone marks on-screen; off-Space, minimized and hidden readable rectangles do not")
+        check(visibleEntries.filter { $0["windowID"] as? UInt32 != 14 }.allSatisfy { $0["unreadable"] as? Bool == false },
+              "visibility does not discard fresh AX geometry")
+        check(visibleEntries.last?["unreadable"] as? Bool == true && visibleEntries.last?["currentFrame"] is NSNull,
+              "an on-screen window with a failed AX read remains explicitly unreadable")
+        var offset = Harness(displays: [display(1, x: -1000, y: -600)])
+        offset.census(10, [window(1)])
+        let offsetLayout = IPCBridge.layouts(world: offset.world, active: 1, frames: [:], onScreenIDs: [])
+        let offsetSpaces = offsetLayout["spaces"] as? [[String: Any]] ?? []
+        let expected = (offsetSpaces.first?["windows"] as? [[String: Any]])?.first?["expectedFrame"] as? [String: Double]
+        let actual = offset.world.frames[TileID(1)]?.frame.rect
+        check(expected?["x"] == actual.map { Double($0.minX) } && expected?["y"] == actual.map { Double($0.minY) }, "expected frames use global AX coordinates on an offset display")
+        var raised = Harness()
+        raised.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
+        raised.census(10, [window(1), window(2)])
+        let raisedLayout = IPCBridge.layouts(world: raised.world, active: 1, frames: [:], onScreenIDs: [])
+        let raisedSpaces = raisedLayout["spaces"] as? [[String: Any]] ?? []
+        let raisedEntries = raisedSpaces.first?["windows"] as? [[String: Any]] ?? []
+        let raisedExpected = raisedEntries.first?["expectedFrame"] as? [String: Double]
+        let raisedActual = raised.world.frames[TileID(1)]!.frame.rect
+        check(raisedExpected?["y"] == Double(raisedActual.minY) && raisedExpected?["h"] == Double(raisedActual.height),
+              "expected placement includes the engine's raised target, not an unraised reconstruction")
         let away = (spaces[1]["windows"] as? [[String: Any]])?.first
         check(away?["windowID"] as? UInt32 == 1 && away?["slivered"] as? Bool == true && away?["isOnScreen"] as? Bool == false,
               "a stashed window parked as a sliver is flagged")
@@ -3501,6 +5105,569 @@ struct FuzzStream {
     }
 }
 
+@MainActor func pointerTests() throws {
+    section("abf1b87: a swipe snaps a column onto the display it lands on, not across the seam of a shared strip") {
+        var h = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        h.census(10, (1...5).map { window($0) })
+        h.send(.command(.focus(TileID(1)), .ipc))
+        for distance in [700.0, 1400] {
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(distance)), advance: 0.2)
+            h.send(.pointer(lift))
+            let frame = h.world.frames[h.active!]!.frame.rect
+            let home = h.world.topology.displays.first { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }!
+            check(home.area.minX <= frame.minX && frame.maxX <= home.area.maxX, "a swipe of \(distance) lands its column inside one display")
+            check(abs(frame.midX - home.area.midX) < 1, "the middle snap centres the column on its own display, not the strip")
+        }
+    }
+    section("abf1b87 lane 2: a slow swipe released before any frame tick snaps; with snap off it stays where it was dropped") {
+        for snap in [true, false] {
+            var h = Harness(animate: true, gestureSnap: snap)
+            h.census(10, [window(1), window(2), window(3)])
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(130)), advance: 0.2)
+            let dropped = h.offset
+            h.send(.pointer(lift), advance: 0.001)
+            let strip = h.world.groups[1]!.strip
+            let target = if case .animation(let spring) = strip.viewOffset { spring.to } else { strip.viewOffset.current(at: h.time) }
+            if snap {
+                check(abs(target - strip.snapTarget(forColumn: strip.activeColumnIndex, at: h.time)) < 0.001, "the release snaps without a tick")
+            } else {
+                check(abs(target - dropped) < 0.001, "with snap off the drop stays")
+            }
+        }
+    }
+    section("abf1b87: a swipe that stops before the lift lands where it stopped; a cancelled swipe lands like a lift") {
+        for phase in [ScrollPhase.ended, .cancelled] {
+            var h = Harness()
+            h.census(10, [window(1), window(2), window(3)])
+            h.send(.command(.focus(TileID(1)), .ipc))
+            h.send(.pointer(began))
+            for _ in 0..<3 { h.send(.pointer(swipe(60))) }
+            h.send(.pointer(scroll(phase)), advance: phase == .ended ? 0.2 : 0.01)
+            let strip = h.world.groups[1]!.strip
+            check(h.consumed && h.gesture == nil, "\(phase) is taken and ends the swipe")
+            check(h.offset == strip.snapTarget(forColumn: strip.activeColumnIndex, at: h.time), "\(phase) lands on a snap point")
+            if phase == .ended { check(h.active == TileID(1), "a pause before the lift spends the swipe's speed") }
+        }
+    }
+    section("abf1b87 lane 4: a rejected swipe resets to idle, and the rest of that swipe reaches the app") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        let start = h.offset
+        h.send(.pointer(began))
+        check(!h.consumed, "the began sample reaches the app: its direction is unknown")
+        h.send(.pointer(scroll(.changed, 10, dy: 60)))
+        check(h.world.pointer == nil && !h.consumed, "a vertical first move rejects to idle")
+        h.send(.pointer(swipe(200)))
+        check(h.world.pointer == nil && !h.consumed && h.offset == start, "later horizontal samples of the rejected swipe pass through")
+        h.send(.pointer(lift))
+        check(!h.consumed, "its end passes through too")
+        h.send(.pointer(scroll(.began, modifier: false)))
+        h.send(.pointer(scroll(.changed, 200, modifier: false)))
+        check(h.world.pointer == nil && !h.consumed && h.offset == start, "without the modifier the strip stays and the app gets the scroll")
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(200)))
+        check(h.consumed && h.gesture != nil, "the next swipe with the modifier tracks")
+        h.send(.pointer(scroll(.changed, 50, modifier: false)))
+        check(h.gesture == nil && h.consumed, "letting go of the modifier mid-swipe releases the swipe")
+        h.send(.pointer(scroll(.changed, 50, modifier: false)))
+        check(h.consumed, "the rest of a swipe let go of the modifier stays out of the app")
+        h.send(.pointer(scroll(.ended, modifier: false)))
+        check(h.consumed, "so does its end")
+        check(h.world.check().isEmpty, "rejection invariants")
+    }
+    section("abf1b87: a swipe that has not moved yet leaves external focus live, then tracks from where focus left the view") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.tick, advance: 5)
+        h.advance(EngineConfig.focusDebounce + margin)
+        h.send(.pointer(began))
+        let began = h.gesture?.startOffset ?? h.world.pointer?.startOffset
+        h.send(.focus(FocusIntent(tile: TileID(3), source: .axFocus)))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(3) && h.world.pointer != nil, "external focus moves the strip during an undecided swipe")
+        let moving = h.world.groups[1]!.strip.viewOffset.current(at: h.time + 0.01)
+        check(moving != began, "the view is mid-scroll when the swipe decides")
+        h.send(.pointer(swipe(30)))
+        check(h.gesture?.startOffset == moving, "the swipe starts from the offset focus left")
+    }
+    section("2b2457b: a swipe onto a column of another width centres that column") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.setWidth(TileID(3), 700), .ipc))
+        h.send(.command(.focus(TileID(1)), .ipc))
+        let strip = h.world.groups[1]!.strip
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(strip.columnX(at: 2, time: h.time) - strip.columnX(at: 0, time: h.time))), advance: 0.2)
+        h.send(.pointer(lift))
+        let frame = h.world.frames[TileID(3)]!.frame.rect
+        check(h.active == TileID(3) && frame.width == 700, "the swipe lands on the wide column")
+        check(abs(frame.midX - 500) < 1, "the wide column is centred by its own width")
+    }
+    section("d227a21 lane 3: samples past the strip's end carry no velocity, and the release stretches past the end and springs back") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2)])
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.tick, advance: 5)
+        let bounds = h.world.groups[1]!.strip.viewOffsetBounds(at: h.time)
+        h.send(.pointer(began))
+        for _ in 0..<6 { h.send(.pointer(swipe(-400))) }
+        check(h.offset == bounds.lowerBound, "the swipe stops at the strip's end")
+        guard case .gesture(let gesture) = h.world.groups[1]!.strip.viewOffset else { return check(false, "gesture view") }
+        check(gesture.tracker.velocity(at: h.time) == 0, "clamped samples add no velocity")
+        let from = h.offset
+        h.send(.pointer(lift))
+        guard case .animation(let spring) = h.world.groups[1]!.strip.viewOffset else { return check(false, "release spring") }
+        let path = stride(from: 0.0, through: 2, by: 0.01).map { spring.evaluate(at: h.time + $0).value }
+        check(from < spring.to && path.max()! > spring.to + 5, "the view passes the edge column's rest position")
+        check(abs(path.last! - spring.to) < 1, "and settles back on the edge column")
+        check(abs(spring.to - h.world.groups[1]!.strip.snapTarget(forColumn: 0, at: h.time)) < 0.001, "the edge column is the first")
+        h.send(.tick, advance: 5)
+        h.send(.command(.focus(TileID(2)), .ipc))
+        h.send(.tick, advance: 5)
+        h.send(.command(.focus(TileID(1)), .ipc))
+        h.send(.tick, advance: 5)
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(-60)))
+        h.send(.pointer(swipe(-60)))
+        let flung = h.offset
+        h.send(.pointer(lift))
+        guard case .animation(let fling) = h.world.groups[1]!.strip.viewOffset else { return check(false, "fling spring") }
+        let flight = stride(from: 0.0, through: 2, by: 0.01).map { fling.evaluate(at: h.time + $0).value }
+        check(flung < fling.to && flight.min()! < flung - 5, "a fling toward the strip's start keeps going past the first column")
+        check(abs(flight.last! - fling.to) < 1, "and comes back to it")
+        h.send(.command(.focus(TileID(2)), .ipc))
+        h.send(.tick, advance: 5)
+        h.send(.pointer(began))
+        for _ in 0..<3 { h.send(.pointer(swipe(-60))) }
+        let inside = h.offset
+        h.send(.pointer(lift))
+        guard case .animation(let flick) = h.world.groups[1]!.strip.viewOffset else { return check(false, "flick spring") }
+        let arc = stride(from: 0.0, through: 2, by: 0.01).map { flick.evaluate(at: h.time + $0).value }
+        check(inside > bounds.lowerBound && arc.min()! < flick.to - 5 && abs(arc.last! - flick.to) < 1,
+              "a flick whose samples stayed inside the strip but whose projection passes its end overshoots the edge column and comes back")
+        var full = Harness(animate: true)
+        full.census(10, [window(1), window(2)])
+        full.send(.command(.toggleFullWidth(TileID(1)), .ipc))
+        full.send(.command(.focus(TileID(1)), .ipc))
+        full.send(.tick, advance: 5)
+        let rest = full.offset
+        check(rest == full.world.groups[1]!.strip.viewOffsetBounds(at: full.time).lowerBound, "a full-width edge column rests on the strip's end")
+        full.send(.pointer(began))
+        for _ in 0..<4 { full.send(.pointer(swipe(-5)), advance: 0.2) }
+        full.send(.pointer(lift))
+        guard case .animation(let push) = full.world.groups[1]!.strip.viewOffset else { return check(false, "push spring") }
+        let stretch = stride(from: 0.0, through: 2, by: 0.01).map { push.evaluate(at: full.time + $0).value }
+        check(stretch.min()! < rest - 5 && abs(stretch.last! - rest) < 1, "a slow push from that rest point still stretches past the end and comes back")
+    }
+    section("d227a21: the trackpad's momentum after a swipe is swallowed until it ends, and later momentum reaches the app") {
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(300)))
+        h.send(.pointer(lift))
+        var swallowed = true
+        for _ in 0..<30 {
+            h.send(.pointer(scroll(.momentum, 5, modifier: false)), advance: 0.05)
+            swallowed = swallowed && h.consumed
+            h.send(.tick)
+        }
+        check(swallowed, "every momentum sample of the swipe is swallowed, with or without the modifier")
+        check(h.world.pointer?.isSwiping == true, "a momentum tail longer than the spring keeps external focus quiet")
+        h.send(.pointer(scroll(.momentumEnded, modifier: false)))
+        check(h.consumed, "the tail's last sample is swallowed")
+        h.advance(EngineConfig.gestureQuiet + margin)
+        h.send(.tick)
+        check(h.world.pointer == nil, "the session ends a quiet period after the tail")
+        h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+        check(!h.consumed, "momentum nobody owns reaches the app")
+    }
+    section("d227a21: a wheel notch with the modifier moves the strip; a vertical notch or one without the modifier reaches the app") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.focus(TileID(2)), .ipc))
+        let start = h.offset
+        h.send(.pointer(scroll(.discrete, 120)))
+        check(h.consumed && abs(h.offset - start - 120) < 0.001, "a notch moves the view by its delta")
+        h.send(.pointer(scroll(.discrete, 0, dy: 40)))
+        check(!h.consumed && abs(h.offset - start - 120) < 0.001, "a vertical notch reaches the app")
+        h.send(.pointer(scroll(.discrete, 120, modifier: false)))
+        check(!h.consumed && abs(h.offset - start - 120) < 0.001, "a notch without the modifier reaches the app")
+    }
+    try section("67240b9: [gesture] snap from the config file applies at start and on every reload; a reload ends the swipe") {
+        let off = try AppConfig.parse("[gesture]\nsnap = false\nmodifier = \"alt\"\n")
+        check(!off.engine.gestureSnap && off.gestureModifier == .alt, "the file sets snap and the modifier")
+        check(AppConfig().gestureModifier == .fn && AppConfig().engine.gestureSnap, "defaults are fn and snap")
+        check((try? AppConfig.parse("[gesture]\nmodifer = \"fn\"\n")) == nil, "a typo in [gesture] is an error")
+        check((try? AppConfig.parse("[gesture]\nmodifier = \"hyper\"\n")) == nil, "an unknown modifier is an error")
+        var h = Harness(gestureSnap: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(130)))
+        h.send(.configChanged(off.engine))
+        let gestureView = if case .gesture = h.world.groups[1]!.strip.viewOffset { true } else { false }
+        check(h.world.pointer == nil && !gestureView, "a reload ends the swipe and leaves no gesture view")
+        func slowSwipe(_ h: inout Harness) -> (dropped: Double, landed: Double) {
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(130)), advance: 0.2)
+            let dropped = h.offset
+            h.send(.pointer(lift))
+            return (dropped, h.offset)
+        }
+        let free = slowSwipe(&h)
+        check(abs(free.landed - free.dropped) < 0.001, "after a reload with snap off the drop stays")
+        h.send(.configChanged(try AppConfig.parse("[gesture]\nsnap = true\n").engine))
+        _ = slowSwipe(&h)
+        let strip = h.world.groups[1]!.strip
+        let target = if case .animation(let spring) = strip.viewOffset { spring.to } else { h.offset }
+        check(abs(target - strip.snapTarget(forColumn: strip.activeColumnIndex, at: h.time)) < 0.001, "after a reload with snap on it snaps")
+    }
+    section("eebb564 lane 5 lane 6: the pill menu opens on the pressed tile and closes it after focus moved to another") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(.press(TileID(3), at: titleBar(TileID(3), in: h.world))))
+        check(h.consumed && h.overlay == .hidden, "a press is swallowed and shows nothing yet")
+        h.advance(EngineConfig.longPress - margin)
+        check(h.overlay == .hidden, "no menu before the long press")
+        h.advance(2 * margin)
+        guard case .menu(let menu) = h.overlay else { return check(false, "the long press opens the menu") }
+        check(menu.press.tile == TileID(3), "the menu is for the pressed tile")
+        h.send(.ipc(id: 1, command: .focus(TileID(1))))
+        check(h.active == TileID(1) && h.overlay == .menu(menu), "focus moves and the menu stays")
+        h.send(.pointer(.drag(AXPoint(CGPoint(x: 600, y: 300)))))
+        check(h.consumed && h.overlay == .menu(menu), "a drag across the pills is swallowed")
+        h.send(.pointer(.choose(.close(TileID(1)))))
+        check(h.consumed, "the choice is swallowed")
+        check(h.effects.contains { if case .close(TileID(3)) = $0 { true } else { false } }, "close acts on the tile the menu opened for")
+        check(!h.effects.contains { if case .close(TileID(1)) = $0 { true } else { false } }, "the focused tile stays")
+        check(h.overlay == .hidden && h.world.pointer == nil, "the menu is gone")
+        h.openMenu(TileID(1))
+        h.send(.pointer(.release(AXPoint(.zero))))
+        check(h.consumed && h.world.pointer == nil, "a release off the pills closes the menu and is swallowed")
+        h.openMenu(TileID(1))
+        h.send(.pointer(.cancel))
+        check(h.consumed && h.world.pointer == nil, "Escape closes the menu and is swallowed")
+    }
+    section("eebb564: a press released before the long press is a click on the window") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        let origin = titleBar(TileID(1), in: h.world)
+        h.send(.pointer(.press(TileID(1), at: origin)))
+        let timer = h.world.pointer!.timer!.token
+        h.send(.pointer(.release(origin)))
+        check(h.effects.contains { if case .replayPress(origin) = $0 { true } else { false } }, "the press is replayed")
+        check(h.effects.contains { if case .cancel(timer) = $0 { true } else { false } }, "the long press is cancelled")
+        h.advance(EngineConfig.longPress + margin)
+        check(h.overlay == .hidden && h.world.pointer == nil, "no menu opens later")
+    }
+    section("eebb564: a plain click ends a drag whose release was lost, and still reaches the window") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        h.beginReorder(TileID(1))
+        h.send(.pointer(.press(nil, at: AXPoint(CGPoint(x: 10, y: 10)))))
+        check(h.world.pointer == nil && h.overlay == .hidden && !h.consumed, "the overlay goes and the click passes")
+        h.send(.pointer(.press(nil, at: AXPoint(CGPoint(x: 10, y: 10)))))
+        check(h.effects.isEmpty, "a plain click with no session does nothing")
+    }
+    section("eebb564: a pill resizes the tile it opened on without moving focus or the focused window") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.command(.focus(TileID(3)), .ipc))
+        let focused = h.world.frames[TileID(3)]!.frame.rect
+        h.openMenu(TileID(1))
+        h.send(.pointer(.choose(.setWidthPreset(TileID(3), 2))))
+        check(h.world.groups[1]!.strip.columns[0].presetIndex == 2, "the preset lands on the pressed tile's column")
+        check(h.world.groups[1]!.strip.columns[2].presetIndex == nil, "the focused column keeps its width")
+        check(h.active == TileID(3) && h.world.frames[TileID(3)]!.frame.rect.minX == focused.minX, "focus and the focused window stay put")
+    }
+    section("eebb564: a reorder drop waits for the overlay; an early, unreleased or late drop leaves the order unchanged") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        let order = h.tiles
+        @MainActor func drag(_ h: inout Harness, ready: Bool) {
+            let origin = titleBar(TileID(1), in: h.world).point
+            h.send(.pointer(.press(TileID(1), at: AXPoint(origin))))
+            h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + EngineConfig.dragThreshold - 1, y: origin.y)))))
+            check(h.overlay == .hidden && h.consumed, "within the threshold nothing shows and the drag is swallowed")
+            h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + 40, y: origin.y)))))
+            if ready { h.send(.pointer(.overlayReady)) }
+            h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + 60, y: origin.y)))))
+            check(h.consumed, "a drag past the threshold is swallowed")
+        }
+        drag(&h, ready: false)
+        guard case .reorder(let shown) = h.overlay, !shown.released else { return check(false, "the drag asks for the overlay") }
+        h.send(.pointer(.release(AXPoint(.zero))))
+        check(h.consumed, "the release is swallowed")
+        guard case .reorder(let waiting) = h.overlay else { return check(false, "a release before the overlay is ready waits") }
+        check(waiting.session == shown.session && waiting.released, "a release before the overlay is ready waits for it")
+        h.send(.pointer(.drop(3)))
+        check(h.tiles == order && h.overlay == .hidden && h.world.pointer == nil, "a drop before the overlay was ready is refused")
+        drag(&h, ready: false)
+        h.send(.pointer(.release(AXPoint(.zero))))
+        h.send(.pointer(.overlayReady))
+        h.send(.pointer(.drop(3)))
+        check(h.tiles == [TileID(2), TileID(3), TileID(1)] && h.overlay == .hidden, "a released drag drops once the overlay is ready")
+        check(h.active == TileID(1), "the dropped tile takes focus")
+        drag(&h, ready: true)
+        h.send(.pointer(.drop(0)))
+        check(h.tiles == [TileID(2), TileID(3), TileID(1)] && h.overlay == .hidden, "a drop before the release is refused")
+        drag(&h, ready: true)
+        h.send(.pointer(.release(AXPoint(.zero))))
+        h.advance(EngineConfig.dropDeadline + margin)
+        check(h.overlay == .hidden && h.world.pointer == nil && h.logged("drop never came"), "a released drag whose drop never comes ends")
+        drag(&h, ready: true)
+        h.send(.pointer(.cancel))
+        check(h.consumed && h.overlay == .hidden && h.tiles == [TileID(2), TileID(3), TileID(1)], "Escape ends the drag, is swallowed and moves nothing")
+        drag(&h, ready: true)
+        h.send(.windowRemoved(TileID(2)))
+        check(h.overlay == .hidden && h.world.pointer == nil, "a window leaving the strip ends the drag")
+        check(h.world.check().isEmpty, "reorder invariants")
+    }
+    section("eebb564: a finished focus flash stays finished when its window moves") {
+        let indicator = FocusIndicator()
+        indicator.overlaySuppressed = true
+        var config = FocusIndicatorConfig()
+        config.style = .flash
+        indicator.reloadConfig(config)
+        let frame = CGRect(x: 0, y: 0, width: 100, height: 100)
+        check(indicator.snapTo(frame: frame), "a flash starts")
+        indicator.tick(time: TimeUtil.now() + 1)
+        check(!indicator.isAnimating, "the flash ends")
+        indicator.trackFrame(frame.offsetBy(dx: 50, dy: 0))
+        check(!indicator.isAnimating && indicator.currentFrame == frame, "a later move does not revive it")
+    }
+    section("2be34bd: a drop past the last column lands last; the gap before the last lands before it") {
+        var h = Harness()
+        h.census(10, [window(1), window(2), window(3)])
+        h.beginReorder(TileID(1))
+        h.drop(3)
+        check(h.tiles == [TileID(2), TileID(3), TileID(1)], "gap 3 of 3 is the end")
+        h.beginReorder(TileID(2))
+        h.drop(2)
+        check(h.tiles == [TileID(3), TileID(2), TileID(1)], "gap 2 of 3 is before the last")
+        h.beginReorder(TileID(1))
+        h.drop(-4)
+        check(h.tiles == [TileID(1), TileID(3), TileID(2)], "a gap before the first clamps to the first")
+    }
+    section("2be34bd: the pill bar hangs from the pressed tile's title bar, on a display that is not the primary") {
+        let topology = topology(1, [display(), display(2, x: 1000, y: -830)])
+        let press = TitlePress(tile: TileID(5), origin: AXPoint(CGPoint(x: 1300, y: -790)))
+        let anchor = PointerObserver.pillAnchor(press: press, frame: AXRect(CGRect(x: 1100, y: -800, width: 600, height: 500)), in: topology)
+        check(anchor == CGRect(x: 1300, y: 900 + 800 - PointerObserver.titleBarHeight, width: 0, height: 0), "AppKit y of the title bar's bottom edge")
+        let pills = PointerObserver.pills(presets: [0.33, 0.5, 0.67], tile: TileID(5))
+        check(pills.map(\.item.label) == ["Third", "Half", "Two-Thirds", "Full", "Float", "Close"], "presets, then full, float and close")
+        check(pills.allSatisfy { $0.command.tile == TileID(5) }, "every pill names the pressed tile")
+    }
+    section("R6 lane 9: the title bar's corners stay with macOS for the native resize") {
+        let frame = CGRect(x: 100, y: 50, width: 600, height: 500)
+        let contains = { (x: Double, y: Double) in
+            TitleBarInteraction.titleBarContains(CGPoint(x: x, y: y), frame: frame, height: PointerObserver.titleBarHeight,
+                                                 cornerInset: PointerObserver.cornerInset)
+        }
+        check(!contains(104, 60) && !contains(696, 60), "a press in either top corner is not a title-bar press")
+        check(contains(110, 60) && contains(690, 60) && contains(400, 77), "inside the corners and above 28 px it is")
+        check(!contains(400, 79), "below the title bar it is not")
+    }
+    section("R6 lane 8: the reorder overlay shows on the display under the cursor, also inside a shared strip") {
+        var h = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        h.census(10, (1...4).map { window($0) })
+        let onSecond = h.tiles.first { h.world.frames[$0]!.frame.rect.minX >= 1000 }!
+        h.beginReorder(onSecond)
+        guard case .reorder(let shown) = h.overlay else { return check(false, "the drag shows the overlay") }
+        check(shown.display == 2 && shown.scope.group == 1, "the overlay is on display 2 while the session belongs to the shared group")
+        var split = Harness(displays: [display(), display(2, x: 1000)])
+        split.census(10, [window(1)])
+        split.census(20, [window(2)], group: 2)
+        check(split.world.route(.pointer(.press(TileID(2), at: AXPoint(.zero)))) == 2, "a press goes to the group holding its tile")
+        check(split.world.route(.pointer(scroll(.began, x: 1500))) == 2, "a swipe begins on the strip under the cursor")
+        split.beginReorder(TileID(2), group: 2)
+        guard case .reorder(let second) = split.overlay else { return check(false, "the drag on display 2 shows the overlay") }
+        check(second.display == 2 && second.scope.group == 2, "the overlay is on display 2")
+        check(split.world.route(.pointer(.drop(0))) == 2, "later inputs go to the session's group")
+    }
+    section("R6 lane 10: a Space change or a topology change mid-drag hides the overlay and keeps the order") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1), window(2), window(3)])
+        h.census(20, [window(4)], group: 2)
+        let order = h.tiles
+        h.beginReorder(TileID(2))
+        h.send(.spaceWillChange, group: 2)
+        check(h.world.pointer != nil, "another display's Space change leaves the drag alone")
+        h.send(.spaceWillChange)
+        check(h.overlay == .hidden && h.world.pointer == nil && h.tiles == order, "this display's Space change ends it")
+        h.census(10, [window(1), window(2), window(3)])
+        h.beginReorder(TileID(2))
+        h.send(.topologyChanged(topology(2, [display(), display(2, x: 1000)])), scope: EventScope(topologyRevision: 1, group: 0, spaceEpoch: 0))
+        check(h.overlay == .hidden && h.world.pointer == nil && h.tiles == order, "a topology change ends it")
+        h.openMenu(TileID(1))
+        h.send(.configChanged(EngineConfig()))
+        check(h.overlay == .hidden && h.world.pointer == nil, "a config reload ends a menu")
+    }
+    section("R6: a left press takes a title bar only with the modifier held; a plain press reaches the app") {
+        var h = Harness()
+        h.census(10, [window(1), window(2)])
+        let bar = titleBar(TileID(1), in: h.world).point
+        let press = { (flags: CGEventFlags) in PointerObserver.pressInput(at: bar, flags: flags, modifier: .maskSecondaryFn, frames: h.world.frames) }
+        if case .press(let tile, _) = press(.maskSecondaryFn) { check(tile == TileID(1), "a modifier press on a title bar takes its tile") }
+        else { check(false, "a modifier press on a title bar becomes a press") }
+        let plain = press([])
+        if case .press(let tile, _) = plain { check(tile == nil, "a plain press on a title bar takes nothing") }
+        else { check(false, "a plain press becomes a press of no tile") }
+        h.send(.pointer(plain))
+        check(!h.consumed && h.world.pointer == nil, "and reaches the app")
+    }
+    section("R6: trackpad and wheel events become strip-point samples") {
+        func sample(phase: Int64 = 0, momentum: Int64 = 0, continuous: Bool = true, dx: Double = 0, dy: Double = 0,
+                    flags: CGEventFlags = .maskSecondaryFn) -> ScrollInput? {
+            PointerObserver.scrollInput(ScrollEvent(phase: phase, momentumPhase: momentum, continuous: continuous, dx: dx, dy: dy, flags: flags,
+                                                    location: CGPoint(x: 10, y: 20)), modifier: .maskSecondaryFn)
+        }
+        check(sample(phase: 2, dx: 10, dy: 1) == ScrollInput(phase: .changed, dx: -20, dy: -2, modifier: true, at: AXPoint(CGPoint(x: 10, y: 20))),
+              "a trackpad delta doubles and follows the fingers")
+        check(sample(phase: 1, flags: [])?.modifier == false, "the modifier is read from the event's flags")
+        check(sample(phase: 128) == nil, "may-begin starts nothing")
+        check(sample(momentum: 2)?.phase == .momentum && sample(momentum: 3)?.phase == .momentumEnded, "momentum phases")
+        check(sample(continuous: false, dx: 3, dy: 1)?.dx == -3, "a wheel notch moves by its dominant delta")
+        check(sample(continuous: false, dx: 1, dy: 3).map { $0.dx == 0 && $0.dy == 3 } == true, "a vertical notch stays vertical")
+        check(sample(dx: 0, dy: 4, flags: [.maskShift, .maskSecondaryFn])?.dx == -4, "shift turns a vertical scroll horizontal")
+    }
+    section("R6: the reorder band maps a cursor on a display above the primary into its own coordinates") {
+        let topology = topology(1, [display(), display(2, y: -830)])
+        let panel = screenRect(AXRect(topology.displays[1].frame), in: topology).rect
+        check(panel.minY == 900, "the upper display's AppKit origin is not zero")
+        check(ReorderOverlay.local(AXPoint(CGPoint(x: 100, y: -800)), panel: panel, in: topology) == CGPoint(x: 100, y: 800),
+              "a cursor 30 points below the top lands 30 points below the panel's top")
+        check(ReorderOverlay.origins(widths: [100, 200], bandWidth: 1000, spacing: 10) == [345, 455], "thumbnails sit centred")
+        check(.seconds(EngineConfig.dropDeadline) >= ReorderOverlay.readyDeadline * 2, "a released drag waits for an overlay that gave up capturing")
+    }
+    section("R6: no scroll on any display ends a title-bar press, drag or menu; the drop still lands") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(10, [window(1), window(2), window(3)])
+        h.census(20, [window(4)], group: 2)
+        @MainActor func stray(_ h: inout Harness) -> Bool {
+            let session = h.world.pointer?.token
+            var passed = true
+            for (input, group) in [(scroll(.began, modifier: false, x: 1500), 2), (scroll(.began, x: 1500), 2), (scroll(.began), 1),
+                                   (scroll(.momentum, 5, modifier: false), 1), (swipe(30), 1), (lift, 1), (scroll(.discrete, 120), 1)] {
+                h.send(.pointer(input), group: UInt32(group))
+                passed = passed && !h.consumed && h.world.pointer?.token == session
+            }
+            return passed
+        }
+        let origin = titleBar(TileID(1), in: h.world).point
+        h.send(.pointer(.press(TileID(1), at: AXPoint(origin))))
+        check(stray(&h), "a press outlives every scroll, which reaches the app")
+        h.send(.pointer(.drag(AXPoint(CGPoint(x: origin.x + 40, y: origin.y)))))
+        check(stray(&h), "a drag waiting for its overlay outlives every scroll")
+        h.send(.pointer(.overlayReady))
+        check(stray(&h) && h.overlay != .hidden, "a reorder drag and its overlay outlive every scroll")
+        h.drop(3)
+        check(h.tiles == [TileID(2), TileID(3), TileID(1)], "the drop lands")
+        h.openMenu(TileID(2))
+        check(stray(&h) && h.world.pointer?.press?.tile == TileID(2), "an open menu outlives every scroll")
+    }
+    section("d227a21: once a swipe is taken, the rest of that gesture and its momentum are swallowed, whatever ends the session meanwhile") {
+        let enders: [(String, (inout Harness) -> Void)] = [
+            ("a hotkey focus", { $0.send(.command(.focus(TileID(1)), .keyboard)) }),
+            ("a new window", { $0.send(.windowAdded(window(4))) }),
+            ("a closed window", { $0.send(.windowRemoved(TileID(3))) }),
+            ("a plain click", { $0.send(.pointer(.press(nil, at: AXPoint(CGPoint(x: 10, y: 10))))) }),
+            ("a wheel notch", { $0.send(.pointer(scroll(.discrete, 120))) }),
+            ("a Space change", { $0.census(20, [window(5)]) }),
+            ("a config reload", { $0.send(.configChanged(EngineConfig(animate: true))) }),
+        ]
+        for (name, end) in enders {
+            for midTrack in [false, true] {
+                let when = midTrack ? "mid-swipe" : "after the lift"
+                var h = Harness(animate: true)
+                h.census(10, [window(1), window(2), window(3)])
+                h.send(.pointer(began))
+                h.send(.pointer(swipe(100)))
+                if !midTrack { h.send(.pointer(lift)) }
+                end(&h)
+                check(h.world.pointer?.isSwiping != true, "\(name) \(when) ends the swipe")
+                let later = h.time + 10
+                let rest = h.world.groups[1]!.strip.viewOffset.current(at: later)
+                var swallowed = true
+                let remainder = midTrack ? [swipe(60), scroll(.changed, 60, modifier: false), lift] : []
+                for input in remainder + Array(repeating: scroll(.momentum, 40, modifier: false), count: 5) {
+                    h.send(.pointer(input), advance: 0.05)
+                    swallowed = swallowed && h.consumed
+                }
+                check(swallowed && h.world.groups[1]!.strip.viewOffset.current(at: later) == rest,
+                      "after \(name) \(when) the rest of the gesture is swallowed and moves nothing")
+                h.send(.pointer(scroll(.momentumEnded, modifier: false)))
+                check(h.consumed, "after \(name) \(when) the tail's last sample is swallowed")
+                h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+                check(!h.consumed, "after \(name) \(when) the next gesture's momentum reaches the app")
+                check(h.world.check().isEmpty, "after \(name) \(when) invariants hold")
+            }
+        }
+        var h = Harness(animate: true)
+        h.census(10, [window(1), window(2), window(3)])
+        h.send(.pointer(began))
+        h.send(.pointer(swipe(300)))
+        h.send(.pointer(lift))
+        h.send(.pointer(scroll(.began, modifier: false)))
+        h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+        check(!h.consumed, "a new gesture's began hands momentum back to the app")
+        for (name, hand) in [("a pause", { (h: inout Harness) in h.send(.pointer(.cancel)) }),
+                             ("a quiet gesture", { (h: inout Harness) in h.advance(EngineConfig.gestureQuiet + margin) }),
+                             ("a began during a press", { (h: inout Harness) in
+                                 h.send(.pointer(.press(TileID(1), at: titleBar(TileID(1), in: h.world))))
+                                 h.send(.pointer(scroll(.began, modifier: false)))
+                             })] {
+            var h = Harness(animate: true)
+            h.census(10, [window(1), window(2), window(3)])
+            h.send(.pointer(began))
+            h.send(.pointer(swipe(300)))
+            h.send(.pointer(lift))
+            h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+            hand(&h)
+            h.send(.pointer(scroll(.momentum, 5, modifier: false)))
+            check(!h.consumed, "\(name) hands later momentum to the app")
+        }
+        var menu = Harness(animate: true)
+        menu.census(10, [window(1), window(2), window(3)])
+        menu.send(.pointer(began))
+        menu.send(.pointer(swipe(300)))
+        menu.send(.pointer(lift))
+        menu.send(.pointer(.press(TileID(2), at: titleBar(TileID(2), in: menu.world))))
+        for _ in 0..<10 {
+            menu.send(.pointer(scroll(.momentum, 5, modifier: false)), advance: 0)
+            menu.advance(0.05)
+        }
+        check(menu.world.pointer.map { if case .menuOpen = $0.phase { true } else { false } } == true, "a menu opens while the flick's momentum runs")
+        menu.send(.pointer(.release(AXPoint(.zero))))
+        menu.send(.pointer(scroll(.momentum, 5, modifier: false)))
+        check(menu.consumed, "dismissing the menu keeps swallowing the flick's momentum")
+        for ender in ["a new window", "a Space change"] {
+            var paused = Harness(animate: true)
+            paused.census(10, [window(1), window(2), window(3)])
+            paused.send(.pointer(began))
+            paused.send(.pointer(swipe(100)))
+            if ender == "a new window" { paused.send(.windowAdded(window(4))) } else { paused.census(20, [window(5)]) }
+            check(paused.world.pointer == nil && paused.world.gestureTail != nil, "\(ender) leaves the taken gesture's tail with no session")
+            paused.send(.command(.release, .ipc))
+            var reached = true
+            for _ in 0..<20 {
+                paused.send(.pointer(scroll(.changed, 10, modifier: false)), advance: 0.05)
+                reached = reached && !paused.consumed
+            }
+            check(reached, "after \(ender), a pause hands an app's scroll begun meanwhile back to the app")
+        }
+        var lost = Harness(animate: true)
+        lost.census(10, [window(1), window(2), window(3)])
+        lost.send(.pointer(began))
+        lost.send(.pointer(swipe(100)))
+        lost.send(.pointer(began))
+        lost.send(.pointer(swipe(100)))
+        check(lost.gesture != nil && lost.consumed, "a began after a lost lift starts a swipe of its own")
+    }
+}
+
 @MainActor func fuzzTests(seeds: [UInt64]) {
     guard only.isEmpty || only == "fuzz" else { return }
     print("▸ fuzz: \(seeds.count) seeds × 10,000 events, World.check() after every event")
@@ -3508,17 +5675,25 @@ struct FuzzStream {
         var stream = FuzzStream(seed: seed)
         for step in 0..<10_000 {
             stream.step()
-            let violations = stream.h.world.check()
+            var violations = stream.h.world.check()
+            if stream.h.overlay != (stream.h.world.pointer?.overlay ?? .hidden) { violations.append("overlay shown \(stream.h.overlay) for \(String(describing: stream.h.world.pointer?.phase))") }
             check(violations.isEmpty, "seed=\(seed) step=\(step): \(violations)")
             if !violations.isEmpty { break }
         }
         let states = ["hidden return", "fingerprint key", "dock crossing", "multi-column restore", "group added or removed", "merged group", "no display",
                       "empty fingerprint key", "census window dropped", "hidden place stashed", "hidden place restored",
-                      "stashed late title", "dock crossing honored", "positions cleared", "mixed read committed"]
+                      "stashed late title", "dock crossing honored", "positions cleared", "mixed read committed",
+                      "swipe released", "reorder dropped", "menu chose", "session deadline", "session ended by a Space change",
+                      "session ended by a topology change"]
         print("  seed=\(seed) reached \(states.map { "\($0)=\(stream.reached[$0, default: 0])" }.joined(separator: " "))")
         for state in states { check(stream.reached[state, default: 0] > 0, "seed=\(seed) fuzz reaches \(state)") }
         check(stream.reached["mixed read frozen", default: 0] == 0, "seed=\(seed) every settled mixed fingerprint read commits within the bound")
         check(stream.reached["window lost on a topology change", default: 0] == 0, "seed=\(seed) no topology change loses a window")
+        check(stream.reached["idle consumed a stray input", default: 0] == 0, "seed=\(seed) an input no session took reaches the app")
+        check(stream.reached["no-modifier scroll consumed", default: 0] == 0, "seed=\(seed) a scroll without the modifier reaches the app")
+        check(stream.reached["a held button's input reached the app", default: 0] == 0, "seed=\(seed) a session swallows every drag, release, choice and Escape of its button")
+        check(stream.reached["a scroll ended a title-bar session", default: 0] == 0, "seed=\(seed) no scroll ends a title-bar session")
+        check(stream.h.leakedTail == 0, "seed=\(seed) once a swipe is taken, the rest of its gesture is swallowed: \(stream.h.leakedTail)")
         check(stream.h.rewoundFocus == 0, "seed=\(seed) a group's focusedAt never moves back: \(stream.h.rewoundFocus)")
         check(stream.h.stolenFocus == 0, "seed=\(seed) only the group commands act on restores OS focus: \(stream.h.stolenFocus)")
     }
@@ -3542,8 +5717,491 @@ struct FuzzStream {
     #endif
 }
 
+@MainActor func audit2Tests() {
+    section("audit2 focus: OS observations scroll without focus work") {
+        var h = Harness()
+        h.send(.spaceChanged(key: .skylight(1), epoch: 1, windows: [window(10, app: 100), window(20, app: 200)], frontmost: TileID(20)))
+        h.send(.focus(FocusIntent(tile: TileID(10), pid: 100, source: .appActivation)))
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(10), "Dock activation still selects kitty")
+        check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "Dock decision requests no OS focus")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "Dock activation emits no focus effect")
+        h.send(.windowAdded(window(30, app: 100), frontmost: true))
+        check(h.active == TileID(30), "frontmost adoption still selects the new window")
+        check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "adoption is observational")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "adoption emits no OS focus")
+        h.send(.focus(FocusIntent(tile: nil, pid: 300, source: .appActivation)))
+        h.census(2, [window(40, app: 300)])
+        check(h.active == TileID(40), "cross-Space Dock activation keeps its decision")
+        check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "cross-Space Dock activation does not refocus")
+        check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "crossing emits no OS focus")
+    }
+    section("audit2 restore: off-Space deminiaturization preserves its saved strip") {
+        for transition in [false, true] {
+            for memberships: Set<UInt64>? in [nil, [1]] {
+                var h = Harness()
+                let a = window(1, app: 101), b = window(2, app: 202)
+                h.census(1, [a])
+                h.send(.windowsHidden([a.id]))
+                h.census(2, [b])
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                let saved = h.world.spaces.live.mapValues { try! encoder.encode($0) }
+                var effects: [Effect] = []
+                let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-audit2-unused-config", "REEL_STATE_DIR": "/tmp/reel-audit2-unused-state"]),
+                                censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: 2, uuid: nil, isUserSpace: true) }, screen: { [] }, memberships: { _ in memberships }),
+                                effects: { effects.append(contentsOf: $0) })
+                if transition { loop.send(.spaceWillChange); effects = [] }
+                let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                        managed: { [2] }, elsewhere: { [1] }, paused: { false }, emit: { kind, stamp in loop.send(kind, stamp: stamp) }, log: { _ in },
+                                        frontmostPID: { 202 }, isVisible: { _ in false })
+                observer.receive(.restored(WindowFacts(id: 1, pid: 101, bundleID: "app101", title: "restored", frame: CGRect(x: 0, y: 30, width: 500, height: 800), classification: .tile)), stamp: loop.world.stamp)
+                check(observer.known[1]?.title == "restored", "off-Space restore still learns fresh AX facts")
+                check(loop.world.spaces.live.mapValues { try! encoder.encode($0) } == saved, "off-Space restore does not prune or mutate the saved strip")
+                check(loop.world.groups[1]!.windows[a.id] == nil, "off-Space restored window stays out of the current strip")
+                check(!effects.contains { switch $0 { case .setFrame, .focus, .raise: true; default: false } }, "off-Space restore emits no frame or focus effects")
+            }
+        }
+    }
+    section("audit2 restore: visible restore uses the Loop membership and transition gates") {
+        for state in ["here", "wrong membership", "mid-transition"] {
+            var h = Harness()
+            let a = window(1, app: 101)
+            h.census(1, [a])
+            h.send(.windowsHidden([a.id]))
+            let memberships: Set<UInt64>? = state == "wrong membership" ? [2] : nil
+            let observed: UInt64 = state == "mid-transition" ? 2 : 1
+            var effects: [Effect] = []
+            let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-audit2-unused-config", "REEL_STATE_DIR": "/tmp/reel-audit2-unused-state"]),
+                            censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in SpaceSnapshot(sid: observed, uuid: nil, isUserSpace: true) }, screen: { [] }, memberships: { _ in memberships }),
+                            effects: { effects.append(contentsOf: $0) })
+            let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil, managed: { [] }, elsewhere: { [1] }, paused: { false },
+                                    emit: { kind, stamp in loop.send(kind, stamp: stamp) }, log: { _ in }, frontmostPID: { 101 }, isVisible: { _ in true })
+            observer.receive(.restored(WindowFacts(id: 1, pid: 101, bundleID: "app101", title: "w1", frame: CGRect(x: 0, y: 30, width: 500, height: 800), classification: .tile)), stamp: loop.world.stamp)
+            check((loop.world.groups[1]!.windows[a.id] != nil) == (state == "here"), "only a visible restore on the settled Space returns to its column")
+            if state != "here" { check(effects.isEmpty, "membership and mid-transition rejections emit no layout effects") }
+        }
+    }
+    section("audit2 hide: minimize and app hide never become native-tab swaps") {
+        for addFirst in [false, true] {
+            for hideApp in [false, true] {
+                var h = Harness()
+                h.census(1, [window(10, app: 100), window(11, app: 100), window(20, app: 200), window(21, app: 201), window(22, app: 202)])
+                h.send(.command(.focus(TileID(22)), .keyboard))
+                if addFirst { h.send(.windowAdded(window(12, app: 100), frontmost: true)) }
+                let hidden = hideApp ? [TileID(10), TileID(11)] : [TileID(10)]
+                let effects = h.send(.windowsHidden(hidden), advance: 1.0)
+                check(effects.contains { if case .setFrame(let request) = $0, request.tile == TileID(10), case .release = request.purpose { true } else { false } }, "minimize or hide keeps the clipped window's release write")
+                check(h.world.groups[1]!.hidden[TileID(10)]!.tab != true, "a user hide is never an ordered-out tab")
+                if !addFirst { h.send(.windowAdded(window(12, app: 100), frontmost: true)) }
+                check(!h.logged("tab switch"), "same-app create and user hide do not move a column as a tab")
+                check(h.world.groups[1]!.hidden[TileID(10)]!.tab != true, "a later new window cannot turn a minimized window into a tab")
+                let release = h.send(.command(.release, .ipc))
+                check(release.contains { if case .setFrame(let request) = $0, request.tile == TileID(10), case .release = request.purpose { true } else { false } }, "quit still releases the minimized window")
+            }
+        }
+    }
+    section("audit2 activation: nil-tile Dock click cancels the previous app timer") {
+        var h = Harness()
+        h.send(.spaceChanged(key: .skylight(1), epoch: 1, windows: [window(10, app: 100), window(20, app: 200)], frontmost: TileID(20)))
+        let executor = Executor(worker: { _ in nil }, log: { _ in })
+        executor.synchronizeFocus(with: h.world, paused: false)
+        h.send(.focus(FocusIntent(tile: nil, pid: 100, source: .appActivation)))
+        h.send(.focus(FocusIntent(tile: TileID(10), pid: 100, source: .appActivation)), advance: 0.30)
+        check(h.world.timers.count == 1, "kitty's delayed read scheduled its scroll")
+        let generation = executor.focusObservationGeneration
+        h.send(.focus(FocusIntent(tile: nil, pid: 200, source: .appActivation)), advance: 0.10)
+        check(h.world.timers.isEmpty, "Fork click cancels kitty before its missing-tile return")
+        h.advance(0.06)
+        executor.synchronizeFocus(with: h.world, paused: false)
+        check(h.active == TileID(20), "kitty cannot commit after the newer Fork activation")
+        check(executor.focusObservationGeneration == generation, "observed activation cannot supersede the slow Fork read")
+        h.send(.focus(FocusIntent(tile: TileID(20), pid: 200, source: .appActivation)), advance: 0.14)
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(20) && h.world.groups[1]!.focus.decision?.source == .appActivation, "Fork's slow read still commits")
+    }
+    section("audit2 focus: nil and unmanaged Space frontmost reads never raise") {
+        for frontmost: TileID? in [nil, TileID(999), TileID(10)] {
+            var h = Harness()
+            h.census(1, [window(10)])
+            h.send(.command(.focus(TileID(10)), .keyboard))
+            h.census(2, [window(20)])
+            h.send(.spaceChanged(key: .skylight(1), epoch: h.world.groups[1]!.epoch + 1, windows: [window(10)], frontmost: frontmost))
+            check(h.active == TileID(10), "arrival restores its saved selection")
+            check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "unknown or matching frontmost read is quiet")
+            check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "Space arrival emits no speculative focus")
+        }
+    }
+    section("audit2 focus: only a different managed frontmost window permits OS restore") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(1, [window(10)])
+        h.census(1, [window(30, x: 1100)], group: 2)
+        h.send(.command(.focus(TileID(10)), .keyboard))
+        h.send(.spaceChanged(key: .skylight(2), epoch: h.world.groups[1]!.epoch + 1, windows: [window(20)], frontmost: TileID(30)))
+        check(h.active == TileID(20), "the leading group restores its own strip selection")
+        check(h.effects.contains { if case .focus(TileID(20), .restore) = $0 { true } else { false } }, "a successful different managed frontmost read allows OS restore")
+        check(h.world.groups[1]!.focus.decision?.requestsOSFocus == true, "restore records the permitted OS request")
+    }
+    section("audit2 focus: explicit actions focus once and raise style still lays out") {
+        var h = Harness()
+        h.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
+        h.census(1, [window(10), window(20)])
+        for source: FocusSource in [.keyboard, .ipc, .click] {
+            h.send(.focus(FocusIntent(tile: TileID(20), source: source)))
+            check(h.effects.filter { if case .focus(TileID(20), _) = $0 { true } else { false } }.count == 1, "explicit action emits one focus")
+            check(!h.effects.contains { if case .raise = $0 { true } else { false } }, "AX focus already raises")
+        }
+        check(h.world.frames[TileID(10)]!.frame.rect.minY == 50, "raise style lowers the inactive column")
+        check(h.world.frames[TileID(20)]!.frame.rect.minY == 30, "raise style leaves the focused column at its normal height")
+    }
+}
+
+@MainActor func auditBTests() {
+    section("AuditB 1 independent-display migration and floating re-tile") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(1, [window(1, x: 100)])
+        h.census(2, [window(2, x: 1200)], group: 2)
+        let moved = AXRect(CGRect(x: 1300, y: 30, width: 350, height: 600))
+        var effects = h.send(.windowMoved(TileID(1), moved))
+        h.advance(EngineConfig.focusDebounce + margin)
+        effects += h.effects
+        check(!effects.contains { switch $0 { case .focus, .raise: true; default: false } }, "a moved window is followed, not activated or raised by Reel")
+        check(h.world.owner(of: TileID(1)) == 2, "foreign settled move migrates to destination strip")
+        check(h.world.groups[2]!.focus.decision?.tile == TileID(1), "migration focuses moved tile")
+        h.send(.command(.toggleFloating(TileID(1)), .ipc), group: h.world.owner(of: TileID(1))!)
+        h.send(.windowMoved(TileID(1), AXRect(CGRect(x: 100, y: 30, width: 350, height: 600))), group: h.world.owner(of: TileID(1))!)
+        h.send(.command(.toggleFloating(TileID(1)), .ipc), group: h.world.owner(of: TileID(1))!)
+        check(h.world.owner(of: TileID(1)) == 1 && h.world.groups[1]!.strip.columns.contains { $0.tiles.contains(TileID(1)) }, "float drag re-tiles under current frame")
+        check(h.world.check().isEmpty, "migration invariants")
+        h.send(.command(.toggleFloating(TileID(1)), .ipc))
+        h.send(.windowChanged(window(1, x: 1300), frontmost: true))
+        h.send(.command(.toggleFloating(TileID(1)), .ipc))
+        check(h.world.owner(of: TileID(1)) == 2 && !h.world.groups[2]!.floating.contains(TileID(1)), "re-tile uses current metadata frame even if move notification was missed")
+        var merged = Harness(displays: [display(), display(2, x: 1000)], separateSpaces: false)
+        merged.census(1, [window(1, x: 100)])
+        merged.send(.windowMoved(TileID(1), moved))
+        check(merged.world.owner(of: TileID(1)) == 1, "merged-strip seam is not migration")
+    }
+    section("AuditB 5 release live stashes but never disk identities") {
+        var h = Harness()
+        h.census(1, (1...5).map { window(UInt32($0)) })
+        let saved = h.world.currentSnapshot(group: 1)!
+        h.census(2, [window(20)])
+        let effects = h.send(.command(.release, .ipc))
+        let writes = effects.compactMap { effect -> FrameRequest? in if case .setFrame(let r) = effect { return r }; return nil }
+        check(Set((1...5).map { TileID(UInt32($0)) }).isSubset(of: Set(writes.map(\.tile))), "release includes tiles held only on another live Space")
+        check(Set(writes.map(\.tile)).count == writes.count, "release dedupes current and stashed windows")
+        check(writes.allSatisfy { if case .release(let area) = $0.purpose { return area.rect.contains($0.frame.rect) }; return false }, "release uses per-display contained frames")
+        var disk = Harness()
+        disk.send(.loadSnapshots([saved]))
+        disk.census(2, [window(20, bundle: "other")])
+        disk.send(.command(.release, .ipc))
+        check(disk.requests.allSatisfy { $0.tile == TileID(20) }, "disk-only identities never receive writes")
+    }
+    section("AuditB 5c one release covers live Spaces on every group") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(1, [window(1, x: 100)])
+        h.census(20, [window(2, x: 1200)], group: 2)
+        h.census(21, [window(3, x: 1200)], group: 2)
+        h.send(.command(.release, .ipc))
+        check(h.requests.contains { $0.tile == TileID(2) && $0.scope.group == 2 }, "one shutdown release includes other group's live stash")
+        check(Set(h.requests.map(\.tile)).count == h.requests.count, "all-display shutdown release dedupes identities")
+    }
+    section("AuditB 5b hidden stash release after display unplug") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(50, [window(1, x: 1200)], group: 2)
+        h.send(.windowsHidden([TileID(1)]), group: 2)
+        h.census(51, [window(2, x: 1200)], group: 2)
+        h.send(.topologyChanged(topology(2, [display()])))
+        h.send(.command(.release, .ipc))
+        let writes = h.requests.filter { $0.tile == TileID(1) }
+        check(writes.count == 1, "unplugged live hidden identity is released once")
+        check(writes.allSatisfy { if case .release(let area) = $0.purpose { return area.rect.contains($0.frame.rect) }; return false }, "hidden release frame is clamped to surviving physical display")
+    }
+    section("AuditB 7 9 bounded retries retain focus-ring frame") {
+        for result in [FrameResult.failed, .sizeUnconfirmed] {
+            var h = Harness()
+            h.census(1, [window(1)])
+            var request = h.world.frames[TileID(1)]!
+            for delay in [0.1, 0.5, 2.0] {
+                h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: result))
+                check(h.world.frames[request.tile] != nil, "failed size keeps last known ring frame")
+                let earliest = h.world.timers.values.map(\.deadline).min()!
+                check(abs(earliest - h.time - delay) < 0.001, "per-tile retry uses bounded backoff \(delay)")
+                h.advance(delay + 0.001)
+                request = h.world.frames[request.tile]!
+            }
+            let gaveUp = h.send(.frameCompleted(tile: request.tile, revision: request.revision, result: result))
+            check(h.world.timers.isEmpty, "fourth failure stops retrying")
+            check(gaveUp.contains { if case .log(let line) = $0 { return line.contains("frame give-up") }; return false }, "give-up is logged")
+            h.send(.tick, advance: 20)
+            check(h.requests.isEmpty, "idle cannot resurrect failed write")
+            h.send(.command(.recover, .ipc))
+            check(!h.requests.isEmpty, "recover resets retry budget")
+        }
+    }
+    section("AuditB 14c reclassification migration preserves unique membership") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(1, [window(1, floating: true, x: 100)])
+        h.census(2, [window(2, x: 1200)], group: 2)
+        h.send(.windowChanged(window(1, floating: true, x: 1300), frontmost: true))
+        h.send(.windowChanged(window(1, floating: false, x: 1300), frontmost: false))
+        check(!h.effects.contains { if case .focus = $0 { return true }; return false }, "background reclassification migration never requests OS focus")
+        check(h.world.check().isEmpty, "reclassification into another group never resurrects old ownership")
+        check(h.world.owner(of: TileID(1)) == 2, "reclassification uses latest frame for re-tile")
+    }
+    section("AuditB 14 first nonempty rule title latches after untitled adoption") {
+        var h = Harness(rules: [Rule(titleRegex: "^Settings$", floating: true)])
+        h.census(1, [ObservedWindow(id: TileID(1), pid: 1, bundleID: nil, title: "")])
+        h.send(.windowChanged(ObservedWindow(id: TileID(1), pid: 1, bundleID: nil, title: "Settings"), frontmost: true))
+        check(h.world.groups[1]!.floating.contains(TileID(1)), "late first title applies title_regex")
+        h.send(.windowChanged(ObservedWindow(id: TileID(1), pid: 1, bundleID: nil, title: "Document"), frontmost: true))
+        check(h.world.groups[1]!.floating.contains(TileID(1)), "nonempty rule title remains stable thereafter")
+    }
+}
+
+final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reads = 0
+    var propertyReads: Int { lock.withLock { reads } }
+    init() { super.init(element: AXUIElementCreateApplication(99001), windowID: 99001, pid: 99001) }
+    override func getFrame() -> AXResult<CGRect> { .success(CGRect(x: 100, y: 30, width: 500, height: 600)) }
+    override func getPropertiesFast() -> WindowProperties {
+        lock.withLock { reads += 1 }
+        return WindowProperties(role: "AXWindow", subrole: "AXStandardWindow", title: "Document", frame: try? getFrame().get())
+    }
+}
+
+@MainActor func auditBLateFocusTest() {
+    section("AuditB 14d health classification refresh is coalesced and stops for titled tiles") {
+        let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), clock = ScopeClock(), window = LateTitleProbeWindow()
+        clock.current = Stamp(revision: 1, epochs: [1: 0])
+        let worker = AppWorker(app: app, windows: [99001: window], clock: clock, send: box.append)
+        worker.refreshClassifications([99001])
+        worker.refreshClassifications([99001])
+        app.drain()
+        check(window.propertyReads == 1 && box.drain().count == 1, "hung-app health refreshes cannot pile up")
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [99001] }, elsewhere: { [] }, paused: { false },
+                                emit: { _, _ in }, log: { _ in }, frontmostPID: { 99001 })
+        observer.workers[99001] = worker
+        observer.clock.current = clock.current
+        observer.activated(99001)
+        app.drain()
+        let metadata = box.drain().filter { if case .reclassified = $0.0 { return true }; return false }
+        check(window.propertyReads == 1 && metadata.isEmpty, "a classified titled tile is no longer re-read on frequent focus events")
+    }
+    section("AuditB 14e stale provisional metadata is dropped and health retries it") {
+        let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox()
+        var changed = 0
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [99001] }, elsewhere: { [] }, paused: { false },
+                                emit: { kind, _ in if case .windowChanged = kind { changed += 1 } }, log: { _ in }, frontmostPID: { 99001 })
+        observer.clock.current = Stamp(revision: 1, epochs: [1: 1])
+        let worker = AppWorker(app: app, windows: [99001: LateTitleProbeWindow()], clock: observer.clock, focusSpace: { _ in nil }, send: box.append)
+        observer.workers[99001] = worker
+        observer.activated(99001)
+        observer.clock.current = Stamp(revision: 1, epochs: [1: 2])
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(changed == 0, "activation metadata from another Space epoch cannot reclassify or focus current windows")
+        worker.refreshClassifications([99001])
+        app.drain()
+        box.drain().forEach { observer.receive($0.0, stamp: $0.1) }
+        check(changed == 1, "health refresh can retry provisional facts rejected as stale")
+    }
+    section("AuditB 14b runtime focus retries untitled classification") {
+        let app = QueuedFocusApp(pid: 99001, focused: 99001), box = FocusObservationBox(), clock = ScopeClock()
+        clock.current = Stamp(revision: 1, epochs: [1: 0])
+        let worker = AppWorker(app: app, windows: [99001: LateTitleProbeWindow()], clock: clock, focusSpace: { _ in nil }, send: box.append)
+        let observer = Observer(executor: Executor(worker: { _ in worker }, log: { _ in }), allowedPids: nil,
+                                managed: { [99001] }, elsewhere: { [] }, paused: { false },
+                                emit: { _, _ in }, log: { _ in }, frontmostPID: { 99001 })
+        observer.workers[99001] = worker
+        observer.clock.current = clock.current
+        observer.activated(99001)
+        app.drain()
+        check(box.drain().contains { if case .reclassified(let facts, _) = $0.0 { return facts.title == "Document" && facts.classification == .tile }; return false }, "focus re-reads late title without title notification")
+    }
+}
+
+@MainActor func nativeTabTests() {
+    section("Native tabs: switching tabs keeps the column in place and focus on the new tab") {
+        // Fork: each tab is its own window. Switching orders the old one out and shows the new one, in either order.
+        for order in ["hide first", "add first"] {
+            var h = Harness()
+            h.census(1, [window(1, app: 101, x: 0), window(2, app: 200, x: 400), window(3, app: 300, x: 800)])
+            h.send(.command(.focus(TileID(2)), .keyboard))
+            h.advance(EngineConfig.focusDebounce + margin)
+            let width = h.world.groups[1]!.strip.columns[1].width
+            if order == "hide first" {
+                h.send(.windowsOrderedOut([TileID(2)]))
+                h.send(.windowAdded(window(4, app: 200), frontmost: true), advance: 0.3)
+            } else {
+                h.send(.windowAdded(window(4, app: 200), frontmost: true), advance: 0.3)
+                h.send(.windowsOrderedOut([TileID(2)]))
+            }
+            h.advance(EngineConfig.focusDebounce + margin)
+            check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(1)], [TileID(4)], [TileID(3)]], "\(order): the new tab takes the old tab's column")
+            check(h.world.groups[1]!.strip.columns[1].width == width, "\(order): the column keeps its width")
+            check(h.world.groups[1]!.focus.decision?.tile == TileID(4) && h.active == TileID(4), "\(order): focus follows the new tab")
+            check(h.world.groups[1]!.hidden[TileID(2)] != nil, "\(order): the old tab stays known for its return")
+            // And back to the first tab.
+            if order == "hide first" {
+                h.send(.windowsOrderedOut([TileID(4)]))
+                h.send(.windowAdded(window(2, app: 200), frontmost: true), advance: 0.3)
+            } else {
+                h.send(.windowAdded(window(2, app: 200), frontmost: true), advance: 0.3)
+                h.send(.windowsOrderedOut([TileID(4)]))
+            }
+            h.advance(EngineConfig.focusDebounce + margin)
+            check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(1)], [TileID(2)], [TileID(3)]], "\(order): switching back restores the first tab in the same column")
+            check(h.world.groups[1]!.focus.decision?.tile == TileID(2), "\(order): focus follows the switch back")
+        }
+    }
+    section("Ordered-out windows (background tabs) are never written, on hide or on quit") {
+        var h = Harness()
+        h.census(10, (1...6).map { window($0, app: 7) })
+        let area = h.world.topology.groups[0].frame
+        let off = h.world.frames.values.filter { $0.frame.rect.intersection(area).width < 2 }.map(\.tile).sorted { $0.rawValue < $1.rawValue }.last!
+        var effects = h.send(.windowsOrderedOut([off]))
+        check(!h.tiles.contains(off) && h.world.groups[1]!.hidden[off] != nil, "the ordered-out window leaves the strip and stays known")
+        effects += h.send(.command(.release, .ipc))
+        check(!effects.contains { if case .setFrame(let request) = $0 { request.tile == off } else { false } }, "no write ever reaches the ordered-out window")
+        var hidden = Harness()
+        hidden.census(10, (1...6).map { window($0, app: 7) })
+        let written = hidden.send(.windowsHidden([off])).contains { if case .setFrame(let request) = $0 { request.tile == off } else { false } }
+        check(written, "an app-hidden window still gets its release write")
+    }
+    section("Native tabs: an unrelated hide and a later window are not a tab switch") {
+        var h = Harness()
+        h.census(1, [window(1, app: 101, x: 0), window(2, app: 200, x: 400), window(3, app: 300, x: 800)])
+        h.send(.windowsHidden([TileID(2)]))
+        h.advance(2.0)
+        let effects = h.send(.windowAdded(window(4, app: 200), frontmost: true))
+        check(!effects.contains { if case .log(let line) = $0 { line.contains("tab switch") } else { false } }, "a window long after the hide is new, not a tab")
+        var other = Harness()
+        other.census(1, [window(1, app: 101, x: 0), window(2, app: 200, x: 400), window(3, app: 300, x: 800)])
+        other.send(.windowsHidden([TileID(2)]))
+        let unrelated = other.send(.windowAdded(window(4, app: 400), frontmost: true))
+        check(!unrelated.contains { if case .log(let line) = $0 { line.contains("tab switch") } else { false } }, "another app's window never takes the hidden tab's column")
+    }
+}
+
+@MainActor func auditBRemainingTests() {
+    section("AuditB 8a focus-drop reasons are retained and rate limited") {
+        var limiter = LogLimiter()
+        let line = FocusIntent(tile: TileID(1), source: .axFocus).droppedLog(reason: "stale-epoch")
+        check(limiter.allows(line, at: 1), "first focus-drop reason is logged")
+        check(!limiter.allows(line, at: 1.1), "repeated focus drop is rate limited")
+        check(limiter.allows(line, at: 3), "focus-drop reason is available again after interval")
+        check(limiter.allows(FocusIntent(tile: TileID(2), source: .axFocus).droppedLog(reason: "different-space"), at: 1.1), "a distinct reason is never hidden by another reason")
+        check(limiter.allows(FocusIntent(tile: nil, pid: 7, source: .appActivation).droppedLog(reason: "missing-tile"), at: 1)
+              && limiter.allows(FocusIntent(tile: nil, pid: 8, source: .appActivation).droppedLog(reason: "missing-tile"), at: 1.1),
+              "one app's drop never hides another app's")
+        check(limiter.allows("loop: adoption held tile=1", at: 1) && !limiter.allows("loop: adoption held tile=2", at: 1.1), "adoption hold limit is independent of tile IDs")
+    }
+    section("AuditB 8 in-session log rotation") {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let process = Process()
+        process.executableURL = Bundle.main.executableURL
+        check(process.executableURL.map { FileManager.default.isExecutableFile(atPath: $0.path) } == true,
+              "log probe resolves this runner to an existing executable under any scratch path")
+        process.environment = ProcessInfo.processInfo.environment.merging(["AUDIT_LOG_PROBE": dir.appendingPathComponent("reel.log").path]) { _, new in new }
+        do {
+            try process.run(); process.waitUntilExit()
+            check(process.terminationStatus == 0, "sandbox logger probe exits normally")
+            let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            check(Set(files) == ["reel.log", "reel.log.1"], "continuous session keeps one backup")
+            let size = (try FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent("reel.log").path)[.size] as? UInt64) ?? 0
+            check(size <= 1_002_100, "continuous log remains bounded at one MB plus one line")
+        } catch { check(false, "sandbox logger probe: \(error)") }
+    }
+    section("AuditB 10 crowded reorder row reaches both edges") {
+        let widths = Array(repeating: 100.0, count: 19), others = Array(0..<20).filter { $0 != 10 }
+        let origins = ReorderOverlay.origins(widths: widths, bandWidth: 960, spacing: 12)
+        check(origins.allSatisfy { $0 >= 0 && $0 < 960 }, "row origins stay inside visible band")
+        let row = ReorderOverlay.thumbnailFrames(widths: widths, bandWidth: 960, spacing: 12)
+        check(row.allSatisfy { $0.minX >= 0 && $0.maxX <= 960 }, "scaled thumbnails are fully visible")
+        let mids = row.map { Double($0.midX) + 20 }
+        let reachable = Set((0...1000).map { computeReorderInsertionIndex(cursorX: Double($0), thumbnailMidpoints: mids,
+                                            nonDraggedOriginalIndices: others, draggedIndex: 10, columnCount: 20) })
+        check(reachable.contains(0) && reachable.contains(20), "first and last reorder destinations are reachable")
+    }
+    section("AuditB 11 new columns adopt observed width and settled app constraints") {
+        func sized(_ id: UInt32, width: Double, x: Double = 100) -> ObservedWindow {
+            ObservedWindow(id: TileID(id), pid: Int32(id), bundleID: "test", initialFrame: AXRect(CGRect(x: x, y: 30, width: width, height: 600)))
+        }
+        var h = Harness()
+        h.census(1, [sized(1, width: 700)])
+        check(h.widths == [.fixed(700)], "initial census adopts the window's own width")
+        h.send(.windowAdded(sized(2, width: 650)))
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles.contains(TileID(2)) }?.width == .fixed(650), "notification adoption uses observed width")
+        h.send(.command(.setWidth(TileID(1), 300), .ipc))
+        let request = h.world.frames[TileID(1)]!
+        let observer = Observer(executor: Executor(worker: { _ in nil }, log: { _ in }), allowedPids: nil,
+                                managed: { [1, 2] }, elsewhere: { [] }, paused: { false }, emit: { kind, _ in h.send(kind) }, log: { _ in })
+        observer.receive(.wrote(request.tile, revision: request.revision, frame: request.frame.rect,
+                         landed: CGRect(x: request.frame.rect.minX, y: request.frame.rect.minY, width: 650, height: 600), .applied, scope: request.scope), stamp: nil)
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles.contains(TileID(1)) }?.width == .fixed(650), "settled min-width refusal updates logical column width")
+        h.send(.command(.setWidth(TileID(1), 350), .ipc))
+        observer.receive(.wrote(request.tile, revision: request.revision, frame: request.frame.rect,
+                         landed: CGRect(x: request.frame.rect.minX, y: request.frame.rect.minY, width: 900, height: 600), .applied, scope: request.scope), stamp: nil)
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles.contains(TileID(1)) }?.width == .fixed(350), "stale landed size cannot replace newer width")
+        h.census(2, [sized(3, width: 750)])
+        h.census(1, [sized(1, width: 900), sized(2, width: 900)])
+        check(h.world.groups[1]!.strip.columns.first { $0.tiles.contains(TileID(1)) }?.width == .fixed(350), "saved logical width wins over fresh observed width on restore")
+        var merged = Harness(displays: [display(width: 600), display(2, x: 600, width: 1000)], separateSpaces: false)
+        merged.census(1, [sized(1, width: 1200, x: -400)])
+        check(merged.widths == [.fixed(600)], "observed width clamps to its physical display, not merged span")
+        let current = h.world.frames[TileID(1)]!
+        observer.receive(.wrote(current.tile, revision: current.revision, frame: current.frame.rect,
+                         landed: CGRect(x: current.frame.rect.minX, y: current.frame.rect.minY, width: 2000, height: 600), .applied, scope: current.scope), stamp: nil)
+        let clamped = h.world.frames[TileID(1)]!
+        observer.receive(.wrote(clamped.tile, revision: clamped.revision, frame: clamped.frame.rect,
+                         landed: CGRect(x: clamped.frame.rect.minX, y: clamped.frame.rect.minY, width: 2000, height: 600), .applied, scope: clamped.scope), stamp: nil)
+        check(h.requests.isEmpty, "an impossible min width larger than the display cannot create an immediate write loop")
+    }
+    section("AuditB 12 menu recover reaches all groups") {
+        var h = Harness(displays: [display(), display(2, x: 1100)])
+        h.census(1, [window(1, x: 100)]); h.census(2, [window(2, x: 1200)], group: 2)
+        var requests: [FrameRequest] = []
+        let loop = Loop(world: h.world, paths: Paths(environment: ["REEL_CONFIG_DIR": "/tmp/reel-auditB-unused-config", "REEL_STATE_DIR": "/tmp/reel-auditB-unused-state"]),
+                        censusObserver: CensusFixture(), reads: LoopReads(space: { _, _ in nil }, screen: { [] }),
+                        effects: { effects in requests += effects.compactMap { if case .setFrame(let r) = $0 { return r }; return nil } })
+        do {
+            let menu = try String(contentsOfFile: "Sources/Reel/MenuBar.swift", encoding: .utf8)
+            if menu.contains("@objc private func recover() { loop.recover() }") { _ = loop.recover() }
+            else { loop.send(.command(.recover, .ipc)) }
+            check(Set(requests.map(\.tile)) == [TileID(1), TileID(2)], "menu callback runs the same all-group recovery as IPC")
+        } catch { check(false, "menu source read: \(error)") }
+    }
+    section("AuditB disk snapshots are bounded") {
+        var h = Harness(), saved: [Snapshot] = []
+        for id in 1...80 { h.census(UInt64(id), [window(UInt32(id))]); saved.append(h.world.currentSnapshot(group: 1)!) }
+        var loaded = Harness()
+        loaded.send(.loadSnapshots(saved))
+        check(loaded.world.spaces.disk.count <= 64, "disk snapshot cache has a finite cap")
+    }
+}
+
+if let path = environment["AUDIT_LOG_PROBE"] {
+    try prepareLogFile(at: path)
+    freopen(path, "a", stdout)
+    freopen(path, "a", stderr)
+    MainActor.assumeIsolated { for _ in 0..<1600 { logLine(String(repeating: "x", count: 2000)) } }
+    fflush(stdout)
+    exit(0)
+}
+
 MainActor.assumeIsolated {
-    do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests() }
+    audit2Tests()
+    auditBRemainingTests()
+    nativeTabTests()
+    auditBLateFocusTest()
+    auditBTests()
+    do { try replayTests(); probeTests(); displayTests(); runtimeTests(); try spaceTests(); try pointerTests() }
     catch { check(false, "unexpected error: \(error)") }
     var seeds: [UInt64] = [0]
     for value in (environment["ENGINE_FUZZ_SEEDS"] ?? "").split(separator: ",") {
