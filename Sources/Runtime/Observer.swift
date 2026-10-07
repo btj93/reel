@@ -225,7 +225,7 @@ package final class AppWorker: @unchecked Sendable {
     }
 
     /// Coalesced per window: a write still queued when the next one arrives is replaced, never run late.
-    func write(_ request: FrameRequest) {
+    package func write(_ request: FrameRequest) {
         lock.lock()
         queuedFrames[request.tile] = request
         let schedule = !drainQueued
@@ -234,7 +234,7 @@ package final class AppWorker: @unchecked Sendable {
         if schedule { app.perform { [self] in drain() } }
     }
 
-    func cancelWrite(_ tile: TileID) {
+    package func cancelWrite(_ tile: TileID) {
         lock.lock()
         queuedFrames.removeValue(forKey: tile)
         lock.unlock()

@@ -2,6 +2,19 @@ import Core
 import CoreGraphics
 import Engine
 import Runtime
+import Platform
+
+final class QueuedWriteApp: AXApp, @unchecked Sendable {
+    var actions: [@Sendable () -> Void] = []
+    override func perform(_ action: @escaping @Sendable () -> Void) -> Bool {
+        actions.append(action)
+        return true
+    }
+    override func stopObserving() {}
+    func drain() {
+        while !actions.isEmpty { actions.removeFirst()() }
+    }
+}
 
 // ReelNext's per-window frame write (`SizeCache`), driven against `FakeAXWindow`.
 @MainActor
@@ -9,6 +22,33 @@ func runRuntimeWriteTests() {
     print()
     print("Runtime frame writes (SizeCache)")
     let tiled = CGRect(x: 100, y: 25, width: 700, height: 850)
+
+    section("a window cancelled during its sibling's drained write is never physically written")
+    do {
+        for requeue in [false, true] {
+            let app = QueuedWriteApp(pid: 99001, bundleIdentifier: nil)
+            let first = FakeAXWindow(windowID: 1, pid: 99001, frame: .zero)
+            let second = FakeAXWindow(windowID: 2, pid: 99001, frame: .zero)
+            let third = FakeAXWindow(windowID: 3, pid: 99001, frame: .zero)
+            let worker = AppWorker(app: app, windows: [1: first, 2: second, 3: third], clock: ScopeClock(), send: { _, _ in })
+            let scope = EventScope(topologyRevision: 1, group: 1, spaceEpoch: 1)
+            let replacement = CGRect(x: 300, y: 30, width: 500, height: 600)
+            first.onFrameWrite = {
+                worker.cancelWrite(TileID(2))
+                if requeue {
+                    worker.write(FrameRequest(tile: TileID(2), pid: 99001, frame: AXRect(replacement), revision: 2, scope: scope))
+                }
+            }
+            for id: UInt32 in [1, 2, 3] {
+                worker.write(FrameRequest(tile: TileID(id), pid: 99001, frame: AXRect(tiled), revision: 1, scope: scope))
+            }
+            app.drain()
+            assertEq(first.frameWriteCount, 1, "the already-started write finishes")
+            assertEq(second.frameWriteCount, requeue ? 1 : 0, "the cancelled request never reaches AX")
+            assertEq(second.currentFrame, requeue ? replacement : .zero, "only a fresh request can write the cancelled window")
+            assertEq(third.frameWriteCount, 1, "cancelling one window preserves its unrelated sibling")
+        }
+    }
 
     section("release requests accept successful positioning without a delayed layout confirmation")
     do {
