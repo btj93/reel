@@ -633,7 +633,9 @@ public final class Observer: CensusObserver {
             if managed().contains(id) { emit(.windowsHidden([TileID(id)]), nil) }
         case .restored(let facts):
             learn(facts)
-            if !paused(), facts.classification != .ignore { emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == frontmostPID())) }
+            if !paused(), facts.classification != .ignore, isVisible(facts.id) {
+                emitObserved(.windowAdded(facts.observed, frontmost: facts.pid == frontmostPID()))
+            }
         case .retitled(let facts):
             learn(facts)
             // Even while paused, so a late title is not lost; the engine's writes are held back until resume.
