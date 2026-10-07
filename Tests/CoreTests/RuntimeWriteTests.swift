@@ -50,7 +50,7 @@ func runRuntimeWriteTests() {
             }
             app.drain()
             assertEq(first.frameWriteCount, 1, "the already-started write finishes")
-            assertEq(second.frameWriteCount, requeue ? 1 : 0, "the cancelled request never reaches AX")
+            assertEq(second.frameWriteCount + second.positionWriteCount, requeue ? 1 : 0, "the cancelled request never reaches AX")
             assertEq(second.currentFrame, requeue ? replacement.frame.rect : .zero, "only a fresh request can write the cancelled window")
             assertEq(third.frameWriteCount, 1, "cancelling one window preserves its unrelated sibling")
         }

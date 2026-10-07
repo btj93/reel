@@ -273,14 +273,14 @@ package final class AppWorker: @unchecked Sendable {
 
     private func drain() {
         lock.lock()
-        let batch = queuedFrames.sorted { $0.key.rawValue < $1.key.rawValue }
-        queuedFrames = [:]
+        let batch = queuedFrames.keys.sorted { $0.rawValue < $1.rawValue }
         drainQueued = false
         let forget = forgetSizesQueued
         forgetSizesQueued = false
         lock.unlock()
         if forget { sizes.forgetAll() }
-        for (tile, write) in batch {
+        for tile in batch {
+            guard let write = lock.withLock({ queuedFrames.removeValue(forKey: tile) }) else { continue }
             let id = CGWindowID(tile.rawValue)
             guard let window = windows[id] else {
                 post(.wrote(tile, revision: write.revision, frame: write.frame.rect, landed: nil, .failed, scope: write.scope))
