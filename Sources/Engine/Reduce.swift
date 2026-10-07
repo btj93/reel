@@ -260,7 +260,8 @@ extension World {
                 groups[destination]!.strip.removeTile(tile, at: pass.now)
                 groups[destination]!.floating.insert(tile)
             }
-            focus(FocusIntent(tile: tile, source: .adoption), group: destination, &pass)
+            // The user moved it there: follow it, without activating or raising the app on Reel's behalf.
+            focus(FocusIntent(tile: tile, source: .adoption, requestsOSFocus: false), group: destination, &pass)
             pass.persist = true
             return
         }

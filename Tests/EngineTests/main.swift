@@ -5862,7 +5862,10 @@ final class CensusFixture: CensusObserver {
         h.census(1, [window(1, x: 100)])
         h.census(2, [window(2, x: 1200)], group: 2)
         let moved = AXRect(CGRect(x: 1300, y: 30, width: 350, height: 600))
-        h.send(.windowMoved(TileID(1), moved))
+        var effects = h.send(.windowMoved(TileID(1), moved))
+        h.advance(EngineConfig.focusDebounce + margin)
+        effects += h.effects
+        check(!effects.contains { switch $0 { case .focus, .raise: true; default: false } }, "a moved window is followed, not activated or raised by Reel")
         check(h.world.owner(of: TileID(1)) == 2, "foreign settled move migrates to destination strip")
         check(h.world.groups[2]!.focus.decision?.tile == TileID(1), "migration focuses moved tile")
         h.send(.command(.toggleFloating(TileID(1)), .ipc), group: h.world.owner(of: TileID(1))!)
