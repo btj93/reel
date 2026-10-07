@@ -2,11 +2,12 @@ import CoreGraphics
 import Foundation
 
 /// How a window should be managed by the window manager.
-public enum WindowClassification: Sendable {
+public enum WindowClassification: String, Codable, Sendable {
     /// Window should be tiled on the horizontal strip.
     case tile
     /// Window should float above the strip (dialogs, panels, etc.).
     case float
+    case provisionalTitle
     /// Window should be ignored entirely (menus, tooltips, system UI).
     case ignore
 }
@@ -116,14 +117,11 @@ public func classifyWindow(_ props: WindowProperties) -> WindowClassification {
     //   2. Frame smaller than the minimum tileable size in either dimension.
     // Float those so they don't get inserted as strip columns.
     if subrole == "AXStandardWindow" && props.isResizable && props.hasCloseButton {
-        let hasUsableTitle = !(props.title?.isEmpty ?? true)
-        if !hasUsableTitle {
-            return .float
-        }
         if let f = props.frame,
            (f.width < minTileableWidth || f.height < minTileableHeight) {
             return .float
         }
+        if props.title?.isEmpty != false { return .provisionalTitle }
         return .tile
     }
 
