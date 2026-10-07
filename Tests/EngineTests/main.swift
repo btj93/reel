@@ -5736,6 +5736,25 @@ final class CensusFixture: CensusObserver {
         check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "cross-Space Dock activation does not refocus")
         check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "crossing emits no OS focus")
     }
+    section("audit2 hide: minimize and app hide never become native-tab swaps") {
+        for addFirst in [false, true] {
+            for hideApp in [false, true] {
+                var h = Harness()
+                h.census(1, [window(10, app: 100), window(11, app: 100), window(20, app: 200), window(21, app: 201), window(22, app: 202)])
+                h.send(.command(.focus(TileID(22)), .keyboard))
+                if addFirst { h.send(.windowAdded(window(12, app: 100), frontmost: true)) }
+                let hidden = hideApp ? [TileID(10), TileID(11)] : [TileID(10)]
+                let effects = h.send(.windowsHidden(hidden), advance: 1.0)
+                check(effects.contains { if case .setFrame(let request) = $0, request.tile == TileID(10), case .release = request.purpose { true } else { false } }, "minimize or hide keeps the clipped window's release write")
+                check(h.world.groups[1]!.hidden[TileID(10)]!.tab != true, "a user hide is never an ordered-out tab")
+                if !addFirst { h.send(.windowAdded(window(12, app: 100), frontmost: true)) }
+                check(!h.logged("tab switch"), "same-app create and user hide do not move a column as a tab")
+                check(h.world.groups[1]!.hidden[TileID(10)]!.tab != true, "a later new window cannot turn a minimized window into a tab")
+                let release = h.send(.command(.release, .ipc))
+                check(release.contains { if case .setFrame(let request) = $0, request.tile == TileID(10), case .release = request.purpose { true } else { false } }, "quit still releases the minimized window")
+            }
+        }
+    }
     section("audit2 activation: nil-tile Dock click cancels the previous app timer") {
         var h = Harness()
         h.send(.spaceChanged(key: .skylight(1), epoch: 1, windows: [window(10, app: 100), window(20, app: 200)], frontmost: TileID(20)))
