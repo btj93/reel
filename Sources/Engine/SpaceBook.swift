@@ -1,4 +1,5 @@
 import Core
+import Foundation
 
 public struct GroupSpace: Hashable, Sendable {
     public let group: UInt32
@@ -18,6 +19,7 @@ struct SpaceMatch {
 
 public struct SpaceBook: Sendable {
     public static let matchThreshold = 0.5
+    public static let diskLimit = 64
 
     public internal(set) var live: [GroupSpace: Snapshot] = [:]
     public internal(set) var disk: [Snapshot] = []
@@ -28,42 +30,55 @@ public struct SpaceBook: Sendable {
         live[GroupSpace(group: group, space: space)]
     }
 
-    public func lookupTolerant(group: UInt32, windows: [ObservedWindow]) -> Snapshot? {
-        tolerantMatch(group: group, windows: windows)?.snapshot
+    public func lookupTolerant(group: DisplayGroup, windows: [ObservedWindow]) -> Snapshot? {
+        tolerantMatch(group: group, windows: windows, others: false)?.snapshot
     }
 
-    func lookup(group: UInt32, space: SpaceKey, windows: [ObservedWindow]) -> SpaceMatch? {
-        if let exact = lookupExact(group: group, space: space) { return SpaceMatch(snapshot: exact, source: .live(space)) }
+    /// With `separateSpaces` a Space belongs to one display, so a strip saved under another group (its display was
+    /// unplugged) is found by its Space id, or on disk by its window ids when none of the group's own strips match.
+    func lookup(group: DisplayGroup, space: SpaceKey, windows: [ObservedWindow], separateSpaces: Bool) -> SpaceMatch? {
+        if let exact = lookupExact(group: group.id, space: space) { return SpaceMatch(snapshot: exact, source: .live(space)) }
+        if separateSpaces, space.isAuthoritative,
+           let moved = live.filter({ $0.key.space == space }).min(by: { $0.key.group < $1.key.group })?.value {
+            return SpaceMatch(snapshot: moved, source: .live(space))
+        }
         let fingerprint = Set(windows.map { $0.id.rawValue })
-        let candidates = live.filter { $0.key.group == group && (!space.isAuthoritative || !$0.key.space.isAuthoritative) }.map(\.value)
-        if let winner = bestMatch(candidates, score: { MatchScore(gate: similarity($0.fingerprint, fingerprint)) }) {
+        let candidates = live.filter { $0.key.group == group.id && (!space.isAuthoritative || !$0.key.space.isAuthoritative) }.map(\.value)
+        if let winner = bestMatch(candidates, score: { MatchScore(gate: similarity($0.fingerprint.union($0.hidden.map(\.window.id.rawValue).filter(fingerprint.contains)), fingerprint)) }) {
             return SpaceMatch(snapshot: candidates[winner], source: .live(candidates[winner].space))
         }
-        return tolerantMatch(group: group, windows: windows)
+        return tolerantMatch(group: group, windows: windows, others: false)
+            ?? (separateSpaces ? tolerantMatch(group: group, windows: windows, others: true) : nil)
     }
 
-    mutating func adopt(_ match: SpaceMatch, as key: SpaceKey) {
+    mutating func adopt(_ match: SpaceMatch, as key: SpaceKey, group: UInt32) {
         switch match.source {
-        case .live(let matched) where matched != key: live[GroupSpace(group: match.snapshot.group, space: matched)] = nil
+        case .live(let matched) where matched != key || match.snapshot.group != group:
+            live[GroupSpace(group: match.snapshot.group, space: matched)] = nil
         case .live: break
         case .disk(let index): disk.remove(at: index)
         }
     }
 
+    /// A disk entry's Space id is never matched exactly: a reboot hands it to another Space. So one under a live key
+    /// is still written, and is only gone once a census adopts it.
+    /// Loading retains at most `diskLimit` entries; unmatched disk identities cannot grow forever.
     public var persisted: [Snapshot] {
-        let pending = disk.filter { lookupExact(group: $0.group, space: $0.space) == nil }
-        return (Array(live.values) + pending).map { ($0, SpaceOrder($0.group, $0.space)) }.sorted { $0.1 < $1.1 }.map(\.0)
+        (Array(live.values) + disk).map { ($0, SpaceOrder($0.group, $0.space)) }.sorted { $0.1 < $1.1 }.map(\.0)
     }
 
-    private func tolerantMatch(group: UInt32, windows: [ObservedWindow]) -> SpaceMatch? {
+    /// A saved strip of any of the group's displays is a candidate, so a merged group finds the strips its displays
+    /// saved alone. A merged group saves under its smallest display, which finds the strip after a split. With
+    /// `others` only the other displays' strips are, and only by window id: their apps are no evidence.
+    private func tolerantMatch(group: DisplayGroup, windows: [ObservedWindow], others: Bool) -> SpaceMatch? {
         let identities = Set(windows.map(WindowIdentity.init))
         let bundles = appBundles(windows)
         let bundleByID = Dictionary(windows.map { ($0.id, $0.knownBundleID) }, uniquingKeysWith: { first, _ in first })
-        let indexed = disk.indices.filter { disk[$0].group == group }
+        let indexed = disk.indices.filter { index in others != group.displays.contains { $0.id == disk[index].group } }
         let winner = bestMatch(indexed.map { disk[$0] }) { saved in
             let sameWindows = saved.windows.reduce(0) { bundleByID[$1.id] == .some($1.knownBundleID) ? $0 + 1 : $0 }
             let union = saved.windows.count + windows.count - sameWindows
-            return MatchScore(gate: similarity(saved.bundles, bundles), windowIDs: union == 0 ? 0 : Double(sameWindows) / Double(union),
+            return MatchScore(gate: others ? 0 : similarity(saved.bundles, bundles), windowIDs: union == 0 ? 0 : Double(sameWindows) / Double(union),
                               titles: similarity(saved.identities, identities))
         }
         guard let winner else { return nil }
@@ -132,4 +147,36 @@ private func bestMatch(_ candidates: [Snapshot], score: (Snapshot) -> MatchScore
         if lhs.fingerprint != rhs.fingerprint { return lhs.fingerprint.sorted().lexicographicallyPrecedes(rhs.fingerprint.sorted()) }
         return SpaceOrder(lhs.group, lhs.space) < SpaceOrder(rhs.group, rhs.space)
     }?.index
+}
+
+public enum SpaceBookError: Error, Equatable {
+    case version(Int)
+}
+
+/// The one codec for saved strips. The state file is `{"version": n, "snapshots": [...]}`; any other version, or a
+/// file that is not this shape, throws, and the caller starts fresh.
+extension SpaceBook {
+    public static let version = 1
+
+    private struct File: Codable {
+        let version: Int
+        let snapshots: [Snapshot]
+    }
+
+    private struct Header: Decodable {
+        let version: Int
+    }
+
+    public static func encode(_ snapshots: [Snapshot]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(File(version: version, snapshots: snapshots))
+    }
+
+    /// Entries that fail validation are dropped; their valid siblings are kept.
+    public static func decode(_ data: Data) throws -> [Snapshot] {
+        let found = try JSONDecoder().decode(Header.self, from: data).version
+        guard found == version else { throw SpaceBookError.version(found) }
+        return try JSONDecoder().decode(File.self, from: data).snapshots.filter(\.isValid)
+    }
 }

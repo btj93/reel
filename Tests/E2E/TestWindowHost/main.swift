@@ -44,6 +44,8 @@ enum HostCommand: Equatable {
     case focus(id: Int)
     case setFrame(id: Int, frame: FrameJSON)
     case setTitle(id: Int, title: String)
+    /// Answer, then block the main thread: a hung app for the window manager under test.
+    case hang(seconds: Double)
     case report
     case quit
 }
@@ -61,6 +63,8 @@ struct WindowReport: Encodable, Equatable {
     let frameChangeCount: Int
     /// Whether this window is currently the key window.
     let isKey: Bool
+    /// Scroll-wheel events this window received: a manager that swallows a gesture leaves it unchanged.
+    let scrollCount: Int
 }
 
 /// Every response is one of these; nil fields are omitted from the JSON (synthesized
@@ -88,6 +92,7 @@ private struct RawRequest: Decodable {
     let y: Double?
     let w: Double?
     let h: Double?
+    let seconds: Double?
 }
 
 /// Pure: decode + validate one JSON line into a HostCommand, or a human-readable error.
@@ -105,6 +110,8 @@ private struct RawRequest: Decodable {
 ///        → {"id":1,"ok":true}                         (x/y/w/h are CG top-left coords)
 ///   {"cmd":"setTitle","id":1,"title":"renamed"}
 ///        → {"id":1,"ok":true}
+///   {"cmd":"hang","seconds":5}
+///        → {"ok":true}                                (then the main thread blocks for 5 s)
 ///   {"cmd":"report"}
 ///        → {"ok":true,"windows":[{"cgWindowID":1234,"frameCG":{"h":600,"w":800,"x":100,"y":50},
 ///                                 "frameChangeCount":2,"id":1,"isKey":true}]}
@@ -143,6 +150,11 @@ func parseCommand(_ data: Data) -> ParseResult {
         guard let id = req.id else { return .failure("setTitle requires \"id\"") }
         guard let title = req.title else { return .failure("setTitle requires \"title\"") }
         return .success(.setTitle(id: id, title: title))
+    case "hang":
+        guard let seconds = req.seconds, seconds.isFinite, seconds > 0, seconds <= 60 else {
+            return .failure("hang requires \"seconds\" in (0, 60]")
+        }
+        return .success(.hang(seconds: seconds))
     case "report":
         return .success(.report)
     case "quit":
@@ -191,6 +203,8 @@ func cgToAppKit(_ frame: CGRect, primaryScreenHeight: CGFloat) -> CGRect {
 final class WindowHost {
     private var windows: [Int: NSWindow] = [:]
     private var frameChangeCounts: [Int: Int] = [:]
+    private var scrollCounts: [Int: Int] = [:]
+    private var scrollMonitor: Any?
     private var observers: [Int: [NSObjectProtocol]] = [:]
     private var nextID = 1
 
@@ -200,6 +214,12 @@ final class WindowHost {
     init(primaryScreenHeight: CGFloat, titlePrefix: String) {
         self.primaryScreenHeight = primaryScreenHeight
         self.titlePrefix = titlePrefix
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            MainActor.assumeIsolated {
+                if let self, let id = self.windows.first(where: { $0.value === event.window })?.key { self.scrollCounts[id, default: 0] += 1 }
+            }
+            return event
+        }
     }
 
     /// Titles embed the launch prefix + the window id so a run's windows are uniquely
@@ -232,6 +252,8 @@ final class WindowHost {
             return applyTitle(id: id, title: title)
                 ? HostResponse(ok: true, id: id)
                 : HostResponse(ok: false, id: id, error: "no window with id \(id)")
+        case .hang:
+            return HostResponse(ok: true)
         case .report:
             return HostResponse(ok: true, windows: report())
         case .quit:
@@ -318,7 +340,8 @@ final class WindowHost {
                 cgWindowID: window.windowNumber,
                 frameCG: FrameJSON(x: cg.minX, y: cg.minY, w: cg.width, h: cg.height),
                 frameChangeCount: frameChangeCounts[id] ?? 0,
-                isKey: window.isKeyWindow
+                isKey: window.isKeyWindow,
+                scrollCount: scrollCounts[id] ?? 0
             )
         }
     }
@@ -372,6 +395,10 @@ func processLine(_ line: String, host: WindowHost) {
     case let .success(command):
         writeResponse(host.handle(command))
         if case .quit = command { host.terminate() }
+        if case .hang(let seconds) = command {
+            logDiagnostic("hang: blocking the main thread for \(seconds)s")
+            Thread.sleep(forTimeInterval: seconds)
+        }
     }
 }
 
