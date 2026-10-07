@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.0](https://github.com/btj93/reel/compare/v0.6.0...v0.7.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* ground-up rewrite, a pure Engine reducer and a Runtime shell replace WindowManager (#12, #11, #13, #14, #15, #16, #17)
+
+### Features
+
+* commented config.default.toml template in the new schema ([#18](https://github.com/btj93/reel/issues/18)) ([c130cc4](https://github.com/btj93/reel/commit/c130cc4a4613c54cc5afbc769a53240c6f54ebd8))
+* ground-up rewrite, a pure Engine reducer and a Runtime shell replace WindowManager ([#12](https://github.com/btj93/reel/issues/12), [#11](https://github.com/btj93/reel/issues/11), [#13](https://github.com/btj93/reel/issues/13), [#14](https://github.com/btj93/reel/issues/14), [#15](https://github.com/btj93/reel/issues/15), [#16](https://github.com/btj93/reel/issues/16), [#17](https://github.com/btj93/reel/issues/17)) ([c130cc4](https://github.com/btj93/reel/commit/c130cc4a4613c54cc5afbc769a53240c6f54ebd8))
+* native tabs (Finder, Fork, TablePlus) switch in place, keeping the column and focus ([c130cc4](https://github.com/btj93/reel/commit/c130cc4a4613c54cc5afbc769a53240c6f54ebd8))
+
+
+### Bug Fixes
+
+* Dock clicks, Cmd-Tab and new windows scroll to the window without re-activating it ([c130cc4](https://github.com/btj93/reel/commit/c130cc4a4613c54cc5afbc769a53240c6f54ebd8))
+* exit when Accessibility is revoked so keyboard and mouse input are never held up ([c130cc4](https://github.com/btj93/reel/commit/c130cc4a4613c54cc5afbc769a53240c6f54ebd8))
+
 ## [0.6.0](https://github.com/btj93/reel/compare/v0.5.0...v0.6.0) (2026-08-31)
 
 
