@@ -36,7 +36,7 @@ DRY="${SMOKE_DRY_RUN:-0}"
 SMOKE_TAG="$$"
 
 BIN_DIR="$REPO_ROOT/.build/debug"
-# BIN_REEL picks the binary under test: trunk Reel by default, `BIN_REEL=.build/debug/ReelNext` for the rewrite.
+# BIN_REEL picks the binary under test: trunk Reel by default, `BIN_REEL=.build/debug/Reel` for the rewrite.
 BIN_REEL="${BIN_REEL:-$BIN_DIR/Reel}"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
@@ -229,6 +229,7 @@ sec_canary() {
     section "adoption canary — Reel adopts host windows (Accessibility oracle)"
     ensure_clean
     host_create MAIN 2 >/dev/null
+    activate_process "${HOST_PID[MAIN]}"
     if ! poll_col_count 5 2 "canary: 2 windows adopted within 5s"; then
         cat >&2 <<EOF
 ${_c_red}${_c_bld}Canary failed: the test Reel did not adopt the host windows.${_c_reset}

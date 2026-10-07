@@ -32,7 +32,6 @@ public struct Strip: Sendable {
     public var groupArea: GroupWorkingArea
 
     /// Backward-compatible read-only alias: the bounding rect of all regions.
-    /// GET-ONLY. Writes must go through `groupArea = …` or, in `StripController`,
     /// through `updateGroupArea(_:)`. A setter here would silently collapse
     /// multi-region groups to a singleton on every write, which is unsafe.
     public var workingArea: CGRect { groupArea.totalSpan }

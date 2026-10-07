@@ -2,6 +2,7 @@ import AppKit
 import Core
 import Engine
 import Foundation
+import Platform
 
 /// The frames the runtime wrote, per window. A move or resize that lands on a frame we wrote is our own echo; anything
 /// else is the user. No clock is involved, so a slow app's late echo is still recognized and a fast user is not missed.
@@ -65,13 +66,18 @@ public struct EchoLedger: Sendable {
 @MainActor
 public final class Executor {
     public private(set) var ledger = EchoLedger()
+    private let focusWork = FocusWork()
+    private var focusTicket: FocusTicket?
     private var owners: [TileID: Int32] = [:]
     private let worker: (Int32) -> AppWorker?
     private let log: (String) -> Void
+    private let now: @Sendable () -> Double
 
-    init(worker: @escaping (Int32) -> AppWorker?, log: @escaping (String) -> Void) {
+    package init(worker: @escaping (Int32) -> AppWorker?, log: @escaping (String) -> Void,
+                 now: @escaping @Sendable () -> Double = TimeUtil.now) {
         self.worker = worker
         self.log = log
+        self.now = now
     }
 
     func setFrame(_ request: FrameRequest) {
@@ -79,7 +85,7 @@ public final class Executor {
             return log("executor: no app thread pid=\(request.pid) tile=\(request.tile.rawValue) rev=\(request.revision)")
         }
         owners[request.tile] = request.pid
-        worker.write(request.tile, revision: request.revision, frame: request.frame.rect, scope: request.scope)
+        worker.write(request)
     }
 
     /// The engine dropped the window or its frame: a write still queued for it must not run. The ledger keeps what was
@@ -100,7 +106,8 @@ public final class Executor {
             return log("executor: write skipped, window gone tile=\(tile.rawValue) rev=\(revision)")
         }
         ledger.record(tile, revision: revision, requested: frame, landed: landed, result: result)
-        if case .applied = result { log("executor: wrote tile=\(tile.rawValue) rev=\(revision)") }
+        if case .applied = result { runtimeTrace("executor: wrote tile=\(tile.rawValue) rev=\(revision)") }
+        else if case .sizeUnconfirmed = result { runtimeTrace("executor: size unconfirmed tile=\(tile.rawValue) rev=\(revision)") }
         else { log("executor: write failed tile=\(tile.rawValue) rev=\(revision) result=\(result)") }
     }
 
@@ -108,22 +115,43 @@ public final class Executor {
     func isForeign(_ tile: TileID, frame: CGRect) -> Bool {
         switch ledger.classify(tile, observed: frame) {
         case .echo(let revision):
-            log("executor: echo dropped rev=\(revision) tile=\(tile.rawValue)")
+            runtimeTrace("executor: echo dropped rev=\(revision) tile=\(tile.rawValue)")
             return false
         case .repeated:
-            log("executor: app kept its own frame tile=\(tile.rawValue) frame=\(frame)")
+            runtimeTrace("executor: app kept its own frame tile=\(tile.rawValue) frame=\(frame)")
             return false
         case .foreign:
             return true
         }
     }
 
-    func focus(_ tile: TileID, pid: Int32) {
-        worker(pid)?.run(tile) { $0.focus(timeout: 0.1) }
+    package func synchronizeFocus(with world: World, paused: Bool) {
+        focusWork.synchronize(world, paused: paused)
     }
 
-    func raise(_ tile: TileID, pid: Int32) {
-        worker(pid)?.run(tile) { _ = $0.raise() }
+    package var focusObservationGeneration: UInt64 { focusWork.currentObservationGeneration }
+
+    package func invalidateFocus() { focusWork.invalidate() }
+
+    func consumeFocusEcho(pid: Int32) -> Bool { focusWork.consumeEcho(pid: pid, now: now()) }
+
+    package func focus(_ tile: TileID, pid: Int32, scope: EventScope) {
+        let ticket = focusWork.ticket(tile: tile, pid: pid, scope: scope)
+        focusTicket = ticket
+        let work = focusWork, now = now
+        worker(pid)?.run(tile) { window in
+            guard work.claim(ticket, focus: true, now: now()) else { return }
+            window.focus(timeout: 0.1)
+        }
+    }
+
+    package func raise(_ tile: TileID, pid: Int32) {
+        guard let ticket = focusTicket, ticket.tile == tile, ticket.pid == pid else { return }
+        let work = focusWork, now = now
+        worker(pid)?.run(tile) { window in
+            guard work.claim(ticket, focus: false, now: now()) else { return }
+            _ = window.raise()
+        }
     }
 
     func close(_ tile: TileID, pid: Int32) {

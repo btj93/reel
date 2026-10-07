@@ -13,17 +13,10 @@ let package = Package(
         .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0"),
     ],
     targets: [
-        .target(name: "Engine", dependencies: ["Core", "TOMLKit"]),
-        .executableTarget(name: "RunEngineTests", dependencies: ["Engine", "Core", "Runtime", "Platform", "Config"], path: "Tests/EngineTests"),
-        // The new runtime: turns macOS observations into Engine events and executes its effects.
-        .target(name: "Runtime", dependencies: ["Engine", "Core", "Platform", "IPC", "Config"]),
-        .executableTarget(name: "ReelNext", dependencies: ["Runtime"]),
-        // Main app
-        .executableTarget(
-            name: "Reel",
-            dependencies: ["Core", "Platform", "WindowManager", "Config", "IPC"],
-            path: "Sources/Reel"
-        ),
+        .target(name: "Engine", dependencies: ["Core", "TOMLKit"], resources: [.copy("config.default.toml")]),
+        .executableTarget(name: "RunEngineTests", dependencies: ["Engine", "Core", "Runtime", "Platform"], path: "Tests/EngineTests"),
+        .target(name: "Runtime", dependencies: ["Engine", "Core", "Platform", "IPC"]),
+        .executableTarget(name: "Reel", dependencies: ["Runtime"]),
 
         // CLI client
         .executableTarget(
@@ -41,23 +34,8 @@ let package = Package(
         // Platform: macOS API wrappers
         .target(
             name: "Platform",
-            dependencies: ["Core", "Config"],
+            dependencies: ["Core"],
             path: "Sources/Platform"
-        ),
-
-        // WindowManager: orchestration
-        .target(
-            name: "WindowManager",
-            dependencies: ["Core", "Platform", "Config", "IPC"],
-            path: "Sources/WindowManager"
-        ),
-
-        // Config: TOML configuration
-        .target(
-            name: "Config",
-            dependencies: ["Core", "TOMLKit"],
-            path: "Sources/Config",
-            resources: [.copy("config.default.toml")]
         ),
 
         // IPC: shared command definitions + socket client/server
@@ -70,7 +48,7 @@ let package = Package(
         // Tests (executable — no Xcode required)
         .executableTarget(
             name: "RunTests",
-            dependencies: ["Core", "Config", "IPC", "WindowManager", "Platform", "Engine", "Runtime"],
+            dependencies: ["Core", "IPC", "Platform", "Engine", "Runtime"],
             path: "Tests/CoreTests"
         ),
 

@@ -1,4 +1,5 @@
 import Core
+import Foundation
 import TOMLKit
 
 public enum KeyAction: String, CaseIterable, Sendable {
@@ -52,6 +53,7 @@ public struct AppConfig: Sendable {
         .focusLeft: "alt-h", .focusRight: "alt-l", .focusUp: "alt-k", .focusDown: "alt-j",
         .moveLeft: "alt-shift-h", .moveRight: "alt-shift-l", .cycleWidth: "alt-r", .toggleFullWidth: "alt-f", .toggleFloating: "alt-space", .closeWindow: "alt-w",
     ]
+    public internal(set) var struts = WorkingInsets()
     public internal(set) var indicator = IndicatorConfig()
     public internal(set) var gestureModifier = GestureModifier.fn
 
@@ -75,6 +77,12 @@ public struct AppConfig: Sendable {
                 "default_width": { defaultWidth = try proportion($0, "layout.default_width") },
                 "width_presets": { presets = try list($0, "layout.width_presets").map { try proportion($0, "layout.width_presets") } },
                 "snap": { snap = try list($0, "layout.snap").map { try choice($0, "layout.snap", [SnapPoint.left, .middle, .right]) } },
+                "struts": { try Section($0, path: "layout.struts").read([
+                    "top": { config.struts.top = try number($0, "layout.struts.top", min: 0) },
+                    "bottom": { config.struts.bottom = try number($0, "layout.struts.bottom", min: 0) },
+                    "left": { config.struts.left = try number($0, "layout.struts.left", min: 0) },
+                    "right": { config.struts.right = try number($0, "layout.struts.right", min: 0) },
+                ]) },
             ]) },
             "animation": { try Section($0, path: "animation").read([
                 "enabled": { animate = try flag($0, "animation.enabled") },
@@ -87,7 +95,14 @@ public struct AppConfig: Sendable {
                 (action.rawValue, { config.keys[action] = try text($0, "keys.\(action.rawValue)") })
             })) },
             "gesture": { try Section($0, path: "gesture").read([
-                "modifier": { config.gestureModifier = try choice($0, "gesture.modifier", GestureModifier.allCases) },
+                "modifier": {
+                    let value = try text($0, "gesture.modifier").lowercased()
+                    let aliases = ["control": "ctrl", "opt": "alt", "option": "alt", "command": "cmd"]
+                    guard let modifier = GestureModifier(rawValue: aliases[value] ?? value) else {
+                        throw ConfigError(description: "gesture.modifier must be one of fn, ctrl/control, alt/opt/option, cmd/command")
+                    }
+                    config.gestureModifier = modifier
+                },
                 "snap": { gestureSnap = try flag($0, "gesture.snap") },
             ]) },
             "indicator": { try Section($0, path: "indicator").read([
@@ -99,16 +114,19 @@ public struct AppConfig: Sendable {
             ]) },
             "rules": { value in
                 rules = try list(value, "rules").enumerated().map { index, entry in
-                    var bundleID: String?, floating: Bool?
+                    var bundleID: String?, bundleIDRegex: String?, titleRegex: String?, floating: Bool?
                     let path = "rules[\(index)]"
                     try Section(entry, path: path).read([
                         "bundle_id": { bundleID = try text($0, "\(path).bundle_id") },
+                        "bundle_id_regex": { bundleIDRegex = try regex($0, "\(path).bundle_id_regex") },
+                        "title_regex": { titleRegex = try regex($0, "\(path).title_regex") },
                         "floating": { floating = try flag($0, "\(path).floating") },
                     ])
-                    guard let bundleID, !bundleID.isEmpty, let floating else {
+                    guard let floating, bundleID?.isEmpty != true,
+                          bundleID != nil || bundleIDRegex != nil || titleRegex != nil else {
                         throw ConfigError(description: "\(path) needs bundle_id and floating")
                     }
-                    return Rule(bundleID: bundleID, floating: floating)
+                    return Rule(bundleID: bundleID, bundleIDRegex: bundleIDRegex, titleRegex: titleRegex, floating: floating)
                 }
             },
         ])
@@ -185,4 +203,12 @@ private func color(_ value: TOMLValueConvertible) throws -> String {
         throw ConfigError(description: "indicator.color must be \"auto\" or #RGB / #RRGGBB")
     }
     return color
+}
+
+private func regex(_ value: TOMLValueConvertible, _ key: String) throws -> String {
+    let pattern = try text(value, key)
+    guard !pattern.isEmpty, (try? NSRegularExpression(pattern: pattern)) != nil else {
+        throw ConfigError(description: "\(key) must be a valid nonempty regex")
+    }
+    return pattern
 }

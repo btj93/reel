@@ -19,6 +19,7 @@ struct SpaceMatch {
 
 public struct SpaceBook: Sendable {
     public static let matchThreshold = 0.5
+    public static let diskLimit = 64
 
     public internal(set) var live: [GroupSpace: Snapshot] = [:]
     public internal(set) var disk: [Snapshot] = []
@@ -61,7 +62,7 @@ public struct SpaceBook: Sendable {
 
     /// A disk entry's Space id is never matched exactly: a reboot hands it to another Space. So one under a live key
     /// is still written, and is only gone once a census adopts it.
-    // ponytail: a disk entry no Space ever matches is written back forever; cap entries per group if the file grows.
+    /// Loading retains at most `diskLimit` entries; unmatched disk identities cannot grow forever.
     public var persisted: [Snapshot] {
         (Array(live.values) + disk).map { ($0, SpaceOrder($0.group, $0.space)) }.sorted { $0.1 < $1.1 }.map(\.0)
     }

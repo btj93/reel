@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
 # Tests/Smoke/pointer-lanes.sh — the R6 live lanes: swipes, the pill menu and reorder drags posted through InputPoster
-# to a sandboxed ReelNext (and, in lane 1, trunk Reel) managing TestWindowHost windows.
+# to a sandboxed Reel managing TestWindowHost windows.
 #
 # Lane hosts only: it opens real windows, posts synthetic input and, in lane 10, switches Spaces. It refuses to run
 # without REEL_E2E_CONFIRM=1 and while any Reel or ReelNext is running.
 #
 #   REEL_E2E_CONFIRM=1 bash Tests/Smoke/pointer-lanes.sh [lane ...]    lanes 1 to 10, all by default
-#   BIN_HEAD=.build/debug/ReelNext BIN_TRUNK=.build/debug/Reel          the binaries under test
+#   BIN_HEAD=.build/debug/Reel          the head binary under test
 #   LANE_OUT=/tmp/swarm-r6/worker-1                                     where screenshots go
 #   SMOKE_DRY_RUN=1                                                     walk every lane against fixtures; InputPoster
 #                                                                       parses each script and posts nothing
@@ -28,8 +28,7 @@ SMOKE_TAG="$$"
 BIN_DIR="$REPO_ROOT/.build/debug"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
-BIN_HEAD="${BIN_HEAD:-$BIN_DIR/ReelNext}"
-BIN_TRUNK="${BIN_TRUNK:-$BIN_DIR/Reel}"
+BIN_HEAD="${BIN_HEAD:-$BIN_DIR/Reel}"
 BIN_REEL="$BIN_HEAD"
 NS="/tmp/reel-pointer-lanes-$$"
 SOCK="$NS/reel.sock"
@@ -40,20 +39,28 @@ OUT="${LANE_OUT:-$NS/shots}"
 TEST_REEL_PID=""
 
 cleanup() {
+    local status=${1:-$?}
     quit_reel
     host_quit MAIN
-    if [ "${SMOKE_KEEP_NS:-0}" = 1 ]; then warn "kept $NS"; else rm -rf "$NS"; fi
+    if [ "$status" != 0 ] || [ "${SMOKE_KEEP_NS:-0}" = 1 ]; then
+        mkdir -p "$OUT"
+        [ ! -f "$REEL_LOG" ] || cp "$REEL_LOG" "$OUT/reel.log" || warn "could not copy $REEL_LOG to $OUT"
+        warn "kept $NS"
+    else
+        rm -rf "$NS"
+    fi
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup $?' EXIT
+trap 'exit 130' INT TERM
 
 launch_reel() {  # <binary>
     BIN_REEL=$1
     write_test_config "$CFG" 16
-    gesture_config "$CFG" "$1"
+    gesture_config "$CFG"
     : > "$REEL_LOG"
     [ "$DRY" = 1 ] && write_fixture_log
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
-    REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" \
+    REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" REEL_LOG_PATH="$REEL_LOG" \
         "$1" >> "$REEL_LOG" 2>&1 &
     TEST_REEL_PID=$!
     poll_until 10 "REEL_SOCKET_PATH='$SOCK' '$BIN_MSG' get-status >/dev/null 2>&1" || fail "$(basename "$1") never answered"
@@ -74,6 +81,7 @@ fresh() {
     host_start MAIN
     host_create MAIN "$1" >/dev/null
     launch_reel "$2"
+    activate_process "${HOST_PID[MAIN]}"
     waitForSettle 10
 }
 
@@ -84,7 +92,7 @@ shot() {  # <slug>
     ok "saved $OUT/$1.png"
 }
 
-# The fixture log a dry run reads instead of ReelNext's, so every parser below runs against the real line shapes.
+# The fixture log a dry run reads instead of Reel's, so every parser below runs against the real line shapes.
 write_fixture_log() {
     cat >> "$REEL_LOG" <<'EOF'
 pointer: scroll tap=true mouse tap=true
@@ -119,27 +127,17 @@ view_pos() { reel_msg get-layout | jq "$AG.viewPos"; }
 off_snap() { reel_msg get-layout | jq "$AG | (.currentColumns[.activeColumnIndex].frame | .x + .w / 2) as \$c
     | ([.regions[] | select(\$c >= .minX and \$c < .maxX)] + .regions)[0] | \$c - (.minX + .width / 2) | fabs"; }
 
-# Head lands a flick by its projected velocity, trunk on the column under the cursor, so only head is judged; trunk's
-# column is recorded for comparison.
 lane1() {
-    section "lane 1: a flick from column 1 of 4 toward the strip's end moves head there and settles on a snap point"
-    local results=() bin off
-    for bin in "$BIN_TRUNK" "$BIN_HEAD"; do
-        fresh 4 "$bin"
-        focus_column 1
-        on_display "$(title_x 1)" "$(center_y 1)"
-        post "lane1-flick" "$(flick_script "$(title_x 1)" "$(center_y 1)" -30)"
-        waitForSettle 10
-        results+=("$(active)")
-        shot "flick-$(basename "$bin")"
-    done
-    off=$(off_snap)
-    [ "$DRY" = 1 ] && { dry_note "pass when head's column is past 1 and ${off} pt is at most 2"; return 0; }
-    cp "$OUT/flick-$(basename "$BIN_HEAD").png" "$OUT/flick.png"
-    info "trunk settled on column ${results[0]} (recorded only: trunk lands on the column under the cursor)"
-    [ "${results[1]}" -gt 1 ] || fail "the flick toward the strip's end left head on column ${results[1]}"
-    awk -v d="$off" 'BEGIN { exit !(d <= 2) }' || fail "head settled ${off} pt off its snap point"
-    ok "head moved from column 1 to ${results[1]} and rests on its snap point (${off} pt)"
+    section "lane 1: head flick from column 1 moves toward the strip end and snaps"
+    fresh 4 "$BIN_HEAD"
+    focus_column 1
+    post lane1-flick "$(flick_script "$(title_x 1)" "$(center_y 1)" -30)"
+    waitForSettle 10
+    shot flick
+    local off; off=$(off_snap)
+    [ "$DRY" = 1 ] && { dry_note "pass when active > 1 and snap error <= 2 pt"; return 0; }
+    [ "$(active)" -gt 1 ] || fail "flick did not advance"
+    awk -v d="$off" 'BEGIN { exit !(d <= 2) }' || fail "flick did not snap"
 }
 
 lane2() {
@@ -310,24 +308,40 @@ lane9() {
     ok "the native resize changed the width from $before to $after"
 }
 
+space_changed() {
+    local current
+    current=$(reel_msg get-layout | jq -ce "$AG | (.space // .currentSpaceFingerprint)") || return 1
+    [ "$current" != "$1" ]
+}
+
 switch_space() {  # <key code>: 124 is Ctrl-Right, 123 is Ctrl-Left
     if [ "$DRY" = 1 ]; then dry_echo "osascript key code $1 using control down"; return 0; fi
+    # One key only: a resend after a slow head update would switch twice, so a miss fails as a harness problem.
+    local before
+    before=$(reel_msg get-layout | jq -ce "$AG | (.space // .currentSpaceFingerprint)") || fail "head Space identity unavailable before switch"
     osascript -e "tell application \"System Events\" to key code $1 using control down"
-    sleep 1.5
+    poll_until 10 "space_changed '$before'" && return 0
+    reel_msg get-layout | jq -ce "$AG | (.space // .currentSpaceFingerprint)" >/dev/null || fail "head Space identity unavailable after switch"
+    fail "Space switch not registered within 10 s of key $1 (head still reports $before; harness or macOS, not a head defect by itself)"
 }
 
 lane10() {
     section "lane 10: a Space switch mid-drag hides the overlay and keeps the order"
     fresh 3 "$BIN_HEAD"
-    local before x y session
+    local before x y session space_before space_after
     before=$(col_window_ids)
+    space_before=$(reel_msg get-layout | jq -c "$AG | .space")
     focus_column 1
     x=$(title_x 1); y=$(title_y 1)
     on_display "$x" "$y"
     post "lane10-drag" "$(drag_start_script "$x" "$y")"
     log_wait 3 'reorder: ready '
     session=$(printf '%s' "$LOG_LINE" | sed -E 's/.*session=([0-9]+).*/\1/')
+    info "lane10: Ctrl-Right requested with button held session=$session space=$space_before"
     switch_space 124
+    space_after=$(reel_msg get-layout | jq -c "$AG | .space")
+    info "lane10: after Ctrl-Right engineSpace=$space_after; runtime Space notifications follow"
+    grep 'space:' "$REEL_LOG" >&2 || true
     log_wait 3 "reorder: hide session=$session\$"
     post "lane10-release" "$(jq -nc --argjson x $((x + 40)) --argjson y "$y" '[{mouse: "up", x: $x, y: $y, modifier: "fn"}]')"
     switch_space 123
@@ -359,4 +373,4 @@ main() {
     section "pointer lanes ${lanes[*]} passed"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
 # Tests/Smoke/pointer-perf.sh — the R6 perf lane: main-thread time per frame during a two-second swipe, trunk `Reel`
-# against head `ReelNext`, five interleaved runs per side recorded with the Time Profiler.
+# against head `Reel`, five interleaved runs per side recorded with the Time Profiler.
 #
 # Lane hosts only: it opens real windows and posts synthetic input through InputPoster. It refuses to run without
 # REEL_E2E_CONFIRM=1 and while any Reel or ReelNext is running.
 #
 #   REEL_E2E_CONFIRM=1 bash Tests/Smoke/pointer-perf.sh
 #   PERF_RUNS=5                          runs per binary, alternating trunk and head
-#   PERF_BINS="a b"                      binaries to compare, trunk first (default: .build/debug/Reel .build/debug/ReelNext)
+#   PERF_BINS="a b"                      binaries to compare, trunk first (default: .build/debug/Reel .build/debug/Reel)
 #   SMOKE_DRY_RUN=1                      walk the steps and summarize a fixture trace; launch and post nothing
 #
 # Both binaries run the default config's [gesture] settings, and every run starts on column 2 of 6, so the swipe has
@@ -30,7 +30,7 @@ SMOKE_TAG="$$"
 BIN_DIR="$REPO_ROOT/.build/debug"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
-read -r -a BINS <<< "${PERF_BINS:-$BIN_DIR/Reel $BIN_DIR/ReelNext}"
+read -r -a BINS <<< "${PERF_BINS:-${BIN_TRUNK:-/tmp/reel-trunk/.build/debug/Reel} $BIN_DIR/Reel}"
 RUNS="${PERF_RUNS:-5}"
 NS="/tmp/reel-pointer-perf-$$"
 SOCK="$NS/reel.sock"
@@ -51,7 +51,9 @@ trap cleanup EXIT INT TERM
 launch_reel() {  # <binary>
     BIN_REEL=$1
     write_test_config "$CFG" 16
-    gesture_config "$CFG" "$1"
+    if [ "$1" = "${BINS[0]}" ]; then cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"; fi
+    if [ "$1" = "${BINS[0]}" ]; then cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"
+    else gesture_config "$CFG"; fi
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
     REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" \
         "$1" >> "$REEL_LOG" 2>&1 &
@@ -105,17 +107,17 @@ write_fixture_trace() {  # <path>
     cat > "$1" <<'EOF'
 <?xml version="1.0"?>
 <trace-query-result><node><schema name="time-profile"/>
-<row><sample-time id="1" fmt="00:01.000.000">1000000000</sample-time><thread id="2" fmt="Main Thread  0x1 (ReelNext, pid: 1)"/><weight id="3" fmt="1.00 ms">1000000</weight></row>
+<row><sample-time id="1" fmt="00:01.000.000">1000000000</sample-time><thread id="2" fmt="Main Thread  0x1 (Reel, pid: 1)"/><weight id="3" fmt="1.00 ms">1000000</weight></row>
 <row><sample-time id="4" fmt="00:01.001.000">1001000000</sample-time><thread ref="2"/><weight ref="3"/></row>
 <row><sample-time id="5" fmt="00:01.040.000">1040000000</sample-time><thread ref="2"/><weight ref="3"/></row>
-<row><sample-time id="6" fmt="00:01.041.000">1041000000</sample-time><thread id="7" fmt="AXApp 0x2 (ReelNext, pid: 1)"/><weight ref="3"/></row>
+<row><sample-time id="6" fmt="00:01.041.000">1041000000</sample-time><thread id="7" fmt="AXApp 0x2 (Reel, pid: 1)"/><weight ref="3"/></row>
 </node></trace-query-result>
 EOF
 }
 
 run_once() {  # <binary> <run>
     local bin=$1 run=$2 name trace x y
-    name=$(basename "$bin")
+    name=$(side "$bin")
     trace="$NS/$name-$run.trace"
     launch_reel "$bin"
     focus_column 2
@@ -138,6 +140,8 @@ run_once() {  # <binary> <run>
     quit_reel
 }
 
+side() { if [ "$1" = "${BINS[0]}" ]; then echo trunk; else echo head; fi; }
+
 percentile() {  # <name> <p> : over every frame of every run
     grep "^$1 " "$FRAMES" | awk '{print $2}' | sort -n | awk -v p="$2" '{v[NR]=$1} END {
         if (NR == 0) { print "n/a"; exit }
@@ -158,18 +162,20 @@ main() {
     for run in $(seq 1 "$RUNS"); do
         for bin in "${BINS[@]}"; do run_once "$bin" "$run"; done
     done
-    section "main-thread ms per frame during a two-second swipe"
-    local trunk head
-    trunk="$(basename "${BINS[0]}")"
-    head="$(basename "${BINS[${#BINS[@]}-1]}")"
-    for bin in "${BINS[@]}"; do
-        local name; name="$(basename "$bin")"
-        info "$name: frames=$(grep -c "^$name " "$FRAMES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
-    done
-    if [ "$DRY" = 1 ]; then dry_note "rule: $head p95 <= $trunk p95 * 1.1 and <= 8 ms"; return 0; fi
-    awk -v h="$(percentile "$head" 95)" -v t="$(percentile "$trunk" 95)" 'BEGIN { exit !(h <= t * 1.1 && h <= 8) }' \
-        || fail "$head p95 $(percentile "$head" 95) ms is above $trunk p95 $(percentile "$trunk" 95) ms * 1.1 or 8 ms"
-    ok "$head p95 within $trunk p95 * 1.1 and 8 ms"
+    report
 }
 
-main "$@"
+# Samples are tagged by side(), not by binary name: trunk and head are both called Reel since the cutover.
+report() {
+    section "main-thread ms per frame during a two-second swipe"
+    local name
+    for name in trunk head; do
+        info "$name: frames=$(grep -c "^$name " "$FRAMES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
+    done
+    if [ "$DRY" = 1 ]; then dry_note "rule: head p95 <= trunk p95 * 1.1 and <= 8 ms"; return 0; fi
+    awk -v h="$(percentile head 95)" -v t="$(percentile trunk 95)" 'BEGIN { exit !(h <= t * 1.1 && h <= 8) }' \
+        || fail "head p95 $(percentile head 95) ms is above trunk p95 $(percentile trunk 95) ms * 1.1 or 8 ms"
+    ok "head p95 within trunk p95 * 1.1 and 8 ms"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

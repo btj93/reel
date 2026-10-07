@@ -66,13 +66,9 @@ corner_script() {  # <x> <y>
         {mouse: "up", x: ($x - 60), y: ($y - 40), modifier: "fn"}]'
 }
 
-# Trunk Reel and ReelNext get the same [gesture] settings, the default config's: the fn modifier with snapping.
-gesture_config() {  # <config dir> <binary>
-    if [ "$(basename "$2")" = ReelNext ]; then
-        printf '\n[gesture]\nmodifier = "fn"\nsnap = true\n' >> "$1/config.toml"
-    else
-        sed -i '' -e 's/^modifier = "none"$/modifier = "fn"/' -e 's/^snap = false$/snap = true/' "$1/config.toml"
-    fi
+# Pointer lanes use the new schema with the fn modifier and snapping.
+gesture_config() {  # <config dir>
+    printf '\n[gesture]\nmodifier = "fn"\nsnap = true\n' >> "$1/config.toml"
     grep -q '^modifier = "fn"$' "$1/config.toml" && grep -q '^snap = true$' "$1/config.toml" \
         || fail "$(basename "$2") config lacks modifier = fn and snap = true"
 }

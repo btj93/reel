@@ -2,12 +2,22 @@ import Core
 import Foundation
 
 public struct Rule: Equatable, Sendable {
-    public let bundleID: String
+    public let bundleID: String?
+    public let bundleIDRegex: String?
+    public let titleRegex: String?
     public let floating: Bool
 
-    public init(bundleID: String, floating: Bool) {
+    public init(bundleID: String? = nil, bundleIDRegex: String? = nil, titleRegex: String? = nil, floating: Bool) {
         self.bundleID = bundleID
+        self.bundleIDRegex = bundleIDRegex
+        self.titleRegex = titleRegex
         self.floating = floating
+    }
+
+    func matches(_ window: ObservedWindow) -> Bool {
+        (bundleID == nil || window.bundleID == bundleID)
+            && (bundleIDRegex == nil || window.bundleID?.range(of: bundleIDRegex!, options: .regularExpression) != nil)
+            && (titleRegex == nil || (window.ruleTitle ?? window.title).range(of: titleRegex!, options: .regularExpression) != nil)
     }
 }
 
@@ -127,7 +137,7 @@ public enum SpacePhase: Equatable, Sendable {
         return false
     }
 
-    var acceptsFocus: Bool { !isChanging || isSameSpaceHold }
+    package var acceptsFocus: Bool { !isChanging || isSameSpaceHold }
 
     /// A real Space change starting from here still has to cancel the pointer, timers and frames.
     var awaitsTeardown: Bool {
@@ -164,6 +174,10 @@ public struct GroupState: Sendable {
     /// Windows whose app hid, or that minimized, with the place they left. A Space change stashes them with the strip;
     /// a close forgets them.
     public internal(set) var hidden: [TileID: HiddenTile] = [:]
+    /// The last tiled window that left and the last that joined, so a native tab switch (one window of an app
+    /// ordered out while another of the same app appears, in either order) keeps the column in place. Not persisted.
+    var recentHide: RecentTile?
+    var recentAdd: RecentTile?
     public var space: SpaceKey? { phase.key }
 
     init(display: DisplayGroup, config: EngineConfig) {
@@ -178,11 +192,13 @@ public struct GroupState: Sendable {
 
     /// A hidden window comes back to the place it left: its own column, or floating. One that floated only for its
     /// facts tiles once they say it tiles.
-    mutating func putBack(_ window: ObservedWindow, from returning: HiddenTile, config: EngineConfig, at time: Double) {
+    mutating func putBack(_ window: ObservedWindow, from returning: HiddenTile, config: EngineConfig, width: ColumnWidth, at time: Double) {
         hidden.removeValue(forKey: window.id)
         windows[window.id] = window
         if let column = returning.column { strip.restoreColumn(column, at: placeInStrip(returning.place), time: time) }
-        else if joinsStrip(was: returning.window, now: window, config: config) { strip.insertTile(window.id, at: time) }
+        else if returning.tab == true || joinsStrip(was: returning.window, now: window, config: config) {
+            strip.insertTile(window.id, width: width, at: time)
+        }
         else { floating.insert(window.id) }
     }
 
@@ -217,6 +233,16 @@ public struct GroupState: Sendable {
 /// A hidden window comes back as its own column, or floating when `width` is nil. `place` counts the other hidden
 /// columns too, so windows hidden one app at a time come back in their own order, whichever returns first. `frame` is
 /// the release frame computed when it hid (the write itself is dropped if Reel was paused); release writes it again.
+struct RecentTile: Sendable {
+    let tile: TileID
+    let pid: Int32
+    let time: Double
+    let focused: Bool
+
+    /// Long enough for the health check (0.5 s) to see the old tab gone after the new one is adopted.
+    static let tabSwapWindow = 1.5
+}
+
 public struct HiddenTile: Codable, Sendable {
     public let window: ObservedWindow
     public let width: ColumnWidth?
@@ -224,8 +250,12 @@ public struct HiddenTile: Codable, Sendable {
     public let isFullWidth: Bool
     public let place: Int
     public let frame: AXRect?
+    /// Ordered out (a background native tab, or a window its app took off every Space): never written, since a write
+    /// to a background tab can leave its visible sibling drawn on every Space. Optional for older saved state.
+    public let tab: Bool?
 
-    init(window: ObservedWindow, column: Column?, place: Int, frame: AXRect?) {
+    init(window: ObservedWindow, column: Column?, place: Int, frame: AXRect?, tab: Bool? = nil) {
+        self.tab = tab
         self.window = window
         width = column?.width
         presetIndex = column?.presetIndex
@@ -235,8 +265,11 @@ public struct HiddenTile: Codable, Sendable {
     }
 
     func placed(at place: Int) -> HiddenTile {
-        HiddenTile(window: window, column: column, place: place, frame: frame)
+        HiddenTile(window: window, column: column, place: place, frame: frame, tab: tab)
     }
+
+    /// A background tab shares the column of the tab on screen, so it holds no place of its own.
+    var asTab: HiddenTile { HiddenTile(window: window, column: nil, place: 0, frame: frame, tab: true) }
 
     var column: Column? {
         width.map { Column(tiles: [window.id], width: $0, presetIndex: presetIndex, isFullWidth: isFullWidth) }
@@ -273,6 +306,24 @@ public struct Stamp: Equatable, Sendable {
     }
 }
 
+struct ParkedWindow: Sendable {
+    var group: UInt32
+    let display: Display
+    let origin: AXPoint
+
+    func matches(_ frame: AXRect?) -> Bool {
+        guard let frame else { return true }
+        return abs(frame.rect.minX - origin.point.x) <= EngineConfig.userResizeSlop
+            && abs(frame.rect.minY - origin.point.y) <= EngineConfig.userResizeSlop
+    }
+}
+
+struct FrameFailure: Sendable {
+    let request: FrameRequest
+    let count: Int
+    let retryAt: Double?
+}
+
 public struct World: Sendable {
     public internal(set) var topology: Topology
     public internal(set) var groups: [UInt32: GroupState]
@@ -282,6 +333,8 @@ public struct World: Sendable {
     /// and momentum are swallowed, whatever ended the swipe, until its momentum ends, a new gesture begins, a pause, or
     /// it goes quiet.
     public internal(set) var gestureTail: Double?
+    var frameFailures: [TileID: FrameFailure] = [:]
+    var parkedOwners: [TileID: ParkedWindow] = [:]
     public internal(set) var frames: [TileID: FrameRequest] = [:]
     public internal(set) var appliedFrames: [TileID: FrameRequest] = [:]
     public internal(set) var timers: [TimerToken: ScheduledWork] = [:]
@@ -336,8 +389,8 @@ public struct World: Sendable {
     public func route(_ kind: Event.Kind) -> UInt32? {
         let tile: TileID?
         switch kind {
-        case .windowAdded(let window): return owner(of: window.id) ?? home(window) ?? activeGroup
-        case .windowRemoved(let id), .windowMoved(let id, _), .frameCompleted(let id, _, _): tile = id
+        case .windowAdded(let window, _): return owner(of: window.id) ?? home(window) ?? activeGroup
+        case .windowRemoved(let id), .windowMoved(let id, _), .frameCompleted(let id, _, _, _): tile = id
         case .focus(let intent) where intent.tile == nil:
             return groups.keys.sorted().first { id in groups[id]!.windows.values.contains { $0.pid == intent.pid } } ?? activeGroup
         case .focus(let intent): tile = intent.tile
@@ -357,8 +410,15 @@ public struct World: Sendable {
         return windows.filter { (owner(of: $0.id) ?? home($0) ?? group) == group }
     }
 
-    private func home(_ window: ObservedWindow) -> UInt32? {
-        window.initialFrame.flatMap { topology.nearestGroup(to: CGPoint(x: $0.rect.midX, y: $0.rect.midY))?.id }
+    mutating func revokeParking(_ tile: TileID, frame: AXRect?) {
+        guard let frame, frame.rect.isFinite else { return }
+        if let parked = parkedOwners[tile], !parked.matches(frame) { parkedOwners[tile] = nil }
+    }
+
+    func home(_ window: ObservedWindow) -> UInt32? {
+        if let hidden = groups.keys.sorted().first(where: { groups[$0]?.hidden[window.id] != nil }) { return hidden }
+        if let parked = parkedOwners[window.id], groups[parked.group] != nil, parked.matches(window.initialFrame) { return parked.group }
+        return window.initialFrame.flatMap { topology.nearestGroup(to: CGPoint(x: $0.rect.midX, y: $0.rect.midY))?.id }
     }
 
     /// The groups a Space notification concerns: each whose display now shows another Space than the one it settled
@@ -434,4 +494,13 @@ public struct World: Sendable {
 
 extension CGRect {
     var isFinite: Bool { [minX, minY, width, height].allSatisfy(\.isFinite) && width > 0 && height > 0 }
+}
+
+extension DisplayGroup {
+    func adoptionWidth(_ window: ObservedWindow, defaultWidth: ColumnWidth) -> ColumnWidth {
+        guard let frame = window.initialFrame else { return defaultWidth }
+        let point = CGPoint(x: frame.rect.midX, y: frame.rect.midY)
+        let display = displays.min { $0.distance(to: point) < $1.distance(to: point) }!
+        return .fixed(min(frame.rect.width, display.area.width))
+    }
 }

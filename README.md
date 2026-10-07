@@ -1,437 +1,123 @@
-<p align="center"><img src="assets/banner.png" alt="Reel — scrollable tiling window manager for macOS"></p>
+# Reel
 
-<p align="center">
-  <a href="https://github.com/btj93/reel/releases/latest"><img src="https://img.shields.io/github/v/release/btj93/reel?style=flat-square&color=00E5FF" alt="Latest Release"></a>
-  <img src="https://img.shields.io/badge/macOS-15%2B-black?style=flat-square&logo=apple" alt="macOS 15+">
-  <img src="https://img.shields.io/badge/Swift-6%2B-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 6+">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/btj93/reel?style=flat-square" alt="License"></a>
-  <a href="https://github.com/btj93/tap"><img src="https://img.shields.io/badge/homebrew-btj93%2Ftap-FBB040?style=flat-square&logo=homebrew&logoColor=white" alt="Homebrew"></a>
-</p>
+A scrollable tiling window manager for macOS, inspired by [niri](https://github.com/YaLTeR/niri). Windows live on an infinite horizontal strip. Focus left or right to scroll it.
 
-Instead of cramming every window into the visible screen, Reel places them on an **infinite horizontal strip**. The focused window and its neighbors stay visible; everything else is parked off-screen. Scroll left and right to navigate — like a film reel.
+Requires macOS 15 or later and Accessibility permission. No SIP changes or Dock scripting addition are needed.
 
-Keyboard, trackpad, and mouse are all first-class citizens. Hotkeys for fast navigation, trackpad swipes for fluid scrolling, mouse clicks and drag-to-reorder for direct manipulation — pick whichever feels natural, or mix all three. A CLI tool (`reel-msg`) exposes every action over a Unix socket for scripting and programmatic control.
+## Install and run
 
-No SIP disable required. Pure Swift, Accessibility API, and two read-only private calls ([details](#private-apis)).
+Download a release from [GitHub Releases](https://github.com/btj93/reel/releases), place `Reel.app` in Applications and launch it. Grant Accessibility in System Settings when prompted. The menu remains available while permission is pending.
 
-## Demo
+For development:
 
-<!-- TODO: Record and add demo GIFs. Suggested recordings below. -->
-
-### Strip Scrolling
-
-<!-- Keyboard scrolling through 4-5 windows, showing spring animation and velocity compounding on rapid keypresses. -->
-
-<p align="center"><em>🎬 GIF: Keyboard scrolling through windows with spring physics</em></p>
-
-### Trackpad Gestures
-
-<!-- fn + trackpad horizontal swipe to scroll, showing fluid gesture tracking and snap-to-column on release. -->
-
-<p align="center"><em>🎬 GIF: Trackpad swipe scrolling with snap-to-column</em></p>
-
-### Drag to Reorder
-
-<!-- fn + drag a window title bar to reorder columns, showing the overlay with screenshot thumbnails. -->
-
-<p align="center"><em>🎬 GIF: Drag-to-reorder with overlay preview</em></p>
-
-### Width Cycling & Float Toggle
-
-<!-- Alt-R to cycle column widths (33% → 50% → 67%), then Alt-Space to float/unfloat a window. -->
-
-<p align="center"><em>🎬 GIF: Cycling column widths and toggling float mode</em></p>
-
-### Focus Indicator Styles
-
-<!-- Side-by-side or sequential comparison of ring, raise, and flash focus indicator styles. -->
-
-<p align="center"><em>🎬 GIF: Ring, raise, and flash focus indicators</em></p>
-
-## Features
-
-- **Infinite horizontal strip** — windows tile left to right, one per column. No limit.
-- **Spring-based scrolling** — physics-based animation with velocity compounding. Rapid keypresses feel natural.
-- **Trackpad, keyboard, and mouse** — swipe to scroll, hotkeys to jump, click or drag to focus and reorder. All three input methods are equally supported.
-- **Multi-monitor** — horizontally-aligned monitors share one continuous strip (columns flow across displays, sized to the monitor they're on); stacked or offset monitors get independent strips controlled by cursor position.
-- **Space-aware** — switching macOS Spaces saves and restores strip state automatically.
-- **Position memory** — windows reopen in their previous strip position across app restarts.
-- **Focus indicator** — configurable ring, raise, or flash highlight for the active window.
-- **Floating windows** — toggle any window out of the strip, or auto-float by app via rules.
-- **IPC** — script Reel via Unix socket CLI (`reel-msg`).
-
-## Requirements
-
-- macOS 15 (Sequoia) or later
-- Accessibility permission (prompted on first launch)
-- Swift 6+
-
-## Permissions
-
-| Permission | Purpose |
-|---|---|
-| **Accessibility** (System Settings → Privacy & Security → Accessibility) | Required for all core functionality. Reel uses the Accessibility API to discover, move, resize, and observe windows. Global hotkeys and trackpad gesture capture also operate through this permission via `CGEventTap`. |
-| **Screen Recording** (optional) (System Settings → Privacy & Security → Screen & System Audio Recording) | Optional. Enables screenshot thumbnails in the drag-to-reorder overlay. Without this permission, the overlay falls back to app icon mode. |
-
-macOS prompts for Accessibility access on first launch. Grant it once — the permission persists across rebuilds when running the debug binary (`.build/debug/Reel`). The `.app` bundle uses a stable code-signing identifier to avoid re-prompting.
-
-No SIP disable required, and nothing is injected into any other process. See [Private APIs](#private-apis) for the two undocumented calls Reel makes and why.
-
-## Getting Started
-
-### Homebrew
-
-```bash
-brew tap btj93/tap
-brew install --cask reel
-```
-
-This installs `Reel.app` to `/Applications` and links the `reel-msg` CLI to your PATH.
-
-### Shell Script
-
-> Always [review the script](scripts/install.sh) before piping from the internet to your shell.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/btj93/reel/main/scripts/install.sh | bash
-```
-
-This downloads the latest release, installs `Reel.app` to `/Applications`, and links the `reel-msg` CLI to `/usr/local/bin`.
-
-### Manual Download
-
-Download `Reel.app.zip` from the [Releases](../../releases/latest) page.
-
-macOS will prompt for Accessibility permission on first launch — grant it once.
-
-An icon appears in the menu bar. Open some windows — they tile automatically.
-
-### Building from Source
-
-```bash
-git clone https://github.com/btj93/reel.git
-cd reel
+```sh
 swift build
-.build/debug/Reel &
+swift run Reel
 ```
 
-When running from source, Accessibility permission persists at `.build/debug/Reel` across rebuilds.
+Grant Accessibility to `.build/debug/Reel` once. Rebuild and reuse that path. Do not alternate it with a bundle when debugging permission problems.
 
-### .app Bundle
-
-```bash
+```sh
 bash scripts/bundle.sh
-open .build/bundled/Reel.app
 ```
 
-The bundle is ad-hoc signed with a stable identifier so macOS won't revoke Accessibility permission on rebuild. Use for distribution; for development, run the binary directly.
+This builds an ad-hoc signed `.build/bundled/Reel.app` without installing or launching it. `make run` bundles and launches the app, after stopping a running Reel. Run it only when you intend to replace your window manager. Start at Login is controlled by the menu and macOS login-item approval.
 
-## Keybindings
+## Use
 
-| Action | Default | |
-|---|---|---|
-| Focus left | `Alt-H` | Scroll to window on the left |
-| Focus right | `Alt-L` | Scroll to window on the right |
-| Focus up | `Alt-K` | Focus the nearest strip above (multi-monitor) |
-| Focus down | `Alt-J` | Focus the nearest strip below (multi-monitor) |
-| Move left | `Alt-Shift-H` | Swap focused column left |
-| Move right | `Alt-Shift-L` | Swap focused column right |
-| Cycle width | `Alt-R` | Cycle 33% → 50% → 67% |
-| Full width | `Alt-F` | Toggle full screen width |
-| Float/unfloat | `Alt-Space` | Toggle window in/out of strip |
-| Close window | `Alt-W` | Close focused window |
+| Default binding | Action |
+| --- | --- |
+| Option-H / Option-L | Focus left / right |
+| Option-K / Option-J | Focus the nearest strip above / below |
+| Option-Shift-H / Option-Shift-L | Move the active column left / right |
+| Option-R | Cycle width presets |
+| Option-F | Toggle full width |
+| Option-Space | Toggle floating |
+| Option-W | Close the focused window |
 
-> **Note:** `Alt` (Option) key bindings consume special character input (e.g., `Alt-H` produces `˙`). Rebind in config if this conflicts with your workflow. `hyper` (Ctrl+Opt+Cmd+Shift) is supported as a modifier — e.g., `hyper-h`.
+Hold Fn and swipe horizontally to pan. Flick release projects velocity to a snap target and bounces at the strip edges. Hold Fn on a window title bar and drag to reorder, or hold still to open the width/full-width/floating/close menu. Escape cancels a pointer session. Native title-bar corner resizing remains available.
 
-**Trackpad:** hold `fn` + swipe horizontally to scroll the strip.
+Horizontally touching displays share a strip when macOS's “Displays have separate Spaces” is off. Otherwise each display has its own strip. The status menu explains the setting and opens System Settings. Space round trips preserve order and focus. Pause hands control back to macOS. Quit returns managed windows on-screen.
 
-## Configuration
+Dock clicks, Cmd-Tab and new windows scroll the strip to the window macOS focused; Reel does not re-activate it. Apps with native tabs (Finder, Fork, TablePlus) switch tabs in place: the new tab keeps the column and the focus. If Accessibility is switched off while Reel runs, Reel quits at once so keyboard and mouse input are never held up.
 
-Reel reads `~/.config/reel/config.toml`, created on first launch. Changes apply on save — or use the menu bar "Reload Config" button.
+Reorder thumbnails use ScreenCaptureKit. Screen Recording permission may be needed for screenshots. If capture fails, the overlay uses placeholders and reorder still works.
 
-### Layout
+## Config
+
+Reel reads `~/.config/reel/config.toml` and creates it on first launch if absent. Edit it, then choose Reload Config. See [the shipped template](Sources/Engine/config.default.toml).
 
 ```toml
 [layout]
-gap = 16                              # pixels between columns
-snap = ["middle"]                     # "left", "middle", "right" (any combo)
-animation_enabled = true
-# width_presets = [0.33, 0.5, 0.67]  # proportions for cycle_width
-# default_width = { proportion = 0.5 }
-# position_memory = true             # restore window positions on reopen
+gap = 8
+default_width = 0.5
+width_presets = [0.33, 0.5, 0.67]
+snap = ["middle"]
 
-# Insets for external bars (SketchyBar, etc.)
-# [layout.struts]
-# left = 0
-# right = 0
-# top = 0
-# bottom = 0
-```
+[layout.struts]
+top = 0
 
-### Animation
-
-```toml
-[animation]
-scroll_stiffness = 800       # higher = snappier
-scroll_damping_ratio = 1.0   # 1.0 = critically damped, <1.0 = bouncy
-bounce_distance = 40         # rubber-band overshoot at strip edges
-bounce_damping_ratio = 0.6
-```
-
-### Keybindings
-
-```toml
-[keybindings]
+[keys]
 focus_left = "alt-h"
 focus_right = "alt-l"
-focus_up = "alt-k"         # multi-monitor: focus strip above
-focus_down = "alt-j"       # multi-monitor: focus strip below
-move_left = "alt-shift-h"
-move_right = "alt-shift-l"
-cycle_width = "alt-r"
-toggle_full_width = "alt-f"
-toggle_floating = "alt-space"
-close_window = "alt-w"
-```
 
-Modifiers: `ctrl`, `shift`, `cmd`, `alt`/`opt`, `fn`, `hyper` (ctrl+shift+cmd+alt).
-
-### Gestures
-
-```toml
 [gesture]
-modifier = "fn"   # hold this key + trackpad swipe to scroll
-snap = true       # snap to columns on release (false = free scroll)
-```
+modifier = "fn"
+snap = true
 
-### Cursor
+[indicator]
+style = "ring" # none, ring, raise or flash
+color = "auto"
 
-Applies to mouse and trackpad input on windows. Hold the gesture modifier (default `fn`) and click a title bar to bring up the pill action menu; hold + drag to enter drag-to-reorder. Top-bar corners are left untouched so macOS's native corner-resize keeps working.
-
-```toml
-[cursor]
-long_press_delay_ms = 300         # hold time before the action menu appears
-drag_threshold_px = 5             # cursor movement to disambiguate drag vs long-press
-swipe_threshold_px = 50           # min 3-finger trackpad swipe distance to switch focus
-title_bar_corner_inset_px = 8     # px at each top-corner passed through for macOS corner-resize
-```
-
-Set `title_bar_corner_inset_px = 0` to reclaim the corners for Reel's title-bar gestures (you'll lose native top-corner resize on managed windows).
-
-### Focus Indicator
-
-```toml
-[focus_indicator]
-style = "ring"        # "none", "ring", "raise", "flash"
-color = "auto"        # "auto" (system accent) or "#RRGGBB"
-width = 3             # border width (ring mode)
-corner_radius = 10    # corner radius (ring mode)
-```
-
-### Multi-Monitor
-
-Reel groups displays into strips automatically:
-
-- **Horizontally-aligned displays merge into one shared strip.** Columns flow
-  across the seam; widths (including `.proportion` presets and full-width)
-  resolve against the display the column currently centers on, so a full-
-  width column on the external fills the external — not the combined span.
-  Heights blend by area as a column straddles two displays of different
-  heights.
-- **Stacked or offset displays stay independent.** Each display gets its own
-  `StripController`. Keyboard commands route to the strip under the cursor
-  automatically; `focus_up` / `focus_down` jump focus across strips.
-- **Hot-plug / rearrange** — adding, removing, or rearranging displays is
-  handled live. Groups merge, split, or dissolve without restart; columns
-  migrate by position.
-
-**Alignment rule (for auto-merging):** two displays merge iff they are
-X-adjacent (edges touch within 0.5 px) **and** have any non-zero Y-overlap.
-Vertically-stacked or edge-touching (zero-overlap) displays don't merge.
-
-#### Required macOS setting
-
-> **"Displays have separate Spaces" must be OFF** for shared-strip mode to
-> engage. Open System Settings → Desktop & Dock → Mission Control and toggle
-> "Displays have separate Spaces" off.
-
-Why: with separate Spaces enabled, each display has an independent Space
-stack, so the two halves of a merged strip could be on different Spaces with
-different window sets — Reel's snapshot store would silently discard layout
-memory on every Space switch. When Reel detects the setting is ON, it falls
-back to per-display strips (no merging) and shows a clickable warning in the
-menu-bar item that deep-links to the Mission Control pane.
-
-#### Mission Control drag
-
-Dragging a window to another monitor via Mission Control (or any method that
-moves its frame across displays) is detected: the window is removed from the
-source strip and adopted into the destination strip, with any saved position
-restored.
-
-#### Known limitations
-
-- Very tall external + short built-in: a column on the taller display
-  renders at the taller height but gets clipped to the shorter display's
-  working area when it straddles the seam.
-- Apps that refuse AX resize requests (e.g., System Settings with its
-  minimum-width constraint) may appear off-center on strips narrower than
-  their minimum width.
-- The reorder overlay captures a single display's screenshot — for a drag
-  across merged displays, the overlay renders on the display containing the
-  dragged column's current frame and may clip at the seam.
-
-### Window Rules
-
-Auto-float windows by bundle ID or title pattern:
-
-```toml
 [[rules]]
-app_id = "us.zoom.xos"
+bundle_id = "us.zoom.xos"
 floating = true
 
 [[rules]]
-app_id_regex = "com\\.apple\\.systempreferences"
-floating = true
-
-[[rules]]
-title_regex = "^Preferences$"
+title_regex = "^Preferences"
 floating = true
 ```
 
-## CLI
+`bundle_id_regex` is also supported. Multiple match fields in a rule must all match. Rules apply when a window is added, or when a window that appeared untitled gets its first title; later title changes do not re-apply them. Unknown keys and invalid regexes are errors.
 
-`reel-msg` sends commands to the running Reel instance over a Unix socket. It's bundled inside `Reel.app` — to use it from your terminal, add it to your PATH:
+## Upgrading from the old runtime
 
-```bash
-ln -s /Applications/Reel.app/Contents/MacOS/reel-msg /usr/local/bin/reel-msg
+The executable is still `Reel`, the bundle ID is still `dev.reel.Reel`, and the CLI and login-item identity are unchanged. No TCC reset is built into this update, but an ad-hoc signed build changes its code hash, so expect to grant Accessibility again: if Reel keeps showing a `?` in the menu bar, remove it from the Accessibility list with − and add `/Applications/Reel.app` back.
+
+The config schema is new. Your existing file is read at the same path and is never overwritten. An old-schema file produces a menu-bar error naming the first unknown key, and startup continues on defaults. Replace its contents using the new template. See [the migration inventory](docs/r7-cutover.md) for key mappings and removed settings.
+
+Old saved layouts are not imported. The new runtime writes `~/.local/state/reel/next-spaces.json`; it does not delete the old state files. Persistence is always on. Clear Saved Positions removes the new saved book.
+
+## CLI and logs
+
+```sh
+.build/debug/reel-msg focus-right
+.build/debug/reel-msg list-windows
+.build/debug/reel-msg get-layout
+.build/debug/reel-msg get-layouts
+.build/debug/reel-msg list-positions
+.build/debug/reel-msg recover
 ```
 
-```bash
-reel-msg list-windows        # JSON list of managed windows
-reel-msg focus-left          # scroll left
-reel-msg toggle-floating     # float/unfloat focused window
-reel-msg get-layout          # JSON layout state (current Space only)
-reel-msg get-layouts         # JSON layout state across every known Space
-reel-msg recover             # move all windows back on-screen
-reel-msg quit                # graceful shutdown
+`get-layouts` covers every known Space. Each window has expected placement and a fresh bounded AX frame read. `unreadable` means the read failed or missed the deadline. `isOnScreen` and `slivered` describe the fresh frame. A stuck window cannot be hidden by a cached layout result.
+
+Also available are width/move/floating/close commands, `clear-positions`, `clear-positions-app <bundle-id>`, `pause`, `resume`, `reload-config`, `get-status` and `quit`. The bundled CLI is `Reel.app/Contents/MacOS/reel-msg`.
+
+Bundle logs are `~/Library/Logs/Reel/reel.log`, with one `reel.log.1` backup, rotated above 1 MB at launch and during a session. The development binary logs to its terminal. Log lines name windows by ID, not title; `list-windows`, `get-layout` and `get-layouts` do return titles, so avoid publishing their output.
+
+## Architecture and tests
+
+The app uses one pure Engine reducer, a Runtime side-effect shell, macOS wrappers in Platform and pure layout in Core. [AGENTS.md](AGENTS.md) describes ownership and coordinate systems.
+
+```sh
+swift run RunTests
+swift run RunEngineTests
+ENGINE_BENCH=1 swift run -c release RunEngineTests
+make smoke-check
+make bundle-check
 ```
 
-All commands: `focus-left`, `focus-right`, `focus-up`, `focus-down`, `move-column-left`, `move-column-right`, `cycle-width-preset`, `toggle-full-width`, `toggle-floating`, `close-window`, `list-windows`, `get-layout`, `get-layouts`, `list-positions`, `clear-positions`, `recover`, `quit`.
-
-`get-layout` returns a JSON payload covering **every** strip (one per display
-group), each strip's current columns with window metadata, stashed per-Space
-states the strip has seen this session, and persisted snapshot-store entries
-across all groups — useful for scripting and debugging multi-monitor
-behavior.
-
-`get-layouts` is the cross-Space diagnostic probe. It enumerates every Space
-Reel knows about (current strip + stashed in-session spaces + persisted
-snapshot-store entries) and, for each window in each Space, queries the
-current AX frame so you can see exactly where a window sits right now,
-regardless of which macOS Space it belongs to. Each window entry includes
-`currentFrame`, `isOnScreen` (from `CGWindowListCopyWindowInfo`), and a
-`slivered` flag that trips when the frame matches Reel's off-screen hide
-patterns (1 px edge sliver or corner-hide at `(-10000, -10000)`) — useful
-for tracking down "stuck" windows that got parked off-screen during a Space
-switch and never re-adopted.
-
-## Architecture
-
-Five Swift modules with strict dependency layering:
-
-```
-Reel (app) ──→ WindowManager ──→ Platform ──→ Core
-                    │                          ↑
-                    ├──→ Config (TOMLKit) ──────┘
-                    └──→ IPC ──────────────────┘
-```
-
-| Module | Role |
-|---|---|
-| **Core** | Pure layout logic. `Strip` model, spring animation solver, `computeTargetFrames`. Foundation + CoreGraphics only — fully unit-testable, no AppKit. |
-| **Platform** | macOS API wrappers: Accessibility (per-app background threads), CGEventTap hotkeys, CADisplayLink frame loop, display management, focus indicator, gesture capture. |
-| **WindowManager** | Orchestration. One `StripController` per display. Window tracking, space switching, position memory. |
-| **Config** | TOML config via TOMLKit. Reload via menu bar button. |
-| **IPC** | Unix socket server + CLI client. |
-
-## Logs
-
-When running as an `.app` bundle, Reel writes debug output to `~/Library/Logs/Reel/reel.log`. The log is rotated on launch when it exceeds 1 MB (one backup kept as `reel.log.1`). When running the bare binary (`.build/debug/Reel`), output goes to the terminal as usual.
-
-## Building
-
-```bash
-swift build                    # debug build
-swift run RunTests             # run test suite (no Xcode needed)
-make run-debug                 # kill existing, bundle, run with stderr
-make run                       # kill existing, bundle, open .app
-```
-
-## Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| Windows not tiling | Grant Accessibility permission in System Settings > Privacy & Security > Accessibility, then relaunch Reel. |
-| Hotkeys not working | Another app may have claimed the same key combo. Check for conflicts or rebind in `~/.config/reel/config.toml`. |
-| Permission re-prompted on every launch | You're running the `.app` bundle during development. Use `.build/debug/Reel` instead — AX permission persists across rebuilds. |
-| Windows stuck off-screen | Run `reel-msg recover` to move all managed windows back on-screen. |
-| Aligned displays aren't merging into one strip | macOS "Displays have separate Spaces" is ON — turn it off in System Settings → Desktop & Dock → Mission Control. The menu-bar item also shows a clickable warning that deep-links there. |
-| Hotkey goes to the wrong monitor | Hotkey commands route to the strip **under the cursor**. Move the cursor over the display you mean to affect, then press the shortcut. Or use `focus-up` / `focus-down` to switch the active strip. |
-| Special characters when pressing hotkeys | `Alt` key combos produce characters like `˙` (Alt-H). Rebind to `hyper-` (Ctrl+Opt+Cmd+Shift) in config to avoid this. |
-
-## Uninstall
-
-### Homebrew
-
-```bash
-brew uninstall --cask reel
-```
-
-### Manual
-
-```bash
-rm -rf /Applications/Reel.app
-rm -f /usr/local/bin/reel-msg
-rm -rf ~/.config/reel                # optional: remove config
-```
-
-## Alternatives
-
-Reel takes a different approach from other macOS tiling window managers:
-
-| | Reel | [yabai](https://github.com/koekeishiya/yabai) | [AeroSpace](https://github.com/nikitabobko/AeroSpace) | [Amethyst](https://github.com/ianyh/Amethyst) |
-|---|---|---|---|---|
-| Layout model | Infinite horizontal strip | BSP / stacking / float | i3-like tree | Fixed layouts (tall, wide, etc.) |
-| SIP disable | No | Yes (for some features) | No | No |
-| Private APIs | 2, read-only | Many, incl. Dock injection | 1 | Several |
-| Scrolling | Spring physics, trackpad + keyboard | N/A | N/A | N/A |
-| Config | TOML | Shell + skhd | TOML | GUI + TOML |
-
-## Private APIs
-
-Reel uses two undocumented Apple calls. Both are **read-only**, both are resolved at runtime rather than linked, and neither requires disabling SIP or injecting code into another process.
-
-| Call | Purpose | Fallback if it disappears |
-|---|---|---|
-| `_AXUIElementGetWindow` | Maps an accessibility element to its `CGWindowID`. There is no public equivalent. | None — window tracking depends on it. Validated stable across macOS 10.12–15 by AeroSpace and Amethyst. |
-| SkyLight Space queries — `SLSMainConnectionID`, `SLSGetActiveSpace`, `SLSManagedDisplayGetCurrentSpace`, `SLSSpaceCopyName`, `SLSSpaceGetType` | Reads which Space is active and its persistent identity. | Degrades automatically to the previous behaviour: inferring Space identity from the set of on-screen windows. |
-
-**Why the second one exists.** macOS exposes no public API for Space identity, so Reel previously inferred it by fingerprinting the set of on-screen window IDs and matching Spaces by similarity. That inference is unreliable by construction — in practice it returns an empty set mid-transition, and has been observed returning a 14-window set spanning four different Spaces, which is impossible for a single Space. Acting on either corrupts window layout. The window server simply knows the answer.
-
-**The line Reel does not cross.** Every call above is a query. The SkyLight functions that create, destroy, or switch Spaces, move windows between them, or alter window opacity and level *do* require SIP to be disabled and a scripting addition loaded into the Dock — that is how yabai implements those features. Reel uses none of them, and adding one would change what the project is.
-
-**Risk.** These symbols are not covered by any compatibility guarantee. `SLSSetWindowAlpha` and `SLSSetWindowLevel`, in this same framework, became no-ops in macOS 26. Reel therefore resolves each symbol with `dlsym` at runtime and falls back to its previous behaviour when one is missing, rather than failing to launch. Verified working on macOS 26.6.1 (build 25G76) from an unsigned binary with SIP enabled.
-
-## Contributing
-
-Contributions are welcome. Before submitting a PR:
-
-```bash
-swift run RunTests   # ensure tests pass
-```
-
-The test suite is a standalone executable (`Tests/CoreTests/main.swift`), not XCTest — no Xcode required.
+The runners do not require XCTest. Live smoke and input/display/Space lanes are opt-in and must run on isolated lane hosts. They can stop a window manager and move real windows. Safe dry runs require both `REEL_E2E_CONFIRM=1` and `SMOKE_DRY_RUN=1`.
 
 ## License
 

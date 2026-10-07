@@ -7,11 +7,15 @@ public struct TimerToken: Hashable, Comparable, Sendable {
 }
 
 public struct FrameRequest: Equatable, Sendable {
+    public enum Purpose: Equatable, Sendable { case layout, release(AXRect) }
+
     public let tile: TileID
     public let pid: Int32
     public let frame: AXRect
     public let revision: UInt64
     public let scope: EventScope
+    public var animating: Bool = false
+    public var purpose: Purpose = .layout
 }
 
 public struct MenuRequest: Equatable, Sendable {

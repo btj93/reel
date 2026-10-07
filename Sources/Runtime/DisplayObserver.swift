@@ -9,6 +9,7 @@ import Platform
 public final class DisplayObserver {
     private var token: NSObjectProtocol?
     private let current: () -> Topology
+    public var struts = WorkingInsets()
     private let changed: (Topology) -> Void
     private let log: (String) -> Void
 
@@ -32,7 +33,7 @@ public final class DisplayObserver {
 
     private func screensChanged() {
         let now = current()
-        let next = Self.read(revision: now.revision + 1)
+        let next = Self.read(revision: now.revision + 1, struts: struts)
         guard next.displays != now.displays || next.separateSpaces != now.separateSpaces else {
             return log("display: screen parameters unchanged rev=\(now.revision)")
         }
@@ -41,12 +42,12 @@ public final class DisplayObserver {
     }
 
     /// Every display, with frames and working areas in AX coordinates.
-    public static func read(revision: UInt64) -> Topology {
+    public static func read(revision: UInt64, struts: WorkingInsets = WorkingInsets()) -> Topology {
         let manager = DisplayManager()
         manager.refresh()
         let height = manager.primaryScreenHeight
         let displays = manager.displays.values.sorted { $0.displayID < $1.displayID }.map {
-            Display(id: $0.displayID, frame: $0.cgFrame(primaryScreenHeight: height), area: $0.workingArea(primaryScreenHeight: height))
+            Display(id: $0.displayID, frame: $0.cgFrame(primaryScreenHeight: height), area: struts.apply(to: $0.workingArea(primaryScreenHeight: height)))
         }
         return Topology(revision: revision, displays: displays, separateSpaces: NSScreen.screensHaveSeparateSpaces,
                         primaryScreenHeight: height)

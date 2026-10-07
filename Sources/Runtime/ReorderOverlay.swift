@@ -166,7 +166,7 @@ public final class ReorderOverlay {
         panel.orderFrontRegardless()
         post(.overlayReady, session)
         let band = Self.band(in: panel.frame.size)
-        let slots = Self.slots(midpoints).enumerated().map { slot, x in "\(slot < dragged + 1 ? slot : slot + 1):\(Int(panel.frame.minX + x))" }
+        let slots = Self.slots(midpoints, bounds: band).enumerated().map { slot, x in "\(slot < dragged + 1 ? slot : slot + 1):\(Int(panel.frame.minX + x))" }
         log("reorder: ready session=\(session.rawValue) reason=\(reason) elapsedMs=\(Int(started.duration(to: .now) / .milliseconds(1))) "
             + "slots=\(slots.joined(separator: ",")) y=\(Int(world().topology.primaryScreenHeight - panel.frame.minY - band.midY))")
         if let latest { move(to: latest) }
@@ -201,16 +201,18 @@ public final class ReorderOverlay {
         guard let panel else { return }
         let band = Self.band(in: panel.frame.size)
         let others = tiles.indices.filter { $0 != dragged }
-        let origins = Self.origins(widths: others.map { widths[$0] }, bandWidth: band.width, spacing: Self.spacing)
-        midpoints = zip(others, origins).map { $1 + band.minX + widths[$0] / 2 }
-        let y = band.midY - Self.thumbnailHeight / 2
-        for (index, x) in zip(others, origins) {
-            thumbnails[index].frame = CGRect(x: band.minX + x, y: y, width: widths[index], height: Self.thumbnailHeight)
+        let row = Self.thumbnailFrames(widths: others.map { widths[$0] }, bandWidth: band.width, spacing: Self.spacing)
+        let height = row.first.map { Double($0.height) } ?? Self.thumbnailHeight
+        let y = band.midY - height / 2
+        midpoints = row.map { band.minX + $0.midX }
+        for (index, frame) in zip(others, row) {
+            thumbnails[index].frame = frame.offsetBy(dx: band.minX, dy: y)
         }
         let slot = others.filter { $0 < gap }.count
-        let x = slot == 0 ? (origins.first ?? band.width / 2) - Self.spacing / 2
-            : origins[slot - 1] + widths[others[slot - 1]] + Self.spacing / 2
-        indicator.frame = CGRect(x: band.minX + x - 1.5, y: y - 10, width: 3, height: Self.thumbnailHeight + 20)
+        let x = slot == 0 ? (row.first?.minX ?? band.width / 2) / 2
+            : slot == row.count ? ((row.last?.maxX ?? band.width / 2) + band.width) / 2
+            : (row[slot - 1].maxX + row[slot].minX) / 2
+        indicator.frame = CGRect(x: band.minX + x - 1.5, y: y - 10, width: 3, height: height + 20)
     }
 
     private func hide() {
@@ -233,17 +235,25 @@ public final class ReorderOverlay {
     }
 
     /// A cursor x inside each gap between thumbnails centred at `midpoints`, the ends included.
-    public nonisolated static func slots(_ midpoints: [Double]) -> [Double] {
+    public nonisolated static func slots(_ midpoints: [Double], bounds: CGRect? = nil) -> [Double] {
         guard let first = midpoints.first, let last = midpoints.last else { return [] }
-        return [first - 40] + zip(midpoints, midpoints.dropFirst()).map { ($0 + $1) / 2 } + [last + 40]
+        let start = bounds.map { Double($0.minX) } ?? first - 40
+        let end = bounds.map { Double($0.maxX) } ?? last + 40
+        return [start] + zip(midpoints, midpoints.dropFirst()).map { ($0 + $1) / 2 } + [end]
     }
 
     public nonisolated static func origins(widths: [Double], bandWidth: Double, spacing: Double) -> [Double] {
+        thumbnailFrames(widths: widths, bandWidth: bandWidth, spacing: spacing).map { Double($0.minX) }
+    }
+
+    /// One geometry drives the visible thumbnails, insertion thresholds and indicator. Edge gaps stay visible too.
+    public nonisolated static func thumbnailFrames(widths: [Double], bandWidth: Double, spacing: Double) -> [CGRect] {
         let total = widths.reduce(0, +) + spacing * Double(max(0, widths.count - 1))
-        var x = (bandWidth - total) / 2
+        let scale = min(1, max(0, bandWidth) / max(1, total + spacing * 2))
+        var x = (bandWidth - total * scale) / 2
         return widths.map { width in
-            defer { x += width + spacing }
-            return x
+            defer { x += (width + spacing) * scale }
+            return CGRect(x: x, y: 0, width: width * scale, height: thumbnailHeight * scale)
         }
     }
 
