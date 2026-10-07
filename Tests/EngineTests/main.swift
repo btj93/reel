@@ -5742,6 +5742,25 @@ final class CensusFixture: CensusObserver {
         check(h.world.groups[1]!.focus.decision?.requestsOSFocus == false, "cross-Space Dock activation does not refocus")
         check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "crossing emits no OS focus")
     }
+    section("audit2 activation: nil-tile Dock click cancels the previous app timer") {
+        var h = Harness()
+        h.send(.spaceChanged(key: .skylight(1), epoch: 1, windows: [window(10, app: 100), window(20, app: 200)], frontmost: TileID(20)))
+        let executor = Executor(worker: { _ in nil }, log: { _ in })
+        executor.synchronizeFocus(with: h.world, paused: false)
+        h.send(.focus(FocusIntent(tile: nil, pid: 100, source: .appActivation)))
+        h.send(.focus(FocusIntent(tile: TileID(10), pid: 100, source: .appActivation)), advance: 0.30)
+        check(h.world.timers.count == 1, "kitty's delayed read scheduled its scroll")
+        let generation = executor.focusObservationGeneration
+        h.send(.focus(FocusIntent(tile: nil, pid: 200, source: .appActivation)), advance: 0.10)
+        check(h.world.timers.isEmpty, "Fork click cancels kitty before its missing-tile return")
+        h.advance(0.06)
+        executor.synchronizeFocus(with: h.world, paused: false)
+        check(h.active == TileID(20), "kitty cannot commit after the newer Fork activation")
+        check(executor.focusObservationGeneration == generation, "observed activation cannot supersede the slow Fork read")
+        h.send(.focus(FocusIntent(tile: TileID(20), pid: 200, source: .appActivation)), advance: 0.14)
+        h.advance(EngineConfig.focusDebounce + margin)
+        check(h.active == TileID(20) && h.world.groups[1]!.focus.decision?.source == .appActivation, "Fork's slow read still commits")
+    }
     section("audit2 focus: nil and unmanaged Space frontmost reads never raise") {
         for frontmost: TileID? in [nil, TileID(999), TileID(10)] {
             var h = Harness()
