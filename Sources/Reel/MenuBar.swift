@@ -59,7 +59,11 @@ final class MenuBar: NSObject {
 
     private func refresh() {
         let failed = loop.configError != nil
-        item.button?.title = failed ? "Reel⚠︎" : loop.paused ? "Reel‖" : "Reel"
+        // The original Reel icon: paused dims it, a config error adds a warning sign beside it.
+        item.button?.image = MenuBar.icon
+        item.button?.imagePosition = .imageLeading
+        item.button?.appearsDisabled = loop.paused
+        item.button?.title = failed ? "⚠︎" : ""
         state.title = loop.paused ? "Reel: paused" : "Reel: running"
         error.isHidden = !failed
         error.title = "Config error: \(loop.configError ?? "")"
@@ -68,6 +72,26 @@ final class MenuBar: NSObject {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         separateSpaces.isHidden = !loop.world.topology.separateSpaces
     }
+
+    /// Three window columns on a strip, the centre one taller (focused). A template image, so it follows the menu bar.
+    static let icon: NSImage = {
+        let size = NSSize(width: 18, height: 16)
+        let image = NSImage(size: size, flipped: false) { _ in
+            let gap: CGFloat = 1.5, columnWidth: CGFloat = 4.5, sideHeight: CGFloat = 10, centreHeight: CGFloat = 14, radius: CGFloat = 1.5
+            let x0 = (size.width - (columnWidth * 3 + gap * 2)) / 2
+            NSColor.black.withAlphaComponent(0.45).setFill()
+            let sideY = (size.height - sideHeight) / 2
+            for x in [x0, x0 + (columnWidth + gap) * 2] {
+                NSBezierPath(roundedRect: NSRect(x: x, y: sideY, width: columnWidth, height: sideHeight), xRadius: radius, yRadius: radius).fill()
+            }
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: NSRect(x: x0 + columnWidth + gap, y: (size.height - centreHeight) / 2, width: columnWidth,
+                                             height: centreHeight), xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 
     @objc private func toggleLogin() {
         do {

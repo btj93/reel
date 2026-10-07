@@ -25,7 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleDisplaySleepDisabled], reason: "Reel window management")
         guard AXIsProcessTrusted() else {
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-            item.button?.title = "Reel?"
+            item.button?.image = MenuBar.icon
+            item.button?.imagePosition = .imageLeading
+            item.button?.title = "?"
             let menu = NSMenu()
             menu.addItem(NSMenuItem(title: "Waiting for Accessibility permission", action: nil, keyEquivalent: ""))
             let settings = NSMenuItem(title: "Open System Settings", action: #selector(openAccessibility), keyEquivalent: "")
