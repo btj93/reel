@@ -4,7 +4,7 @@ import IPC
 @main
 struct ReelCLI {
     static func printUsage() {
-        let commands = ReelCommand.allCases.map(\.rawValue) + ["clear-positions-app <bundle-id>"]
+        let commands = ReelCommand.allCases.map { $0 == .clearPositionsApp ? "clear-positions-app <bundle-id>" : $0.rawValue }
         print("Usage: reel-msg <command>")
         print("Commands: \(commands.joined(separator: ", "))")
     }

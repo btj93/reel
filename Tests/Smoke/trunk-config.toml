@@ -1,0 +1,74 @@
+# Reel Configuration
+# Edit this file and save — changes apply automatically.
+
+# Start Reel automatically when you log in (requires .app bundle)
+# start_at_login = false
+
+[layout]
+gap = 16
+snap = ["middle"]  # any combination of: "left", "middle", "right"
+animation_enabled = true
+# width_presets = [0.33, 0.5, 0.67]  # proportions of screen width for cycle_width
+
+# default_width = { proportion = 0.5 }
+
+# Position memory: remember window positions across close/reopen
+# position_memory = true
+# saved_position_limit = 500
+
+# Insets for external status bars (e.g., SketchyBar)
+[layout.struts]
+# left = 0
+# right = 0
+# top = 0
+# bottom = 0
+
+[animation]
+scroll_stiffness = 800
+scroll_damping_ratio = 1.0
+bounce_distance = 40
+bounce_damping_ratio = 0.6
+
+[keybindings]
+# Alt (Option) as primary modifier, +Shift for move variants
+# Alt+letter consumes special character input (e.g., Alt+H = ˙) — rebind if needed
+# Hyper = Ctrl+Shift+Cmd+Opt (all four modifiers)
+focus_left = ""
+focus_right = ""
+# focus_up / focus_down switch focus to the nearest strip above / below the
+# cursor's strip (by group midpoint Y). Useful when you have a vertically
+# arranged secondary monitor that isn't merged into the shared strip.
+focus_up = ""
+focus_down = ""
+move_left = ""
+move_right = ""
+cycle_width = ""
+toggle_full_width = ""
+toggle_floating = ""
+close_window = ""
+
+[gesture]
+modifier = "fn"  # Hold this key + horizontal scroll to pan the strip
+snap = true  # Set to false to let gestures move freely without snapping to columns
+
+# Focus indicator: visual highlight for the active window
+[focus_indicator]
+# style = "ring"        # "none", "ring", "raise", or "flash"
+# color = "auto"        # "auto" (system accent) or hex "#RRGGBB" / "#RGB"
+# width = 3             # border width in points (ring mode only)
+# corner_radius = 10    # corner radius in points (ring mode only)
+# raise_height = 20     # pixels unfocused windows shrink (raise mode only)
+
+# Window rules: match by app bundle ID or title regex
+# [[rules]]
+# app_id = "us.zoom.xos"
+# floating = true
+
+# [[rules]]
+# app_id_regex = "com\\.apple\\.systempreferences"
+# floating = true
+
+# Per-app matching strategy for position memory
+# [[position_memory_rules]]
+# app_id = "com.apple.finder"
+# match_by = "order"  # "title" (default) or "order"

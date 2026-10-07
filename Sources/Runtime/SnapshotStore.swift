@@ -32,6 +32,18 @@ public final class SnapshotStore {
         }
     }
 
+    public func list() -> [Snapshot] { pending ?? load() }
+
+    public func clear(bundleID: String) {
+        save(list().map { $0.excluding(bundleID: bundleID) })
+        flush()
+    }
+
+    public func clear() {
+        save([])
+        flush()
+    }
+
     /// Keep `snapshots` as the next write, replacing any not yet written.
     public func save(_ snapshots: [Snapshot]) {
         pending = snapshots

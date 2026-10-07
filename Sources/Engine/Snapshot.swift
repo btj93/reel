@@ -148,8 +148,22 @@ func removing(_ ids: Set<UInt32>, from saved: Snapshot) -> Snapshot {
                     hidden: saved.hidden.filter { !ids.contains($0.window.id.rawValue) })
 }
 
+extension Snapshot {
+    /// This strip saved under `group`, after `existing`'s columns and hidden windows when that group saved this Space
+    /// too. A window `existing` already lists stays where it is there.
+    func moved(to group: UInt32, after existing: Snapshot?) -> Snapshot {
+        let rest = existing.map { removing($0.fingerprint.union($0.hidden.map(\.window.id.rawValue)), from: self) } ?? self
+        let base = existing.map { $0.columns.count + $0.hidden.filter { $0.width != nil }.count } ?? 0
+        return Snapshot(group: group, space: space, columns: (existing?.columns ?? []) + rest.columns,
+                        floating: (existing?.floating ?? []) + rest.floating,
+                        activeColumnIndex: existing?.activeColumnIndex ?? rest.activeColumnIndex, offset: existing?.offset ?? rest.offset,
+                        focusedTile: existing?.focusedTile ?? rest.focusedTile,
+                        hidden: (existing?.hidden ?? []) + rest.hidden.map { $0.placed(at: $0.place + base) })
+    }
+}
+
 func refreshing(_ window: ObservedWindow, in saved: Snapshot) -> Snapshot {
-    func fresh(_ old: ObservedWindow) -> ObservedWindow { old.id == window.id ? window : old }
+    func fresh(_ old: ObservedWindow) -> ObservedWindow { old.id == window.id ? window.adopting(old) : old }
     let columns = saved.columns.map {
         SnapshotColumn(windows: $0.windows.map(fresh), width: $0.width, activeTileIndex: $0.activeTileIndex,
                        snapIndex: $0.snapIndex, presetIndex: $0.presetIndex, isFullWidth: $0.isFullWidth)
@@ -166,10 +180,12 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     var group = GroupState(display: display, config: config)
     group.phase = .settled(key)
     group.epoch = epoch
-    group.windows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+    group.windows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0.adoptingTitle($0.ruleTitle ?? $0.title)) })
     group.hidden = Dictionary(uniqueKeysWithValues: (saved?.hidden ?? []).map { ($0.window.id, $0) })
     // A window that hid on this Space and is back on screen returns to its own place, after the rest of the strip.
-    let returning = windows.compactMap { window in group.returning(window).map { (window, $0) } }.sorted { $0.1.place < $1.1.place }
+    let returning = windows.compactMap { window in
+        group.returning(window).map { (window.adopting($0.window), $0) }
+    }.sorted { $0.1.place < $1.1.place }
     let returned = Set(returning.map(\.0.id))
     var unused = windows.filter { !returned.contains($0.id) }.sorted { $0.id.rawValue < $1.id.rawValue }
     var mappedIDs: [TileID: TileID] = [:]
@@ -181,7 +197,11 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     for matches in tiers {
         for old in saved?.windows ?? [] where mappedIDs[old.id] == nil {
             guard let index = unused.firstIndex(where: { matches(old, $0) }) else { continue }
-            mappedIDs[old.id] = unused.remove(at: index).id
+            let live = unused.remove(at: index)
+            mappedIDs[old.id] = live.id
+            if hidesMissing, old.id == live.id, old.hasSameOwner(as: live) {
+                group.windows[live.id] = live.adopting(old)
+            }
         }
     }
     var joined: [ObservedWindow] = []
@@ -213,13 +233,13 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     }
     group.strip.activeColumnIndex = min(saved?.activeColumnIndex ?? 0, max(0, group.strip.columns.count - 1))
     group.strip.viewOffset = .static(saved?.offset ?? 0)
-    for (window, hidden) in returning { group.putBack(window, from: hidden, config: config, at: time) }
+    for (window, hidden) in returning { group.putBack(window, from: hidden, config: config, width: display.adoptionWidth(window, defaultWidth: group.strip.defaultWidth), at: time) }
     group.hidden = group.hidden.filter { group.windows[$0.key] == nil }
     let active = group.strip.activeColumnIndex, offset = group.strip.viewOffset
     let fresh = visualOrder(unused)
     for window in fresh where shouldFloat(window, config: config) { group.floating.insert(window.id) }
     for window in joined + fresh where !group.floating.contains(window.id) {
-        group.strip.insertColumn(Column(tiles: [window.id], width: group.strip.defaultWidth), at: time, atIndex: group.strip.columns.count)
+        group.strip.insertColumn(Column(tiles: [window.id], width: display.adoptionWidth(window, defaultWidth: group.strip.defaultWidth)), at: time, atIndex: group.strip.columns.count)
     }
     group.strip.activeColumnIndex = min(active, max(0, group.strip.columns.count - 1))
     group.strip.viewOffset = offset
@@ -228,4 +248,11 @@ func restoredGroup(display: DisplayGroup, config: EngineConfig, key: SpaceKey, e
     }
     group.strip.recalculateWidths(at: time)
     return group
+}
+
+extension Snapshot {
+    public func excluding(bundleID: String) -> Snapshot {
+        let ids = Set((windows + hidden.map(\.window)).filter { $0.bundleID == bundleID }.map { $0.id.rawValue })
+        return removing(ids, from: self)
+    }
 }

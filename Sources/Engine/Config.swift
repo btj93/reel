@@ -1,15 +1,23 @@
 import Core
+import Foundation
 import TOMLKit
 
 public enum KeyAction: String, CaseIterable, Sendable {
     case focusLeft = "focus_left"
     case focusRight = "focus_right"
+    case focusUp = "focus_up"
+    case focusDown = "focus_down"
     case moveLeft = "move_left"
     case moveRight = "move_right"
     case cycleWidth = "cycle_width"
     case toggleFullWidth = "toggle_full_width"
     case toggleFloating = "toggle_floating"
     case closeWindow = "close_window"
+}
+
+/// The key held for trackpad swipes, wheel scrolls and title-bar drags.
+public enum GestureModifier: String, CaseIterable, Sendable {
+    case fn, ctrl, alt, cmd
 }
 
 public enum IndicatorStyle: String, CaseIterable, Sendable {
@@ -42,10 +50,12 @@ public struct ConfigError: Error, Equatable, CustomStringConvertible {
 public struct AppConfig: Sendable {
     public internal(set) var engine = EngineConfig()
     public internal(set) var keys: [KeyAction: String] = [
-        .focusLeft: "alt-h", .focusRight: "alt-l", .moveLeft: "alt-shift-h", .moveRight: "alt-shift-l",
-        .cycleWidth: "alt-r", .toggleFullWidth: "alt-f", .toggleFloating: "alt-space", .closeWindow: "alt-w",
+        .focusLeft: "alt-h", .focusRight: "alt-l", .focusUp: "alt-k", .focusDown: "alt-j",
+        .moveLeft: "alt-shift-h", .moveRight: "alt-shift-l", .cycleWidth: "alt-r", .toggleFullWidth: "alt-f", .toggleFloating: "alt-space", .closeWindow: "alt-w",
     ]
+    public internal(set) var struts = WorkingInsets()
     public internal(set) var indicator = IndicatorConfig()
+    public internal(set) var gestureModifier = GestureModifier.fn
 
     public init() {}
 
@@ -59,7 +69,7 @@ public struct AppConfig: Sendable {
         let base = EngineConfig()
         var gap = base.gap, defaultWidth = base.defaultWidth, presets = base.widthPresets, snap = base.snapPoints
         var animate = base.animate, stiffness = base.scroll.stiffness, damping = base.dampingRatio
-        var bounce = base.bounceDistance, bounceDamping = base.bounceDampingRatio, rules = base.rules
+        var bounce = base.bounceDistance, bounceDamping = base.bounceDampingRatio, rules = base.rules, gestureSnap = base.gestureSnap
         var config = AppConfig()
         try Section(root, path: "").read([
             "layout": { try Section($0, path: "layout").read([
@@ -67,6 +77,12 @@ public struct AppConfig: Sendable {
                 "default_width": { defaultWidth = try proportion($0, "layout.default_width") },
                 "width_presets": { presets = try list($0, "layout.width_presets").map { try proportion($0, "layout.width_presets") } },
                 "snap": { snap = try list($0, "layout.snap").map { try choice($0, "layout.snap", [SnapPoint.left, .middle, .right]) } },
+                "struts": { try Section($0, path: "layout.struts").read([
+                    "top": { config.struts.top = try number($0, "layout.struts.top", min: 0) },
+                    "bottom": { config.struts.bottom = try number($0, "layout.struts.bottom", min: 0) },
+                    "left": { config.struts.left = try number($0, "layout.struts.left", min: 0) },
+                    "right": { config.struts.right = try number($0, "layout.struts.right", min: 0) },
+                ]) },
             ]) },
             "animation": { try Section($0, path: "animation").read([
                 "enabled": { animate = try flag($0, "animation.enabled") },
@@ -78,6 +94,17 @@ public struct AppConfig: Sendable {
             "keys": { try Section($0, path: "keys").read(Dictionary(uniqueKeysWithValues: KeyAction.allCases.map { action in
                 (action.rawValue, { config.keys[action] = try text($0, "keys.\(action.rawValue)") })
             })) },
+            "gesture": { try Section($0, path: "gesture").read([
+                "modifier": {
+                    let value = try text($0, "gesture.modifier").lowercased()
+                    let aliases = ["control": "ctrl", "opt": "alt", "option": "alt", "command": "cmd"]
+                    guard let modifier = GestureModifier(rawValue: aliases[value] ?? value) else {
+                        throw ConfigError(description: "gesture.modifier must be one of fn, ctrl/control, alt/opt/option, cmd/command")
+                    }
+                    config.gestureModifier = modifier
+                },
+                "snap": { gestureSnap = try flag($0, "gesture.snap") },
+            ]) },
             "indicator": { try Section($0, path: "indicator").read([
                 "style": { config.indicator.style = try choice($0, "indicator.style", IndicatorStyle.allCases) },
                 "color": { config.indicator.color = try color($0) },
@@ -87,20 +114,23 @@ public struct AppConfig: Sendable {
             ]) },
             "rules": { value in
                 rules = try list(value, "rules").enumerated().map { index, entry in
-                    var bundleID: String?, floating: Bool?
+                    var bundleID: String?, bundleIDRegex: String?, titleRegex: String?, floating: Bool?
                     let path = "rules[\(index)]"
                     try Section(entry, path: path).read([
                         "bundle_id": { bundleID = try text($0, "\(path).bundle_id") },
+                        "bundle_id_regex": { bundleIDRegex = try regex($0, "\(path).bundle_id_regex") },
+                        "title_regex": { titleRegex = try regex($0, "\(path).title_regex") },
                         "floating": { floating = try flag($0, "\(path).floating") },
                     ])
-                    guard let bundleID, !bundleID.isEmpty, let floating else {
+                    guard let floating, bundleID?.isEmpty != true,
+                          bundleID != nil || bundleIDRegex != nil || titleRegex != nil else {
                         throw ConfigError(description: "\(path) needs bundle_id and floating")
                     }
-                    return Rule(bundleID: bundleID, floating: floating)
+                    return Rule(bundleID: bundleID, bundleIDRegex: bundleIDRegex, titleRegex: titleRegex, floating: floating)
                 }
             },
         ])
-        config.engine = EngineConfig(gap: gap, defaultWidth: defaultWidth, animate: animate, gestureSnap: base.gestureSnap,
+        config.engine = EngineConfig(gap: gap, defaultWidth: defaultWidth, animate: animate, gestureSnap: gestureSnap,
                                      rules: rules, widthPresets: presets, snapPoints: snap, stiffness: stiffness,
                                      dampingRatio: damping, bounceDistance: bounce, bounceDampingRatio: bounceDamping,
                                      raiseHeight: config.indicator.style == .raise ? config.indicator.raiseHeight : 0)
@@ -173,4 +203,12 @@ private func color(_ value: TOMLValueConvertible) throws -> String {
         throw ConfigError(description: "indicator.color must be \"auto\" or #RGB / #RRGGBB")
     }
     return color
+}
+
+private func regex(_ value: TOMLValueConvertible, _ key: String) throws -> String {
+    let pattern = try text(value, key)
+    guard !pattern.isEmpty, (try? NSRegularExpression(pattern: pattern)) != nil else {
+        throw ConfigError(description: "\(key) must be a valid nonempty regex")
+    }
+    return pattern
 }

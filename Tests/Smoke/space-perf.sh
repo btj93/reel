@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
 # Tests/Smoke/space-perf.sh — the R4 perf lane: time from a Space switch key to a settled strip on the destination
-# Space, trunk `Reel` against head `ReelNext`, in interleaved blocks.
+# Space, trunk `Reel` against head `Reel`, in interleaved blocks.
 #
 # Lane hosts only: it opens real windows and posts Ctrl-Left/Right through System Events, which must be bound to
 # "Move left/right a space", with at least two Spaces. It refuses to run while any Reel or ReelNext is running.
 #
 #   REEL_E2E_CONFIRM=1 bash Tests/Smoke/space-perf.sh
 #   PERF_BLOCKS=4 PERF_PER_BLOCK=5      four blocks of five switches per binary, alternating (twenty each)
-#   PERF_BINS="a b"                     binaries to compare, trunk first (default: .build/debug/Reel .build/debug/ReelNext)
+#   PERF_BINS="a b"                     binaries to compare, trunk first (default: .build/debug/Reel .build/debug/Reel)
 #   SMOKE_DRY_RUN=1                     walk the steps against fixtures, launch nothing
 #
 # Each sample runs from the `osascript` call until the active group reports another Space and `waitForSettle`
@@ -26,7 +26,7 @@ SMOKE_TAG="$$"
 BIN_DIR="$REPO_ROOT/.build/debug"
 BIN_MSG="$BIN_DIR/reel-msg"
 BIN_HOST="$BIN_DIR/TestWindowHost"
-read -r -a BINS <<< "${PERF_BINS:-$BIN_DIR/Reel $BIN_DIR/ReelNext}"
+read -r -a BINS <<< "${PERF_BINS:-${BIN_TRUNK:-/tmp/reel-trunk/.build/debug/Reel} $BIN_DIR/Reel}"
 BLOCKS="${PERF_BLOCKS:-4}"
 PER_BLOCK="${PERF_PER_BLOCK:-5}"
 
@@ -35,7 +35,8 @@ SOCK="$NS/reel.sock"
 CFG="$NS/config"
 STATE="$NS/state"
 REEL_LOG="$NS/reel.log"
-SAMPLES="$NS/samples"
+OUT="${LANE_OUT:-$NS}"
+SAMPLES="$OUT/samples"
 TEST_REEL_PID=""
 BIN_REEL="${BINS[0]}"
 # Global, so the switches alternate across blocks too: a block never starts by switching past the last Space.
@@ -43,6 +44,11 @@ DIRECTION=right
 
 cleanup() {
     quit_reel
+    if [ "$OUT" != "$NS" ] && [ "$DRY" != 1 ]; then
+        mkdir -p "$OUT"
+        cp "$REEL_LOG" "$OUT/reel.log" 2>/dev/null || true
+        cp "${HOST_OUT[MAIN]:-}" "$OUT/host.log" 2>/dev/null || true
+    fi
     host_quit MAIN
     if [ "${SMOKE_KEEP_NS:-0}" = 1 ]; then warn "kept $NS"; else rm -rf "$NS"; fi
 }
@@ -50,7 +56,7 @@ trap cleanup EXIT INT TERM
 
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 
-# The active group's Space: `space` from ReelNext, the fingerprint from trunk.
+# The active group's Space: `space` from head Reel, the fingerprint from trunk.
 space_id() { reel_msg get-layout | jq -c "$AG | (.space // .currentSpaceFingerprint)"; }
 
 switch_space() {  # left|right
@@ -69,6 +75,7 @@ setup_switch() {  # left|right
 launch_reel() {  # <binary>
     BIN_REEL=$1
     write_test_config "$CFG" 16
+    if [ "$1" = "${BINS[0]}" ]; then cp "$SCRIPT_DIR/trunk-config.toml" "$CFG/config.toml"; fi
     if [ "$DRY" = 1 ]; then dry_echo "launch $(basename "$1") sandboxed in $NS"; return 0; fi
     REEL_SOCKET_PATH="$SOCK" REEL_CONFIG_DIR="$CFG" REEL_STATE_DIR="$STATE" REEL_MANAGE_ONLY_PIDS="${HOST_PID[MAIN]}" \
         "$1" >> "$REEL_LOG" 2>&1 &
@@ -87,6 +94,7 @@ quit_reel() {
 measure() {  # <binary> <count>
     local bin=$1 count=$2 before t0 t1
     launch_reel "$bin"
+    activate_process "${HOST_PID[MAIN]}"
     waitForSettle 10
     for _ in $(seq 1 "$count"); do
         before="$(space_id)"
@@ -95,11 +103,13 @@ measure() {  # <binary> <count>
         poll_until 5 "[ \"\$(space_id)\" != '$before' ]" || fail "$(basename "$bin") never left Space $before"
         waitForSettle 10
         t1=$(now_ms)
-        printf '%s %d\n' "$(basename "$bin")" $((t1 - t0)) >> "$SAMPLES"
+        printf '%s %d\n' "$(side "$bin")" $((t1 - t0)) >> "$SAMPLES"
         if [ "$DIRECTION" = right ]; then DIRECTION=left; else DIRECTION=right; fi
     done
     quit_reel
 }
+
+side() { if [ "$1" = "${BINS[0]}" ]; then echo trunk; else echo head; fi; }
 
 percentile() {  # <name> <p>
     grep "^$1 " "$SAMPLES" | awk '{print $2}' | sort -n | awk -v p="$2" '{v[NR]=$1} END {
@@ -112,7 +122,7 @@ main() {
     if [ "$DRY" != 1 ] && { pgrep -x Reel >/dev/null || pgrep -x ReelNext >/dev/null; }; then
         fail "stop the running Reel or ReelNext first"
     fi
-    mkdir -p "$NS" "$CFG" "$STATE"
+    mkdir -p "$NS" "$CFG" "$STATE" "$OUT"
     : > "$SAMPLES"
     write_fixtures
     host_start MAIN
@@ -123,18 +133,20 @@ main() {
     for _ in $(seq 1 "$BLOCKS"); do
         for bin in "${BINS[@]}"; do measure "$bin" "$PER_BLOCK"; done
     done
-    section "space switch to settled strip (ms)"
-    local trunk head
-    trunk="$(basename "${BINS[0]}")"
-    head="$(basename "${BINS[${#BINS[@]}-1]}")"
-    for bin in "${BINS[@]}"; do
-        local name; name="$(basename "$bin")"
-        info "$name: n=$(grep -c "^$name " "$SAMPLES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
-    done
-    if [ "$DRY" = 1 ]; then dry_note "rule: $head p95 <= $trunk p95 + 50 ms"; return 0; fi
-    local limit; limit=$(( $(percentile "$trunk" 95) + 50 ))
-    [ "$(percentile "$head" 95)" -le "$limit" ] || fail "$head p95 above $trunk p95 + 50 ms ($limit)"
-    ok "$head p95 within $trunk p95 + 50 ms"
+    report
 }
 
-main "$@"
+# Samples are tagged by side(), not by binary name: trunk and head are both called Reel since the cutover.
+report() {
+    section "space switch to settled strip (ms)"
+    local name
+    for name in trunk head; do
+        info "$name: n=$(grep -c "^$name " "$SAMPLES") p50=$(percentile "$name" 50) p95=$(percentile "$name" 95)"
+    done
+    if [ "$DRY" = 1 ]; then dry_note "rule: head p95 <= trunk p95 + 50 ms"; return 0; fi
+    local limit; limit=$(( $(percentile trunk 95) + 50 ))
+    [ "$(percentile head 95)" -le "$limit" ] || fail "head p95 above trunk p95 + 50 ms ($limit)"
+    ok "head p95 within trunk p95 + 50 ms"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
