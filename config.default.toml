@@ -1,1 +1,67 @@
-Sources/Engine/config.default.toml
+# Reel configuration
+# Reel creates this file on first launch and never overwrites it. Edit it, then choose
+# Reload Config in the menu bar. One unknown key or invalid value rejects the whole file:
+# the menu bar shows the error and Reel keeps the last good config (defaults at startup).
+# Start at Login lives in the menu bar, not here.
+
+[layout]
+gap = 8                              # points between columns and around the strip
+default_width = 0.5                  # proportion of the screen for a window with no width of its own
+width_presets = [0.33, 0.5, 0.67]    # proportions that cycle_width steps through
+snap = ["middle"]                    # where a focused column lands: any of "left", "middle", "right"
+
+# Insets for external status bars (e.g. SketchyBar)
+[layout.struts]
+top = 0
+bottom = 0
+left = 0
+right = 0
+
+[animation]
+enabled = true
+stiffness = 800                      # scroll spring stiffness
+damping_ratio = 1                    # 1 = no overshoot
+bounce_distance = 40                 # how far the strip stretches past its ends
+bounce_damping_ratio = 0.6
+
+[keys]
+# Modifiers: alt (opt/option), ctrl (control), shift, cmd (command), hyper (ctrl+shift+cmd+alt).
+# Alt+letter also types special characters (Alt-H = ˙); rebind if that gets in the way.
+focus_left = "alt-h"
+focus_right = "alt-l"
+# focus_up / focus_down move to the nearest strip above / below, for displays that
+# do not share a strip (stacked, or "Displays have separate Spaces" on).
+focus_up = "alt-k"
+focus_down = "alt-j"
+move_left = "alt-shift-h"
+move_right = "alt-shift-l"
+cycle_width = "alt-r"
+toggle_full_width = "alt-f"
+toggle_floating = "alt-space"
+close_window = "alt-w"
+
+[gesture]
+modifier = "fn"                      # hold it and scroll sideways to pan: fn, ctrl, alt or cmd
+snap = true                          # false lets a swipe stop anywhere instead of on a column
+
+# Focus indicator for the active window
+[indicator]
+style = "ring"                       # "none", "ring", "raise" or "flash"
+color = "auto"                       # "auto" (system accent) or "#RRGGBB" / "#RGB"
+width = 3                            # ring border width in points
+corner_radius = 10                   # ring corner radius in points
+raise_height = 20                    # points unfocused windows shrink (raise style)
+
+# Window rules float matching windows. All fields in one rule must match; rules apply
+# when a window first appears (or gets its first title), not on later title changes.
+# [[rules]]
+# bundle_id = "us.zoom.xos"
+# floating = true
+
+# [[rules]]
+# bundle_id_regex = "com\\.apple\\.systempreferences"
+# floating = true
+
+# [[rules]]
+# title_regex = "^Preferences"
+# floating = true
