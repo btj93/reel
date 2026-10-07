@@ -5976,11 +5976,11 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
             h.advance(EngineConfig.focusDebounce + margin)
             let width = h.world.groups[1]!.strip.columns[1].width
             if order == "hide first" {
-                h.send(.windowsHidden([TileID(2)]))
+                h.send(.windowsOrderedOut([TileID(2)]))
                 h.send(.windowAdded(window(4, app: 200), frontmost: true), advance: 0.3)
             } else {
                 h.send(.windowAdded(window(4, app: 200), frontmost: true), advance: 0.3)
-                h.send(.windowsHidden([TileID(2)]))
+                h.send(.windowsOrderedOut([TileID(2)]))
             }
             h.advance(EngineConfig.focusDebounce + margin)
             check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(1)], [TileID(4)], [TileID(3)]], "\(order): the new tab takes the old tab's column")
@@ -5989,11 +5989,11 @@ final class LateTitleProbeWindow: AXWindow, @unchecked Sendable {
             check(h.world.groups[1]!.hidden[TileID(2)] != nil, "\(order): the old tab stays known for its return")
             // And back to the first tab.
             if order == "hide first" {
-                h.send(.windowsHidden([TileID(4)]))
+                h.send(.windowsOrderedOut([TileID(4)]))
                 h.send(.windowAdded(window(2, app: 200), frontmost: true), advance: 0.3)
             } else {
                 h.send(.windowAdded(window(2, app: 200), frontmost: true), advance: 0.3)
-                h.send(.windowsHidden([TileID(4)]))
+                h.send(.windowsOrderedOut([TileID(4)]))
             }
             h.advance(EngineConfig.focusDebounce + margin)
             check(h.world.groups[1]!.strip.columns.map(\.tiles) == [[TileID(1)], [TileID(2)], [TileID(3)]], "\(order): switching back restores the first tab in the same column")

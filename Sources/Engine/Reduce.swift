@@ -326,7 +326,7 @@ extension World {
         if group.windows[window.id] != nil { refreshIfSameOwner(window, &pass); return false }
         guard !groups.values.contains(where: { $0.windows[window.id] != nil }) else { return false }
         if let left = group.recentHide, left.pid == window.pid, left.tile != window.id,
-           pass.now - left.time < RecentTile.tabSwapWindow, let place = group.hidden[left.tile], let width = place.width,
+           pass.now - left.time < RecentTile.tabSwapWindow, let place = group.hidden[left.tile], place.tab == true, let width = place.width,
            !shouldFloat(window, config: config) {
             // A native tab switch: the old tab was ordered out first. The new one takes its column.
             let window = group.hidden[window.id].map { window.adopting($0.window) } ?? window.adoptingTitle(window.ruleTitle ?? window.title)
@@ -1092,7 +1092,7 @@ extension World {
                                     frame: writes.first { $0.tile == tile }?.frame, tab: release ? nil : true)
             groups[id]!.hidden[tile] = hidden
             guard let column, tiles.filter({ group.windows[$0]?.pid == window.pid }).count == 1 else { continue }
-            if let added = group.recentAdd, added.pid == window.pid, added.tile != tile, pass.now - added.time < RecentTile.tabSwapWindow,
+            if !release, let added = group.recentAdd, added.pid == window.pid, added.tile != tile, pass.now - added.time < RecentTile.tabSwapWindow,
                let from = groups[id]!.strip.columnIndex(of: added.tile), groups[id]!.strip.columns[from].tiles == [added.tile] {
                 // A native tab switch: the new tab was adopted first. It moves into the old tab's column, and the
                 // old tab, which shares its frame, is not moved.
@@ -1109,7 +1109,7 @@ extension World {
                     focus(FocusIntent(tile: added.tile, pid: window.pid, source: .adoption, requestsOSFocus: false), group: id, &pass)
                 }
             } else {
-                groups[id]!.recentHide = RecentTile(tile: tile, pid: window.pid, time: pass.now, focused: focused)
+                groups[id]!.recentHide = release ? nil : RecentTile(tile: tile, pid: window.pid, time: pass.now, focused: focused)
             }
         }
         write(writes, group: id, &pass)
