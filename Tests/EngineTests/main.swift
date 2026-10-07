@@ -1084,25 +1084,19 @@ final class FocusObservationBox: @unchecked Sendable {
             }
         }
     }
-    section("R7 focus: rejected echoes and missing tiles cannot cancel a pending later app activation") {
+    section("R7 focus: rejected AX echoes preserve timers, newer Dock activations cancel them") {
         var h = Harness()
         h.census(4, [window(321, app: 9001), window(104, app: 1245)])
-        h.advance(EngineConfig.focusDebounce + margin)
         h.send(.command(.focus(TileID(321)), .keyboard))
         h.send(.focus(FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation)), advance: 0.1)
-        let pending = h.world.timers.keys
-        check(!pending.isEmpty, "Fork's activation is pending")
-        for intent in [FocusIntent(tile: TileID(321), pid: 9001, source: .axFocus),
-                       FocusIntent(tile: nil, pid: 1245, source: .appActivation),
-                       FocusIntent(tile: TileID(104), pid: 1245, source: .appActivation, observedSpace: .skylight(5)),
-                       FocusIntent(tile: TileID(999), pid: 1245, source: .appActivation)] {
-            h.send(.focus(intent), advance: 0.01)
-            check(Set(h.world.timers.keys) == Set(pending), "a rejected report leaves Fork's pending timer intact")
-        }
+        let pending = Set(h.world.timers.keys)
+        h.send(.focus(FocusIntent(tile: TileID(321), pid: 9001, source: .axFocus)))
+        check(Set(h.world.timers.keys) == pending, "a rejected AX echo leaves Fork's pending scroll intact")
         h.send(.focus(FocusIntent(tile: nil, pid: 1245, source: .appActivation)))
+        check(h.world.timers.isEmpty, "a newer Dock click revokes the previous scroll")
         check(h.logged("focus dropped source=appActivation tile=nil pid=1245 reason=missing-tile"), "a tile-less report is diagnosed without guessing its window")
         h.advance(EngineConfig.focusDebounce)
-        check(h.active == TileID(104), "the pending Fork activation still commits")
+        check(h.active == TileID(321), "a cancelled timer cannot change the strip decision")
     }
     section("an unvisited Space starts at its final viewport instead of animating from offset zero") {
         var h = Harness(animate: true)

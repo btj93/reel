@@ -136,6 +136,7 @@ extension World {
     fileprivate mutating func onFocusObserved(_ intent: FocusIntent, group id: UInt32, _ pass: inout Pass) {
         let intent = FocusIntent(tile: intent.tile, pid: intent.pid, source: intent.source, observedSpace: intent.observedSpace,
                                  requestsOSFocus: intent.requestsOSFocus && intent.source != .appActivation)
+        if intent.source == .appActivation { cancelTimers(group: id, &pass, focusOnly: true) }
         let group = groups[id]!
         guard group.phase.acceptsFocus || intent.source == .appActivation else {
             return pass.effects.append(.log(intent.droppedLog(reason: "space-changing")))
