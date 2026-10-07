@@ -31,21 +31,27 @@ func runRuntimeWriteTests() {
             let second = FakeAXWindow(windowID: 2, pid: 99001, frame: .zero)
             let third = FakeAXWindow(windowID: 3, pid: 99001, frame: .zero)
             let worker = AppWorker(app: app, windows: [1: first, 2: second, 3: third], clock: ScopeClock(), send: { _, _ in })
-            let scope = EventScope(topologyRevision: 1, group: 1, spaceEpoch: 1)
-            let replacement = CGRect(x: 300, y: 30, width: 500, height: 600)
+            let display = Display(id: 1, frame: CGRect(x: 0, y: 0, width: 1000, height: 830), area: CGRect(x: 0, y: 30, width: 1000, height: 800))
+            var world = World(topology: Topology(revision: 1, displays: [display], separateSpaces: true, primaryScreenHeight: 830),
+                              config: EngineConfig(animate: false))
+            let observed = (1...3).map { ObservedWindow(id: TileID(UInt32($0)), pid: 99001, bundleID: nil) }
+            _ = reduce(&world, Event(scope: world.scope(for: 1)!, kind: .spaceChanged(key: .skylight(1), epoch: 1, windows: observed)), now: 1)
+            let initial = world.frames
+            _ = reduce(&world, Event(scope: world.scope(for: 1)!, kind: .configChanged(EngineConfig(gap: 30, animate: false))), now: 2)
+            let replacement = world.frames[TileID(2)]!
             first.onFrameWrite = {
                 worker.cancelWrite(TileID(2))
                 if requeue {
-                    worker.write(FrameRequest(tile: TileID(2), pid: 99001, frame: AXRect(replacement), revision: 2, scope: scope))
+                    worker.write(replacement)
                 }
             }
             for id: UInt32 in [1, 2, 3] {
-                worker.write(FrameRequest(tile: TileID(id), pid: 99001, frame: AXRect(tiled), revision: 1, scope: scope))
+                worker.write(initial[TileID(id)]!)
             }
             app.drain()
             assertEq(first.frameWriteCount, 1, "the already-started write finishes")
             assertEq(second.frameWriteCount, requeue ? 1 : 0, "the cancelled request never reaches AX")
-            assertEq(second.currentFrame, requeue ? replacement : .zero, "only a fresh request can write the cancelled window")
+            assertEq(second.currentFrame, requeue ? replacement.frame.rect : .zero, "only a fresh request can write the cancelled window")
             assertEq(third.frameWriteCount, 1, "cancelling one window preserves its unrelated sibling")
         }
     }
