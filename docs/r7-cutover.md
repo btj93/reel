@@ -19,7 +19,7 @@ Inventoried trunk before deletion at 76af894. Every item is kept, changed or dro
 | Separate-Spaces warning and Mission Control deep link | Kept | Shared strips still require separate Spaces off |
 | Start at Login menu | Kept | SMAppService state is the source of truth; requires the bundle; approval opens Login Items |
 | Accessibility onboarding menu | Kept | A waiting status item, Settings link and Quit are available before the grant |
-| Menu icon and per-action shortcut labels | Changed | Text status (`Reel`, paused/error state); actions remain without shortcut labels |
+| Menu icon and per-action shortcut labels | Changed | Original column icon kept (dimmed when paused, ⚠︎ beside it on a config error); actions remain without shortcut labels |
 | `layout.gap`, `layout.snap` | Kept | Same objectives; strict schema rejects unknowns |
 | `layout.default_width.proportion`, `layout.default_width.fixed`, `layout.width_presets` | Changed | `layout.default_width` is a proportion scalar; presets remain proportions. Old table/fixed-width forms are not imported |
 | `layout.struts.left/right/top/bottom` | Kept | Per-display CG working insets before topology; clamped to a positive working area. Startup applies them before observer discovery without committing an empty census; reloads retain full topology handling |
