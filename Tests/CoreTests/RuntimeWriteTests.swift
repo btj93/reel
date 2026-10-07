@@ -1,8 +1,8 @@
 import Core
 import CoreGraphics
 import Engine
-import Runtime
 import Platform
+import Runtime
 
 final class QueuedWriteApp: AXApp, @unchecked Sendable {
     var actions: [@Sendable () -> Void] = []
@@ -16,7 +16,6 @@ final class QueuedWriteApp: AXApp, @unchecked Sendable {
     }
 }
 
-// ReelNext's per-window frame write (`SizeCache`), driven against `FakeAXWindow`.
 @MainActor
 func runRuntimeWriteTests() {
     print()

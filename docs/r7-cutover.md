@@ -89,3 +89,17 @@ Failed frame writes retry after 0.1, 0.5 and 2 seconds, then log one `frame give
 The reorder row scales to keep end destinations visible. Menu recovery uses the same all-group size-cache reset as IPC. Provisional classification retries on focus, move/resize and health checks, with scope/activation guards. Unmatched disk snapshots retain at most 64 entries in loaded order (not an LRU).
 
 Engine/Runtime probes and dry lanes cover these changes; real AX behavior on other Spaces, the ring and ScreenCaptureKit rendering still require approved lane-host checks.
+
+## Audit 2 fixes
+
+Dock and Cmd+Tab activations, including cross-Space clicks and hidden-app returns, now select and scroll the strip without asking macOS to focus the window again. Frontmost-app adoption also only selects and scrolls. Space arrival requests OS focus only when a successful frontmost read names a different managed window. A missing or unmanaged read leaves OS focus alone. Keyboard, IPC and pointer focus still request OS focus; AX focus already raises, so Reel no longer queues a second raise. The raise indicator's layout behavior is unchanged.
+
+A newer Dock activation cancels the group's pending focus timers even before its focused-window read arrives. This prevents an older app's delayed scroll from winning while the new app is still answering AX. Executed keyboard/IPC/pointer focus tickets still acknowledge their own activation echoes. Observed activations create no such ticket.
+
+App frame batches now claim each window's pending request just before writing it. Cancelling a sibling during a slow write removes that sibling from the pending batch. An AX write that has already started cannot be recalled.
+
+Native-tab column swaps require an ordered-out notification. Minimize and Cmd+H keep their release writes and never mark the hidden window as a background tab, even beside a recent same-app window creation. Both native-tab notification orders still keep the tab's column and width.
+
+Deminiaturization still refreshes AX facts, but only a currently visible window can rejoin the current strip. The existing Loop membership and observed-versus-settled Space checks then apply. An off-Space restore leaves its saved strip intact and emits no frame or focus work, including when SkyLight membership is unavailable.
+
+These fixes have headless reducer and fake-AX regressions, including cancelled-batch interleaving and killed mutants. They do not establish a live fix for the reported all-Spaces rendering or kitty/Fork Dock race. On an approved lane host, repeat slow native-tab Space switches, kitty then Fork Dock clicks 0.4 seconds apart, hidden-app returns, minimize/Cmd+H beside Cmd+N, and background deminiaturization on another Space. Compare visible frames, Space membership and foreground app. Also verify the raise indicator and keyboard/IPC/pointer focus. No live probe ran during this fix.

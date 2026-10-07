@@ -5832,6 +5832,16 @@ final class CensusFixture: CensusObserver {
             check(!h.effects.contains { if case .focus = $0 { true } else { false } }, "Space arrival emits no speculative focus")
         }
     }
+    section("audit2 focus: only a different managed frontmost window permits OS restore") {
+        var h = Harness(displays: [display(), display(2, x: 1000)])
+        h.census(1, [window(10)])
+        h.census(1, [window(30, x: 1100)], group: 2)
+        h.send(.command(.focus(TileID(10)), .keyboard))
+        h.send(.spaceChanged(key: .skylight(2), epoch: h.world.groups[1]!.epoch + 1, windows: [window(20)], frontmost: TileID(30)))
+        check(h.active == TileID(20), "the leading group restores its own strip selection")
+        check(h.effects.contains { if case .focus(TileID(20), .restore) = $0 { true } else { false } }, "a successful different managed frontmost read allows OS restore")
+        check(h.world.groups[1]!.focus.decision?.requestsOSFocus == true, "restore records the permitted OS request")
+    }
     section("audit2 focus: explicit actions focus once and raise style still lays out") {
         var h = Harness()
         h.send(.configChanged(EngineConfig(animate: false, raiseHeight: 20)))
