@@ -3455,6 +3455,8 @@ final class CensusFixture: CensusObserver {
     }
     section("R7: packaged defaults, struts and add-time regex rules") {
         check(!defaultConfigSource().isEmpty, "the shipped default config resource exists")
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../config.default.toml")
+        check((try? String(contentsOf: root, encoding: .utf8)) == defaultConfigSource(), "the repository's config.default.toml matches the shipped template")
         guard let config = try? AppConfig.parse(defaultConfigSource()) else { return check(false, "bundled defaults parse") }
         check(config.engine.gap == EngineConfig().gap && config.engine.widthPresets == EngineConfig().widthPresets
               && config.engine.bounceDistance == EngineConfig().bounceDistance && config.keys == AppConfig().keys, "bundled defaults match code defaults")

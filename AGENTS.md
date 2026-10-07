@@ -64,4 +64,4 @@ IPC uses the per-user Reel Unix socket. Commands include focus and move actions,
 
 `Tests/Smoke/smoke.sh` stops/restores a live instance, so it is lane-host-only. `pointer-lanes.sh` covers raw input and reorder sessions. The R7 lane entrypoint is `cutover-lanes.sh`, with lane numbers as arguments. First-run lanes need separate macOS 27 and 15 hosts. Login uses an isolated lane account and a reboot checkpoint. `cutover-perf.sh` measures interleaved focus/Space latency and five idle minutes per side. `BIN_TRUNK` must point to a distinct trunk build. The committed old-schema fixture is for trunk comparison and schema-error checks only. The config writers emit only the new schema.
 
-Read `docs/r7-cutover.md` for feature changes, config migration and the operator's remaining live checks. Never claim a live or performance pass from a dry run.
+The README covers config migration from the old schema. Never claim a live or performance pass from a dry run.

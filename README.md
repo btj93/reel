@@ -45,7 +45,7 @@ Reorder thumbnails use ScreenCaptureKit. Screen Recording permission may be need
 
 ## Config
 
-Reel reads `~/.config/reel/config.toml` and creates it on first launch if absent. Edit it, then choose Reload Config. See [the shipped template](Sources/Engine/config.default.toml).
+Reel reads `~/.config/reel/config.toml` and creates it on first launch if absent. Edit it, then choose Reload Config. See [the commented template](config.default.toml).
 
 ```toml
 [layout]
@@ -84,7 +84,7 @@ floating = true
 
 The executable is still `Reel`, the bundle ID is still `dev.reel.Reel`, and the CLI and login-item identity are unchanged. No TCC reset is built into this update, but an ad-hoc signed build changes its code hash, so expect to grant Accessibility again: if Reel keeps showing a `?` in the menu bar, remove it from the Accessibility list with − and add `/Applications/Reel.app` back.
 
-The config schema is new. Your existing file is read at the same path and is never overwritten. An old-schema file produces a menu-bar error naming the first unknown key, and startup continues on defaults. Replace its contents using the new template. See [the migration inventory](docs/r7-cutover.md) for key mappings and removed settings.
+The config schema is new. Your existing file is read at the same path and is never overwritten. An old-schema file produces a menu-bar error naming the first unknown key, and startup continues on defaults. Replace its contents using the new template ([config.default.toml](config.default.toml)). Renamed: `[keybindings]` → `[keys]`, `[focus_indicator]` → `[indicator]`, `app_id` → `bundle_id`, `app_id_regex` → `bundle_id_regex`, `animation_enabled` / `scroll_stiffness` / `scroll_damping_ratio` → `[animation]` `enabled` / `stiffness` / `damping_ratio`. `default_width` takes a proportion only. Removed: `start_at_login` (use the menu), `position_memory`, `saved_position_limit`, `[[position_memory_rules]]`, `cursor.*` and the reorder thumbnail keys.
 
 Old saved layouts are not imported. The new runtime writes `~/.local/state/reel/next-spaces.json`; it does not delete the old state files. Persistence is always on. Clear Saved Positions removes the new saved book.
 
