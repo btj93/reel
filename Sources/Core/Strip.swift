@@ -32,7 +32,6 @@ public struct Strip: Sendable {
     public var groupArea: GroupWorkingArea
 
     /// Backward-compatible read-only alias: the bounding rect of all regions.
-    /// GET-ONLY. Writes must go through `groupArea = …` or, in `StripController`,
     /// through `updateGroupArea(_:)`. A setter here would silently collapse
     /// multi-region groups to a singleton on every write, which is unsafe.
     public var workingArea: CGRect { groupArea.totalSpan }
@@ -261,28 +260,30 @@ public struct Strip: Sendable {
         return createScrollAnimation(to: targetOffset, at: time)
     }
 
+    /// The underdamped spring (ratio < 1) of a bounce at the strip's edge, for a visible bounce-back.
+    public var rubberBandParams: SpringParams { SpringParams(dampingRatio: bounceDampingRatio, stiffness: 600, epsilon: 0.5) }
+
+    /// The outward speed that stretches a bounce about `bounceDistance` past the edge.
+    public var rubberBandKick: Double { bounceDistance * 15 }
+
     /// Create a rubber-band bounce at the strip edge.
     /// Overshoots by ~40px in the given direction, then springs back to current position.
     /// direction: -1 for left edge, +1 for right edge.
     @discardableResult
     public mutating func createRubberBandAnimation(direction: Double, kickVelocity: Double? = nil, at time: Double) -> SpringAnimation {
         let currentPos = viewOffset.current(at: time)
-        let overshoot = bounceDistance * direction  // how far to stretch past the edge
-
-        // Use underdamped spring (ratio < 1) for a visible bounce-back
-        let bounceParams = SpringParams(dampingRatio: bounceDampingRatio, stiffness: 600, epsilon: 0.5)
 
         // Animate: current → overshoot position, but target is the canonical snap (so it
         // bounces back to the right place even if currentPos has drifted off the snap from
         // an earlier interrupted animation — rapid keypresses at the boundary used to lock
         // in the mid-bounce value because `to` was just `currentPos`).
-        let velocity = kickVelocity ?? overshoot * 15
+        let velocity = kickVelocity ?? direction * rubberBandKick
         let anim = SpringAnimation(
             from: currentPos,
             to: snapTargetForActive(at: time),
             initialVelocity: velocity,          // kick velocity to overshoot
             startTime: time,
-            params: bounceParams
+            params: rubberBandParams
         )
 
         viewOffset = .animation(anim)
@@ -761,7 +762,21 @@ public struct Strip: Sendable {
         columns[i].width = widthPresets[nextPresetIndex]
         columns[i].presetIndex = nextPresetIndex
         columns[i].isFullWidth = false
+        animateWidth(column: i, to: newWidth, at: time, params: params)
+    }
 
+    /// Set a column's logical width, resolved against the display region the
+    /// column sits on. Clears preset and full-width state.
+    public mutating func setWidth(_ width: ColumnWidth, column i: Int, at time: Double, params: SpringParams?) {
+        guard columns.indices.contains(i) else { return }
+        let region = regionForColumn(i, at: time)
+        columns[i].width = width
+        columns[i].presetIndex = nil
+        columns[i].isFullWidth = false
+        animateWidth(column: i, to: width.resolve(workingAreaWidth: Double(region.rect.width), gap: gap), at: time, params: params)
+    }
+
+    private mutating func animateWidth(column i: Int, to newWidth: Double, at time: Double, params: SpringParams?) {
         if let params = params {
             let oldWidth = columnData[i].currentWidth(at: time)
             if let existing = columnData[i].widthAnimation, !existing.isDone(at: time) {

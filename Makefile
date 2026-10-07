@@ -23,11 +23,13 @@ smoke:
 smoke-check:
 	bash -n Tests/Smoke/lib.sh
 	bash -n Tests/Smoke/smoke.sh
+	for f in Tests/Smoke/pointer-lib.sh Tests/Smoke/pointer-lanes.sh Tests/Smoke/pointer-perf.sh Tests/Smoke/cutover-lanes.sh Tests/Smoke/cutover-perf.sh Tests/Smoke/space-perf.sh Tests/Smoke/display-perf.sh; do bash -n $$f || exit 1; done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -x Tests/Smoke/smoke.sh Tests/Smoke/lib.sh; \
+		shellcheck -x Tests/Smoke/smoke.sh Tests/Smoke/lib.sh Tests/Smoke/pointer-lib.sh Tests/Smoke/pointer-lanes.sh Tests/Smoke/pointer-perf.sh Tests/Smoke/cutover-lanes.sh Tests/Smoke/cutover-perf.sh Tests/Smoke/space-perf.sh Tests/Smoke/display-perf.sh; \
 	else \
 		echo "shellcheck not installed — skipping lint (bash -n passed)"; \
 	fi
+	bash Tests/Smoke/harness-check.sh
 	REEL_E2E_CONFIRM=1 SMOKE_DRY_RUN=1 bash Tests/Smoke/smoke.sh
 	swift build
 

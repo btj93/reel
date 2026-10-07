@@ -11,6 +11,7 @@ import Core
 // preservation. Reuses the module-global helpers (check/assertEq/assertClose/
 // section/makeStrip) defined in main.swift.
 
+@MainActor
 func runL1AuditGapTests() {
     print()
     print("L1 Audit-Gap Tests")

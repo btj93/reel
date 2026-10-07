@@ -18,6 +18,7 @@ public struct PillItem: Sendable {
     }
 }
 
+@MainActor
 public class OverlayWindow {
     private var panel: NSPanel?
     private var overlayView: OverlayView?
@@ -25,6 +26,8 @@ public class OverlayWindow {
         didSet { updateDisplay() }
     }
     public var accentColor: NSColor = .systemBlue
+
+    public init() {}
 
     public func ensurePanel(for screen: NSScreen) {
         let targetFrame = NSRect(origin: .zero, size: screen.frame.size)
@@ -78,6 +81,12 @@ public class OverlayWindow {
     public func pillIndexAt(point: NSPoint) -> Int? {
         guard case .menu(let pills, let anchorFrame, _) = mode else { return nil }
         return overlayView?.pillIndexAt(screenPoint: point, pills: pills, anchorFrame: anchorFrame)
+    }
+
+    /// Each pill's frame in AppKit global coordinates, so a lane can aim the cursor at one.
+    public func pillFrames() -> [CGRect] {
+        guard case .menu(let pills, let anchorFrame, _) = mode, let view = overlayView, let window = panel else { return [] }
+        return view.pillRects(pills: pills, anchorFrame: anchorFrame).map { window.convertToScreen($0) }
     }
 
     public func highlightPill(at index: Int?) {
@@ -134,17 +143,8 @@ class OverlayView: NSView {
     private func drawPillBar(ctx: CGContext, pills: [PillItem], anchorFrame: CGRect, selectedIndex: Int?) {
         guard !pills.isEmpty else { return }
 
-        let localAnchor = anchorInViewLocal(anchorFrame)
-
-        let pillWidths = pills.map { estimatePillWidth($0.label) }
-        let totalPillWidth = pillWidths.reduce(0, +)
-            + CGFloat(max(0, pills.count - 1)) * pillSpacing
-        let containerWidth = totalPillWidth + containerPadding * 2
-        let containerHeight = pillHeight + containerPadding * 2
-
-        let containerX = localAnchor.midX - containerWidth / 2
-        let containerY = localAnchor.minY - 8 - containerHeight
-        let containerRect = CGRect(x: containerX, y: containerY, width: containerWidth, height: containerHeight)
+        let rects = pillRects(pills: pills, anchorFrame: anchorFrame)
+        let containerRect = rects.reduce(rects[0]) { $0.union($1) }.insetBy(dx: -containerPadding, dy: -containerPadding)
 
         let bgColor = NSColor(white: 0.12, alpha: 0.92)
         ctx.setFillColor(bgColor.cgColor)
@@ -152,12 +152,8 @@ class OverlayView: NSView {
         ctx.addPath(containerPath)
         ctx.fillPath()
 
-        var x = containerRect.minX + containerPadding
-        let pillY = containerRect.minY + containerPadding
-
         for (i, pill) in pills.enumerated() {
-            let w = pillWidths[i]
-            let pillRect = CGRect(x: x, y: pillY, width: w, height: pillHeight)
+            let pillRect = rects[i]
 
             let isSelected = selectedIndex == i
             let pillBg: NSColor
@@ -186,8 +182,6 @@ class OverlayView: NSView {
                 height: textSize.height
             )
             str.draw(in: textRect)
-
-            x += w + pillSpacing
         }
     }
 
@@ -201,26 +195,22 @@ class OverlayView: NSView {
 
     func pillIndexAt(screenPoint: NSPoint, pills: [PillItem], anchorFrame: CGRect) -> Int? {
         let localPoint = screenPointToViewLocal(screenPoint)
+        let rects = pillRects(pills: pills, anchorFrame: anchorFrame)
+        return rects.indices.first { pills[$0].isEnabled && rects[$0].contains(localPoint) }
+    }
+
+    /// Pill frames in view-local coordinates.
+    func pillRects(pills: [PillItem], anchorFrame: CGRect) -> [CGRect] {
         let localAnchor = anchorInViewLocal(anchorFrame)
         let pillWidths = pills.map { estimatePillWidth($0.label) }
-        let totalPillWidth = pillWidths.reduce(0, +)
-            + CGFloat(max(0, pills.count - 1)) * pillSpacing
+        let totalPillWidth = pillWidths.reduce(0, +) + CGFloat(max(0, pills.count - 1)) * pillSpacing
         let containerWidth = totalPillWidth + containerPadding * 2
         let containerHeight = pillHeight + containerPadding * 2
-        let containerX = localAnchor.midX - containerWidth / 2
-        let containerY = localAnchor.minY - 8 - containerHeight
-
-        var x = containerX + containerPadding
-        let pillY = containerY + containerPadding
-
-        for (i, _) in pills.enumerated() {
-            let w = pillWidths[i]
-            let pillRect = CGRect(x: x, y: pillY, width: w, height: pillHeight)
-            if pillRect.contains(localPoint) && pills[i].isEnabled {
-                return i
-            }
-            x += w + pillSpacing
+        var x = localAnchor.midX - containerWidth / 2 + containerPadding
+        let pillY = localAnchor.minY - 8 - containerHeight + containerPadding
+        return pillWidths.map { width in
+            defer { x += width + pillSpacing }
+            return CGRect(x: x, y: pillY, width: width, height: pillHeight)
         }
-        return nil
     }
 }
